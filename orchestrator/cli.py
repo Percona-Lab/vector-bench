@@ -52,7 +52,8 @@ from orchestrator.reference_build import (  # noqa: E402
 from orchestrator.manifest import (Manifest, SelectionChanged,  # noqa: E402
                                    new_run_id, utcnow)
 from orchestrator import profile_overlay, select_builds  # noqa: E402
-from orchestrator.estimate_grid import print_ann_grid  # noqa: E402
+from orchestrator.estimate_grid import (ann_grid_prints,  # noqa: E402
+                                        print_ann_grid)
 # The cost estimate lives in its own module; these are re-exported because
 # `webui/control.py` and `tests/test_config.py` import them from here and the
 # split must not be visible to either. Import them from orchestrator.estimate
@@ -633,9 +634,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     _print_excluded_builds(profile, engines, passes)
+    # The published estimate, then the per-build block that corrects it when
+    # the rendered grid differs (orchestrator/estimate_grid.py).
+    grid_prints = ann_grid_prints(profile, engines, datasets, passes, phases)
     print_load_estimate(profile, engines, datasets, passes, phases,
-                        client_cpus=client_cpus)
-    print_ann_grid(profile, engines, datasets, passes, phases)
+                        client_cpus=client_cpus, axis_hint=not grid_prints)
+    if grid_prints:
+        print_ann_grid(profile, engines, datasets, passes, phases,
+                       estimate_load_hours(profile, engines, datasets,
+                                           passes, phases))
 
     if _check_free_disk(paths, engines, datasets, passes) and not args.force:
         print("  Re-run with --force to start anyway.", file=sys.stderr)

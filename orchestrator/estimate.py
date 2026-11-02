@@ -1359,7 +1359,12 @@ def client_cpu_line(profile: Dict[str, Any],
 def print_load_estimate(profile: Dict[str, Any], engines: List[str],
                          datasets: List[str], passes: List[str],
                          phases: List[str],
-                         client_cpus: Optional[Dict[str, int]] = None) -> None:
+                         client_cpus: Optional[Dict[str, int]] = None,
+                         axis_hint: bool = True) -> None:
+    # `axis_hint` False when `estimate_grid.print_run_estimate` will print
+    # the per-build block beneath: there the multiplier may be ef_construction
+    # or quantization rather than M, and that block names the axis per engine
+    # instead of the "Reduce ann.m_values" advice below.
     # Before the early return below: a short run still drives its largest
     # client count from whatever the client cpuset is.
     line = client_cpu_line(profile, client_cpus or {})
@@ -1401,7 +1406,7 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
               f"smoke run supplies the figure; until then the ingest\n    "
               f"cost of this plan is higher than the number above, by an "
               f"amount nothing here knows.")
-    if estimate["long_run"]:
+    if estimate["long_run"] and axis_hint:
         print(f"  ! This is a long run. Each M value costs a full reload of every "
               f"dataset,\n    and MHNSW/VIDX build incrementally at a few hundred "
               f"rows/s. Reduce\n    ann.m_values or the dataset list to cut it "
