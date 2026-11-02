@@ -217,7 +217,13 @@ they stay comparable with each other; `run` now prints a second block beneath
 them, from `orchestrator/estimate_grid.py`, that counts what the render asks
 for and prices each load by its M where the load builds the graph
 (MariaDB, AliSQL, Percona Server: `(M/16)^1.1` of the M=16 rate, from MariaDB's
-glove-100 rates at M=8 and M=32). Plan against that block when it appears.
+glove-100 rates at M=8 and M=32). When it appears it also says by how much
+the run time above is low and what to plan against instead, names the axis
+that multiplies each engine's builds (the headline's "Reduce ann.m_values"
+advice is withheld then, because the multiplier may be ef_construction or
+quantization), and lists what neither figure prices: the bulk index builds of
+the engines that build after the load, the recall/QPS sweep, and any engine
+with no measured ingest rate.
 
 ## 2a. Exploring the whole parameter space: the two-stage frontier
 
@@ -273,14 +279,20 @@ was skipped -- and per engine, over every point that used the vector index:
 * the **neighbouring M** below and above each of those, at the same
   ef_construction and quantization, so stage 2 can confirm the choice
   transfers. A kept M=4 or M=48 has one neighbour and an edge note: the
-  optimum may lie outside the explored grid;
+  optimum may lie outside the explored grid. Where the next M exists but the
+  engine cannot build it at that ef_construction (pgvector M=48 at 64), the
+  note says so instead. A neighbour stage 1 has no point for -- a failed
+  build, or one that fell back to a scan -- is **dropped**, with that reason:
+  there is nothing to confirm a transfer against, and a build that failed at
+  90,000 rows is hours lost at 990,000;
 * the target profile's **reference build**, always (`run` refuses a grid
-  without it);
-* and, because the overlay spells per-engine lists that `render_config`
-  multiplies out, any further build in that product, recorded as "grid
-  closure" rather than hidden.
+  without it).
 
-Everything else is pruned, with its reason.
+Everything else is pruned, with its reason. **The overlay names the kept
+builds exactly** (`ann_builds_by_engine`), so there is no closure: per-axis
+lists alone would be multiplied out by `render_config`, and on Percona Server
+three chosen builds -- M=12 at 64, 16 at 200, 32 at 400 -- would come back as
+nine, ~60 h of loads at 990,000 rows instead of ~20 h.
 
 ```bash
 ./run-benchmark.sh select-builds --from results/<stage-1 run id> \
@@ -288,13 +300,17 @@ Everything else is pruned, with its reason.
 ```
 
 It refuses to write an overlay whose rendered grid is not exactly the kept
-set, or one `run` would refuse.
+set, or one `run` would refuse, and refuses a stage 1 that swept more than one
+build mode or MariaDB storage engine (the selection cannot tell them apart).
 
 **Stage 2 -- re-measure at 990,000 rows.** The overlay is applied to
 `tuned-complete` (`orchestrator/profile_overlay.py`): it may set only the
-build-axis keys of `resources.extras`, merges the way a profile's `resources:`
-block always has, and is refused on the normalized pass, which ignores those
-keys by design.
+build-axis keys of `resources.extras`, each checked at load against the
+engine's legal range and enumeration; it merges the way a profile's
+`resources:` block always has; it must carry its `build_selection` block,
+whose `overlay_sha256` covers both the grid and the provenance, so neither can
+be edited without the other; and it is refused on the normalized pass, which
+ignores those keys by design.
 
 ```bash
 ./run-benchmark.sh run --profile tuned-complete --resource-pass tuned \

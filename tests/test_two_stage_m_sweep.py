@@ -267,18 +267,58 @@ class TestTheEstimateSeesTheGrid:
         assert rows["percona"]["hours"] > 2.5 * rows["percona"]["charged_hours"]
         assert rows["myvector"]["hours"] is None      # no rate: named, not 0
 
-    def test_the_block_is_printed_before_the_run(self, capsys):
-        from orchestrator.estimate_grid import print_ann_grid
+    def _printed(self, capsys, engines=("percona", "mariadb", "myvector")):
+        from orchestrator.estimate import (estimate_load_hours,
+                                           print_load_estimate)
+        from orchestrator.estimate_grid import ann_grid_prints, print_ann_grid
         profile = load_profile(EXPLORE)
-        print_ann_grid(profile, ["percona"], profile["datasets"], ["tuned"],
-                       ["ann"])
-        out = capsys.readouterr().out
-        assert "percona" in out and "21 build(s), largest M 48" in out
+        args = (profile, list(engines), profile["datasets"], ["tuned"],
+                ["ann"])
+        prints = ann_grid_prints(*args)
+        print_load_estimate(*args, axis_hint=not prints)
+        print_ann_grid(*args, estimate_load_hours(*args))
+        return capsys.readouterr().out
+
+    def test_the_block_names_the_axis_that_multiplies(self, capsys):
+        out = self._printed(capsys)
+        assert "21 build(s) = M 7 x efConstruction 3" in out
+        assert "Reduce\n    ann.m_values" not in out
+
+    def test_the_headline_is_corrected_where_it_is_low(self, capsys):
+        from orchestrator.estimate import estimate_load_hours
+        from orchestrator.estimate_grid import ann_grid_estimate
+        out = self._printed(capsys)
+        profile = load_profile(EXPLORE)
+        engines = ["percona", "mariadb", "myvector"]
+        head = estimate_load_hours(profile, engines, profile["datasets"],
+                                   ["tuned"], ["ann"])
+        extra = ann_grid_estimate(profile, engines, profile["datasets"],
+                                  ["tuned"], ["ann"])["extra_hours"]
+        assert f"low by at least ~{extra:.1f} h" in out
+        assert (f"plan against ~{head['typical_total_hours'] + extra:.1f} h "
+                f"typical") in out
+
+    def test_what_is_still_unpriced_is_named(self, capsys):
+        out = self._printed(capsys)
+        assert "bulk index builds of myvector" in out
+        assert "recall/QPS sweep" in out
+        assert "any ann load at all for myvector" in out
+
+    def test_the_published_block_is_unchanged_by_default(self, capsys):
+        """docs/07's sample block is `print_load_estimate` with its default
+        arguments; the advice is only withheld when cmd_run says the
+        per-build block follows."""
+        from orchestrator.estimate import print_load_estimate
+        profile = load_profile("main")
+        print_load_estimate(profile, ["mariadb"], profile["datasets"],
+                            ["normalized"], ["ann", "ops"])
+        assert "Reduce\n    ann.m_values" in capsys.readouterr().out
 
     def test_cmd_run_prints_it(self):
         source = open(os.path.join(VB_ROOT, "orchestrator", "cli.py")).read()
         run = source[source.index("def cmd_run"):]
         assert run.index("print_ann_grid(") < run.index("_check_free_disk(")
+        assert "axis_hint=not grid_prints" in run
 
     def test_memory_refusal_checks_m48_for_myvector(self):
         profile = load_profile(EXPLORE)
@@ -306,6 +346,12 @@ def _kept(result):
 
 def _mgrid(ms=REVIEWER_GRID):
     return [{"M": m} for m in ms]
+
+
+def _measured(grid, engine="mariadb"):
+    """One dominated, far-from-every-floor point per build: measured at
+    stage 1 (so it can be kept as a neighbour) and chosen by nothing."""
+    return [_point(b, 10, 0.5, 1.0, engine) for b in grid]
 
 
 class TestTheSelectionRule:
@@ -343,7 +389,7 @@ class TestTheSelectionRule:
         assert not any("near floor" in r for r in kept.get('{"M": 6}', []))
 
     def test_an_interior_kept_m_brings_both_neighbours(self):
-        points = [_point({"M": 12}, 40, 0.95, 500.0)]
+        points = [_point({"M": 12}, 40, 0.95, 500.0)] + _measured(_mgrid())
         kept = _kept(sel.select_engine("mariadb", points, _mgrid(), None))
         assert set(kept) == {'{"M": 8}', '{"M": 12}', '{"M": 16}'}
         assert kept['{"M": 8}'] == ['M neighbour of kept build {"M": 12}']
@@ -352,24 +398,37 @@ class TestTheSelectionRule:
                                                      (48, 32, "above")])
     def test_an_edge_m_has_one_neighbour_and_says_so(self, edge, neighbour,
                                                      side):
-        points = [_point({"M": edge}, 40, 0.95, 500.0)]
+        points = [_point({"M": edge}, 40, 0.95, 500.0)] + _measured(_mgrid())
         result = sel.select_engine("mariadb", points, _mgrid(), None)
         assert set(_kept(result)) == {f'{{"M": {edge}}}',
                                       f'{{"M": {neighbour}}}'}
         assert len(result["edges"]) == 1
         assert f"M={edge}" in result["edges"][0] and side in result["edges"][0]
+        assert "may continue" in result["edges"][0]
 
-    def test_neighbours_stay_at_the_same_ef_construction(self):
-        """pgvector at ef_construction 64 has no M=48 (2*m rule), so M=32 at
-        64 is an edge there even though M=48 exists at 200."""
+    def test_an_illegal_next_m_is_named_as_illegal_not_unexplored(self):
+        """pgvector at ef_construction 64 has no M=48 (2*m rule): M=32 at 64
+        has no upper neighbour because M=48 cannot be built there, not
+        because nobody explored it."""
         grid = [{"M": m, "efConstruction": e} for m in REVIEWER_GRID
                 for e in EFC if not e < 2 * m]
-        points = [_point({"M": 32, "efConstruction": 64}, 40, 0.95, 500.0,
-                         "pgvector")]
+        points = ([_point({"M": 32, "efConstruction": 64}, 40, 0.95, 500.0,
+                          "pgvector")] + _measured(grid, "pgvector"))
         result = sel.select_engine("pgvector", points, grid, None)
-        kept = set(_kept(result))
-        assert '{"M": 16, "efConstruction": 64}' in kept
-        assert result["edges"] and "largest" in result["edges"][0]
+        assert '{"M": 16, "efConstruction": 64}' in set(_kept(result))
+        edge = result["edges"][0]
+        assert "M=48 is in the grid but cannot be built" in edge
+        assert "2 * m" in edge and "largest" not in edge
+
+    def test_a_neighbour_with_no_stage_1_points_is_dropped_with_reason(self):
+        points = [_point({"M": 12}, 40, 0.95, 500.0)] + _measured(
+            _mgrid([12, 16]))
+        result = sel.select_engine("mariadb", points, _mgrid(), None)
+        assert '{"M": 8}' not in _kept(result)
+        pruned = {json.dumps(p["build"]): p["reason"]
+                  for p in result["pruned"]}
+        assert pruned['{"M": 8}'].startswith(
+            'M neighbour of kept build {"M": 12}, dropped: no stage-1 point')
 
     def test_an_unreached_floor_keeps_the_highest_recall_and_records_it(self):
         points = [_point({"M": 6}, 800, 0.93, 50.0),
@@ -384,31 +443,58 @@ class TestTheSelectionRule:
         result = sel.select_engine("mariadb", points, _mgrid(), {"M": 32})
         assert sel.REASON_REFERENCE in _kept(result)['{"M": 32}']
 
-    def test_closure_builds_are_kept_and_say_why(self):
+    def test_the_kept_builds_are_exact_and_no_product_is_added(self):
+        """Lists alone multiply: (4, 64) and (48, 400) would bring (4, 400)
+        and (48, 64) too. The exact list is what reaches the renderer."""
+        grid = [{"M": m, "efConstruction": e} for m in (4, 16, 48)
+                for e in EFC]
         points = [_point({"M": 4, "efConstruction": 64}, 40, 0.95, 500.0,
                          "valkey"),
                   _point({"M": 48, "efConstruction": 400}, 40, 0.99, 400.0,
-                         "valkey")]
-        grid = [{"M": m, "efConstruction": e} for m in (4, 16, 48)
-                for e in EFC]
+                         "valkey")] + _measured(grid, "valkey")
         result = sel.select_engine("valkey", points, grid, None)
-        kept = _kept(result)
-        assert kept['{"M": 48, "efConstruction": 64}'] == [sel.REASON_CLOSURE]
-        assert kept['{"M": 4, "efConstruction": 400}'] == [sel.REASON_CLOSURE]
-        assert result["lists"] == {"M": [4, 16, 48],
-                                   "efConstruction": [64, 400]}
+        kept = set(_kept(result))
+        assert '{"M": 48, "efConstruction": 64}' not in kept
+        assert '{"M": 4, "efConstruction": 400}' not in kept
+        assert {json.dumps(b, sort_keys=True) for b in result["builds"]} == kept
 
-    def test_a_closure_build_the_engine_cannot_build_is_excluded(self):
-        points = [_point({"M": 4, "efConstruction": 64}, 40, 0.95, 500.0,
-                         "pgvector"),
-                  _point({"M": 48, "efConstruction": 400}, 40, 0.99, 400.0,
-                         "pgvector")]
-        grid = [{"M": m, "efConstruction": e} for m in (4, 48) for e in EFC
-                if not e < 2 * m]
-        result = sel.select_engine("pgvector", points, grid, None)
-        assert [e["build"] for e in result["excluded"]] == [
-            {"M": 48, "efConstruction": 64}]
-        assert '{"M": 48, "efConstruction": 64}' not in _kept(result)
+    def test_the_renderer_builds_exactly_the_named_builds(self):
+        profile = load_profile("tuned-complete")
+        resources = _resources(profile)
+        resources["extras"]["m_values_by_engine"] = {"pgvector": [4, 16, 48]}
+        resources["extras"]["pgvector_ef_construction"] = [64, 200, 400]
+        resources["extras"]["ann_builds_by_engine"] = {"pgvector": [
+            {"M": 4, "efConstruction": 64}, {"M": 16, "efConstruction": 200},
+            {"M": 48, "efConstruction": 400}]}
+        body = render_config("pgvector", profile, resources, "tuned")
+        builds = {json.dumps(sel.build_of_grid(a[-1]), sort_keys=True)
+                  for _n, a, _q in result_definitions(body)}
+        assert builds == {'{"M": 4, "efConstruction": 64}',
+                          '{"M": 16, "efConstruction": 200}',
+                          '{"M": 48, "efConstruction": 400}'}
+
+    def test_the_renderer_refuses_a_named_build_outside_its_grid(self):
+        profile = load_profile("tuned-complete")
+        resources = _resources(profile)
+        resources["extras"]["ann_builds_by_engine"] = {"pgvector": [
+            {"M": 32, "efConstruction": 200}]}
+        with pytest.raises(ValueError, match="does not contain"):
+            render_config("pgvector", profile, resources, "tuned")
+
+    def test_a_named_build_keeps_its_result_file_name(self):
+        """Restricting must not rename a file: stage 2 reuses whatever the
+        shared tree already holds for a build tuned-complete measured."""
+        profile = load_profile("tuned-complete")
+        resources = _resources(profile)
+        full = {(n, json.dumps(a, sort_keys=True), json.dumps(q))
+                for n, a, q in result_definitions(render_config(
+                    "pgvector", profile, resources, "tuned"))}
+        resources["extras"]["ann_builds_by_engine"] = {"pgvector": [
+            {"M": 16, "efConstruction": 200}]}
+        cut = {(n, json.dumps(a, sort_keys=True), json.dumps(q))
+               for n, a, q in result_definitions(render_config(
+                   "pgvector", profile, resources, "tuned"))}
+        assert cut and cut < full
 
     def test_everything_else_is_pruned_with_a_reason(self):
         points = [_point({"M": 16}, 40, 0.95, 500.0),
@@ -556,11 +642,12 @@ class TestSelectBuildsEndToEnd:
 class TestTheOverlayMerges:
 
     def _overlay(self, extras):
+        selection = {"stage1": {"run_id": "s1"}, "kept": {}}
+        selection["overlay_sha256"] = profile_overlay.overlay_digest(
+            extras, selection)
         return {"overlay_of": "tuned-complete",
                 "resources": {"extras": extras},
-                "build_selection": {
-                    "stage1": {"run_id": "s1"},
-                    "extras_sha256": profile_overlay.extras_digest(extras)}}
+                "build_selection": selection}
 
     def test_lists_edited_apart_from_their_provenance_are_refused(self):
         overlay = self._overlay({"pgvector_ef_construction": [200]})
@@ -569,15 +656,46 @@ class TestTheOverlayMerges:
             profile_overlay.apply_overlay(load_profile("tuned-complete"),
                                           overlay)
 
-    @pytest.mark.parametrize("extras", [
-        {"pgvector_ef_construction": 200},
-        {"m_values_by_engine": {"mariadb": 16}},
-        {"mongodb_quantization": [1]},
-        {"valkey_ef_construction": []}])
-    def test_a_malformed_value_is_refused_not_a_traceback(self, extras):
-        with pytest.raises(ValueError, match="must"):
+    def test_provenance_edited_apart_from_its_grid_is_refused(self):
+        overlay = self._overlay({"pgvector_ef_construction": [200]})
+        overlay["build_selection"]["kept"] = {"pgvector": [{"build": {}}]}
+        with pytest.raises(ValueError, match="digest"):
+            profile_overlay.apply_overlay(load_profile("tuned-complete"),
+                                          overlay)
+
+    def test_an_overlay_without_provenance_is_refused(self):
+        overlay = {"overlay_of": "tuned-complete",
+                   "resources": {"extras": {"pgvector_ef_construction": [200]}}}
+        with pytest.raises(ValueError, match="no build_selection"):
+            profile_overlay.apply_overlay(load_profile("tuned-complete"),
+                                          overlay)
+
+    @pytest.mark.parametrize("extras,match", [
+        ({"pgvector_ef_construction": 200}, "must"),
+        ({"m_values_by_engine": {"mariadb": 16}}, "must"),
+        ({"mongodb_quantization": [1]}, "must"),
+        ({"mongodb_quantization": ["int8"]}, "must"),
+        ({"valkey_ef_construction": []}, "must"),
+        ({"m_values_by_engine": {"mariadb": [2]}}, "M=2 is outside"),
+        ({"m_values_by_engine": {"maraidb": [16]}}, "unknown engine"),
+        ({"pgvector_ef_construction": [2000]}, "efConstruction=2000"),
+        ({"ann_builds_by_engine": {"pgvector": [{"ef": 64}]}}, "naming only"),
+    ])
+    def test_a_bad_value_is_refused_at_load_not_a_traceback(self, extras,
+                                                            match):
+        with pytest.raises(ValueError, match=match):
             profile_overlay.apply_overlay(load_profile("tuned-complete"),
                                           self._overlay(extras))
+
+    def test_the_quantization_enumeration_is_the_modules(self):
+        path = os.path.join(VB_ROOT, "overlay", "ann-benchmarks",
+                            "ann_benchmarks", "algorithms", "mongodb",
+                            "module.py")
+        found = re.search(r"if self\._quantization not in \(([^)]*)\)",
+                          open(path).read())
+        assert found
+        assert tuple(re.findall(r'"(\w+)"', found.group(1))) == \
+            ann_knobs.QUANTIZATIONS
 
     def test_render_refuses_an_overlay_on_the_normalized_pass(self, tmp_path,
                                                               capsys):
@@ -609,6 +727,16 @@ class TestTheOverlayMerges:
         profile_overlay.apply_overlay(
             target, self._overlay({"pgvector_ef_construction": [64]}))
         assert json.dumps(target, sort_keys=True) == before
+
+    def test_a_stage_1_with_two_storage_engines_is_refused(self, tmp_path):
+        run_dir = _stage1(tmp_path)
+        path = os.path.join(run_dir, "run-manifest.json")
+        manifest = json.load(open(path))
+        manifest["config"]["profile"]["resources"]["extras"][
+            "mariadb_storage_engines"] = ["InnoDB", "MyISAM"]
+        json.dump(manifest, open(path, "w"))
+        with pytest.raises(ValueError, match="storage engines apart"):
+            select_builds.select(run_dir)
 
     @pytest.mark.parametrize("overlay,match", [
         ({"overlay_of": "tuned-complete", "runs": 1}, "may not set"),

@@ -167,7 +167,8 @@ definition of "near" and the cost of each stage are in
 
 It prints, per engine, how many builds it kept and pruned, the lists it wrote,
 any kept M at the edge of the explored grid and any floor stage 1 never
-reached. It refuses to write an overlay whose rendered grid is not exactly the
+reached. The overlay names the kept builds exactly, so none is added by
+multiplying the per-axis lists. It refuses to write an overlay whose rendered grid is not exactly the
 kept set. `render --profile tuned-complete --resource-pass tuned --overlay
 <file>` shows the ann configs it produces without running anything.
 
