@@ -2045,7 +2045,7 @@ class TestThePassReachesTheDrawnFigure:
             {("percona", "normalized"): self._points("normalized"),
              ("percona", "tuned"): self._points("tuned")})
         # Each pass's fixture is one build, so the legend also says the line
-        # is a curve at that build (F12, `charts.pareto_line_label`); the
+        # is a curve at that build (`charts.pareto_line_label`); the
         # pass suffix is what this test holds.
         assert sorted(label for label, _style in drawn) == [
             charts.pareto_line_label(

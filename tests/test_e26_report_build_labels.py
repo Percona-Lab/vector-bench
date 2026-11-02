@@ -20,7 +20,7 @@ What these tests hold:
   does not contain it, and carried to the report through the manifest's
   `engines.<name>.presentation`. The "at the build the ops pass measured"
   table uses only those points and names the build under every number. (It
-  was the headline until F12 made the whole-sweep frontier the headline --
+  was the headline until the whole-sweep frontier replaced it --
   `tests/test_e28_frontier_headline.py` -- which also names each cell's
   build; the assertions here now read the `reference_` fields.)
 * F1: the calibration point (chosen ef, achieved recall, status) is printed
@@ -150,7 +150,7 @@ def _entry(summary, engine, resource_pass="tuned"):
 # ---------------------------------------------------------------------------
 # F6.2 / F6.5: the ops-build view uses the reference build only.
 #
-# This was the headline until F12 put the whole-sweep frontier there
+# This was the headline until the whole-sweep frontier replaced it
 # (tests/test_e28_frontier_headline.py). The reference figures moved to the
 # `reference_` fields and the secondary table, and every assertion below is
 # the same claim about them that it was about the headline.

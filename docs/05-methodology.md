@@ -313,8 +313,13 @@ in MHNSW, VIDX, pgvector and hnswlib, so a table at matched parameter names
 compares the names. Each floor figure is the fastest point at or above the
 floor across every build swept in that dataset and resource pass (two passes
 are never pooled into one frontier), and the build that produced it is printed
-under the number. The floor chart draws the same figures with the build along
-each bar.
+under the number. Where two builds give exactly the same throughput, the
+smaller build (by index size, then `M`, then `ef_construction`) is named, so
+the result does not depend on the order the result files were read in. The
+floor chart draws the same figures, with value, mark and build printed upright
+above each bar. The recall–throughput charts draw one line per engine and do
+not name builds on it; the build-cost table's per-build recall ranges say which
+build supplies which stretch of a line.
 
 **Every headline figure says whether it is the build the ops pass measured.**
 Each engine declares its reference build in `config/engines/<e>.yml`
@@ -323,12 +328,22 @@ MySQL family, `ef_construction` as the ops pass sets it for pgvector, Valkey,
 Percona Server and MyVector, and the pass's quantization for Percona Search.
 `orchestrator/reference_build.py` resolves it per profile and pass, `run`
 refuses one the ann grid does not contain, and the manifest carries it to the
-report in `engines.<name>.presentation.reference_builds`. A headline figure
-from any other build carries a **◇** and a note naming the ops build, because
-§2.2–§2.5 (build cost, concurrency, filtered, churn) describe the ops build,
-not the one that won the floor. Where the ops build is not recorded, or a
-fallback for an archived run matches more than one build, the report says it
-cannot tell rather than marking a guess.
+report in `engines.<name>.presentation.reference_builds`. An archived run whose
+manifest predates that falls back to the ops pass's own `index_build` record.
+A headline figure from any other build carries a **◇** and a note naming the
+ops build, because §2.2–§2.5 (build cost, concurrency, filtered, churn)
+describe the ops build, not the one that won the floor.
+
+The answer is "cannot be said", never "different", in three cases, and the
+report lists the engine with the reason instead of marking anything: no ops
+build is recorded; the ops build left a setting to the server default, which
+no record names (Valkey's `ef_construction` on 2026-08-25); or the ops build
+matches none of the swept builds. The ops harness stamps `build_mode: post` and
+`storage_engine: InnoDB` on every unit, including engines with neither knob,
+so those two axes are compared only where the ann grid actually varied them
+(MariaDB's storage engines, pgvector's build modes). Comparing them everywhere
+made the 2026-08-25 mongot ops record (`post`, `InnoDB`) match none of its
+scalar points (`async`, `wiredTiger`).
 
 A secondary table, "at the build the ops pass measured", keeps the same floors
 restricted to that reference build. It is the one view in which §4 and the ops
@@ -341,30 +356,47 @@ the scalar index, which peaks at recall 0.892. The headline now shows those
 figures again, labelled `quantization=none` and marked ◇.
 
 **Build cost on the frontier.** For every build that contributes a frontier
-point the report prints its load + build time and its index size. The time is
-ann-benchmarks' `build_time`, the wall clock of `fit()`, which loads the corpus
-and builds the index (for MHNSW and VIDX those are one operation), so it is a
-time to a queryable index rather than an index build time. The size is the
-server-side figure each overlay module measures and writes as `index_bytes`:
-the index's files under the datadir for the MySQL family, `pg_relation_size`
-for pgvector, mongot's index for Percona Search, the hnswlib index files for
-MyVector, and resident `used_memory` growth for Valkey (labelled "resident").
-ann-benchmarks' own `index_size` attribute is never used: upstream computes it
-from the benchmark client's RSS, which for a client/server engine is the size
-of the Python process, not the index. Where the ann file has no size (or a
-size of 0, which is what the MySQL-family module writes when its file glob
-matched nothing) the ops pass's `index_build` record for the same build is used
-if exactly one matches, marked "(ops)"; otherwise the cell says "not measured".
+point the report prints its time to a queryable index and its index size, each
+labelled with where it came from. The time is ann-benchmarks' `build_time`
+("ann fit"), the wall clock of `fit()`, which loads the corpus and builds the
+index (for MHNSW and VIDX those are one operation). Where the ann file has none
+— true of every build on 2026-08-25 — it is the ops pass's time to a queryable
+index for the same build, marked "(ops)": ingest plus `CREATE INDEX` for a bulk
+build, the load alone for a graph built on insert, never the bare
+`CREATE INDEX`, which leaves the load out. The size is the server-side figure
+each overlay module measures and writes as `index_bytes`: the index's files
+under the datadir for the MySQL family, `pg_relation_size` for pgvector,
+mongot's index for Percona Search, the hnswlib index files for MyVector, and
+resident `used_memory` growth for Valkey (labelled "resident"). ann-benchmarks'
+own `index_size` attribute is never used: upstream computes it from the
+benchmark client's RSS, which for a client/server engine is the size of the
+Python process, not the index. Where the ann file has no size (or a size of 0,
+which is what the MySQL-family module writes when its file glob matched
+nothing) the ops record for the same build is used if exactly one matches,
+marked "(ops)"; otherwise the cell says "not measured". An ops axis left to the
+server default matches no ann build, so it supplies nothing.
+
+**What an ann index size can and cannot tell apart.** On 2026-08-25 pgvector's
+three `ef_construction` builds all report 8,110,088,192 bytes, AliSQL's M=6 and
+M=16 both 4,156,555,264, and Valkey's efC 64 and 200 both 6,086,322,000. Some of
+that may be real (pgvector's page count depends little on `ef_construction`),
+but a byte-identical figure across different graphs is at least as likely to be
+one reading per run as one per build, and nothing in the result file says
+which. The build-cost table marks such a size with a trailing **=**, and the
+smallest-build view below never treats equal sizes as a ranking.
 
 **Smallest build that reaches each floor.** Beside the fastest build, the
 report names, per floor, the smallest build whose points reach it and that
-build's best QPS there. "Smallest" is by measured index size when every build
-reaching the floor has one, and otherwise by lowest `M` then lowest
-`ef_construction`; when no size was measured and several builds share the
-lowest `M` and `ef_construction` (Percona Search's quantizations, for one), the
-cell says "(tie)" rather than pick. The fastest build at a floor is very often
-the largest graph swept, and this view keeps the headline from reading as an
-argument for it.
+build's best QPS there. Each cell's rule is stated: nothing is ranked when one
+build reaches the floor; otherwise by measured index size when every build
+reaching it has one and the smallest is unique; "(=size)" when the smallest
+size is shared, and `M` then `ef_construction` decided among those; by lowest
+`M` then lowest `ef_construction` when a size is missing; and "(tie)" when no
+size was measured and several builds share the lowest `M` and
+`ef_construction` (Percona Search's quantizations, for one), where the fastest
+of the tie is shown rather than a pick presented as a ranking. The fastest
+build at a floor is very often the largest graph swept, and this view keeps the
+headline from reading as an argument for it.
 
 ### 2.2 Index build cost (ops harness)
 

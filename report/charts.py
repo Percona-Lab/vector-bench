@@ -2052,19 +2052,19 @@ def qps_at_recall(summary: Dict[str, Any], dataset: str, out_dir: str,
             # An engine that never reaches a floor gets an explicit marker, not
             # a zero bar that reads as "measured and very slow".
             top, build = floor_bar_labels(per_engine[engine], int(f * 100))
+            # One label per bar, ABOVE it and along it, in the engine's
+            # colour: value, mark, then build. The build used to be white
+            # text inside the bar, which a short bar truncated ("quantiza"
+            # for Percona Search on the 25 Aug chart), a tall one let run
+            # off onto the white background, and a horizontal value above
+            # collided with. Rotated, each label is one bar wide, so eight
+            # engines do not overlap.
             ax.text(b.get_x() + b.get_width() / 2,
                     b.get_height() if v else 0,
-                    top,
-                    ha="center", va="bottom", fontsize=7.5,
+                    f" {top}  {build}" if build else f" {top}",
+                    ha="center", va="bottom", fontsize=7,
                     color=style["color"] if v else "#999999",
-                    rotation=0 if v else 90)
-            if build:
-                # Inside the bar, along it: the bars are a fixed fraction
-                # of a nine-inch figure and a build label above eight of
-                # them would collide with its neighbours.
-                ax.text(b.get_x() + b.get_width() / 2, 0, f" {build}",
-                        ha="center", va="bottom", fontsize=6,
-                        color="white", rotation=90, clip_on=True)
+                    rotation=90)
 
     if not plotted:
         plt.close(fig)
@@ -2073,8 +2073,9 @@ def qps_at_recall(summary: Dict[str, Any], dataset: str, out_dir: str,
     ax.set_xticks(list(xs))
     ax.set_xticklabels([f"recall ≥ {f:.2f}" for f in floors])
     # Headroom so the value labels above the tallest bars do not collide with
-    # the legend.
-    ax.set_ylim(top=ax.get_ylim()[1] * 1.18)
+    # the legend. Larger than it was: each label now carries its build and
+    # stands upright above the bar.
+    ax.set_ylim(top=ax.get_ylim()[1] * 1.75)
     ax.legend(frameon=False, fontsize=10, loc="upper right")
     return _save(fig, out_dir, stem)
 

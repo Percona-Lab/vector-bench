@@ -4994,7 +4994,7 @@ class TestAFloorFigureSaysWhereItWasActuallyTaken:
         section measured -- peaks at recall 0.892, and the post printed 138 /
         124 / 88 from the unquantized sweep with nothing saying so.
 
-        Since F12 the headline IS the whole-sweep frontier, so 138 is there
+        Now the headline IS the whole-sweep frontier, so 138 is there
         again -- but never unattributed: it names `quantization=none` and
         carries the ops-mismatch mark. The ops-build table says "—" with the
         scalar build's ceiling under it."""

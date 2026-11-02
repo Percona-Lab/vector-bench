@@ -11,13 +11,13 @@ PR #77 had gone the other way -- the headline was the reference (ops) build
 only -- because the same run's headline gave Percona Search 138 / 124 / 88
 from the unquantized index with nothing saying so. These tests hold both:
 
-* F12: the headline QPS-at-recall figures are the frontier over every build
+* The headline QPS-at-recall figures are the frontier over every build
   swept in one (dataset, resource pass), each naming its build; a figure from
   another build than the ops pass measured carries a mark and a note; the
   swept space is disclosed per engine; an engine measured at one build is
   called a curve, never a frontier; the reference figures remain as the
   secondary table.
-* F14b: each frontier build's build time and index size are shown, but only
+* Each frontier build's build time and index size are shown, but only
   sizes measured on the server; and per floor, the smallest build that
   reaches it sits beside the fastest.
 * Old records -- no build time, no size, no top-level quantization, no
@@ -77,7 +77,7 @@ def _with_cost(records: List[Dict[str, Any]], costs: Dict[Any, Dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
-# F12: the headline is the whole-sweep frontier, every figure named
+# The headline is the whole-sweep frontier, every figure named
 # ---------------------------------------------------------------------------
 
 class TestTheHeadlineIsTheFrontierOverEveryBuild:
@@ -98,7 +98,7 @@ class TestTheHeadlineIsTheFrontierOverEveryBuild:
         assert entry["qps_at_recall_90_build_label"] == "quantization=none"
 
     def test_best_is_kept_as_an_alias_of_the_headline(self):
-        """A reader of the pre-F12 layout looked for the sweep under `best_`."""
+        """A reader of the earlier layout, whose headline was the reference build, looked for the sweep under `best_`."""
         entry = _entry(_summary(), "valkey")
         for floor in (90, 95, 99):
             assert (entry[f"best_qps_at_recall_{floor}"]
@@ -146,7 +146,7 @@ class TestTheHeadlineIsTheFrontierOverEveryBuild:
 
 
 # ---------------------------------------------------------------------------
-# F12: a headline figure from another build than the ops one is marked
+# A headline figure from another build than the ops one is marked
 # ---------------------------------------------------------------------------
 
 class TestTheOpsBuildMismatchIsSaidNextToTheFigure:
@@ -196,7 +196,7 @@ class TestTheOpsBuildMismatchIsSaidNextToTheFigure:
 
 
 # ---------------------------------------------------------------------------
-# F12: the swept space, and "curve" where only ef_search varied
+# The swept space, and "curve" where only ef_search varied
 # ---------------------------------------------------------------------------
 
 def _single_build_records() -> List[Dict[str, Any]]:
@@ -298,7 +298,7 @@ class TestTheSweptSpaceIsDisclosed:
 
 
 # ---------------------------------------------------------------------------
-# F14b: build cost on the frontier
+# Build cost on the frontier
 # ---------------------------------------------------------------------------
 
 COSTS = {(16, 200, None): {"build_wall_s": 300.0, "index_bytes": 2 * 2**30},
@@ -311,7 +311,8 @@ class TestBuildCostOnTheFrontier:
         entry = _entry(_summary(_with_cost(_pgvector_records(), COSTS)),
                        "pgvector")
         rows = {r["build_label"]: r for r in entry["frontier_builds"]}
-        assert rows["M=16 efC=400"]["build_wall_s"] == 700.0
+        assert rows["M=16 efC=400"]["time_to_queryable_s"] == 700.0
+        assert rows["M=16 efC=400"]["time_source"] == "ann"
         assert rows["M=16 efC=400"]["index_bytes"] == 3 * 2**30
         assert rows["M=16 efC=400"]["is_ops_build"] is False
         assert rows["M=16 efC=200"]["is_ops_build"] is True
@@ -344,7 +345,7 @@ class TestBuildCostOnTheFrontier:
         row = next(r for r in entry["frontier_builds"]
                    if r["build_label"] == "M=16 efC=200")
         assert row["index_bytes"] == 5 * 2**30
-        assert row["index_bytes_source"] == "ops index_build"
+        assert row["index_bytes_source"] == "ops"
         table = frontier_render.build_cost_table({"pgvector": entry})
         assert "5.0 GiB (ops)" in table
 
@@ -391,7 +392,7 @@ class TestBuildCostOnTheFrontier:
 
 
 # ---------------------------------------------------------------------------
-# F14b: the smallest build that reaches each floor
+# The smallest build that reaches each floor
 # ---------------------------------------------------------------------------
 
 class TestTheSmallestBuildThatReachesEachFloor:
@@ -494,6 +495,155 @@ class TestOldRecordsStillRender:
         page = render.render_markdown({"run_id": "old"}, summary,
                                       self._archived(), {}, "old")
         assert "## 4. Recall vs throughput" in page
+
+
+# ---------------------------------------------------------------------------
+# The archived full-20260825 shapes: ops records stamped with defaults
+# ---------------------------------------------------------------------------
+
+def _ops_index_build(engine: str, **fields: Any) -> Dict[str, Any]:
+    """An `index_build` record as the 25 Aug ops pass wrote it: `post` and
+    `InnoDB` stamped on every engine, knob or not, and no manifest
+    declaration above it."""
+    extra = fields.pop("extra", {})
+    record = {"phase": "index_build", "engine": engine, "dataset": DATASET,
+              "resource_pass": "tuned", "m": 16, "ef_construction": None,
+              "build_mode": "post", "storage_engine": "InnoDB",
+              "extra": extra}
+    record.update(fields)
+    return record
+
+
+def _archived_mongot() -> List[Dict[str, Any]]:
+    """mongot ann points say `async`/`wiredTiger`; its ops record says
+    `post`/`InnoDB`. Sizes and times only on the ops record."""
+    points = []
+    for r in _mongodb_records(top_level_quant=False):
+        points.append({**r, "build_mode": "async",
+                       "storage_engine": "wiredTiger"})
+    ops = _ops_index_build(
+        "mongodb", build_wall_s=100.142, ingest_wall_s=14.344,
+        index_bytes=16238987031,
+        extra={"quantization": "scalar", "ef_construction_tunable": False,
+               "separable_build": True})
+    return points + [ops]
+
+
+class TestTheArchivedOpsRecordsMatchTheirBuilds:
+
+    def _mongot(self):
+        return _entry(generate.summarize(_archived_mongot(), {}), "mongodb")
+
+    def test_the_scalar_ops_build_matches_its_eight_points(self):
+        """Honest: the scalar curve IS the ops build. Mutant (compare the
+        stamped `post` against `async`): 0 matches, "Ops build: no" and
+        "no recall point was measured at its ops build"."""
+        entry = self._mongot()
+        assert entry["reference_points"] == 4
+        assert entry["reference_max_recall"] == pytest.approx(0.892)
+        rows = {r["build_label"]: r for r in entry["frontier_builds"]}
+        assert rows["quantization=scalar"]["is_ops_build"] is True
+        assert rows["quantization=none"]["is_ops_build"] is False
+
+    def test_the_ops_record_supplies_time_and_size_despite_the_stamps(self):
+        """Storage was not swept for mongot, so the stamped `InnoDB` does
+        not stop the match; the time is the ops time to a queryable index,
+        load included (14.3 + 100.1 s), never the bare `CREATE INDEX`."""
+        rows = {r["build_label"]: r for r in self._mongot()["frontier_builds"]}
+        scalar = rows["quantization=scalar"]
+        assert scalar["time_to_queryable_s"] == pytest.approx(114.486)
+        assert scalar["time_source"] == "ops"
+        assert scalar["index_bytes"] == 16238987031
+        assert scalar["index_bytes_source"] == "ops"
+        assert rows["quantization=none"]["time_to_queryable_s"] is None
+        table = frontier_render.build_cost_table({"mongodb": self._mongot()})
+        assert "114 s (ops)" in table
+
+    def test_the_ops_build_notes_do_not_say_no_point_was_measured(self):
+        page = render._headline_tables(
+            generate.summarize(_archived_mongot(), {}))
+        assert "no recall point was measured" not in page
+
+    def test_an_incremental_ops_time_is_not_doubled(self):
+        """MariaDB built on INSERT: the ops time is `build_wall_s` alone."""
+        points = [_recall("mariadb", 0.95, 400.0, ef_search=10, m=16),
+                  _recall("mariadb", 0.93, 500.0, ef_search=10, m=6)]
+        points = [{**p, "build_mode": None, "storage_engine": "InnoDB"}
+                  for p in points]
+        ops = _ops_index_build("mariadb", build_wall_s=13041.322,
+                               ingest_wall_s=13041.322,
+                               extra={"separable_build": False})
+        entry = _entry(generate.summarize(points + [ops], {}), "mariadb")
+        rows = {r["build_label"]: r for r in entry["frontier_builds"]}
+        assert rows["M=16"]["time_to_queryable_s"] == pytest.approx(13041.322)
+        assert rows["M=6"]["time_to_queryable_s"] is None
+
+    def test_valkey_at_the_server_default_is_cannot_be_said(self):
+        """`{m: 16, ef_construction: None}`: the ops pass left efC to the
+        server and nothing records what that was. Honest: no mark, a note
+        saying so. Mutant (None compared as a value): every floor marked
+        and "efC=server default" claimed as a different build."""
+        ops = _ops_index_build("valkey",
+                               extra={"ef_construction_tunable": True})
+        summary = generate.summarize(_valkey_records() + [ops], {})
+        entry = _entry(summary, "valkey")
+        for floor in (90, 95, 99):
+            assert entry[f"qps_at_recall_{floor}_is_ops_build"] is None
+        assert all(r["is_ops_build"] is None
+                   for r in entry["frontier_builds"])
+        page = render._headline_tables(summary)
+        table = _headline(page)
+        assert frontier_render.OPS_MISMATCH_MARK not in table
+        assert "server default" in table and "cannot be said" in table
+        # The ops-build view says why it is empty without claiming nothing
+        # was measured.
+        assert "no recall point was measured" not in page
+
+    def test_a_floor_only_one_build_reaches_is_not_called_ranked(self):
+        entry = _entry(_summary(_with_cost(_pgvector_records(), COSTS)),
+                       "pgvector")
+        assert entry["smallest_qps_at_recall_99_ranked_by"] == frontier.ONLY
+
+    def test_a_declared_build_that_matches_nothing_is_cannot_be_said(self):
+        manifest = _manifest({"pgvector": {"m": 16, "ef_construction": 128}})
+        entry = _entry(_summary(_pgvector_records(), manifest), "pgvector")
+        assert entry["qps_at_recall_95_is_ops_build"] is None
+
+
+class TestEqualSizesAreATie:
+    """The 25 Aug run's pgvector efC 64/200/400 all read 8,110,088,192 bytes;
+    AliSQL M=6 and M=16 both 4,156,555,264. Size decided nothing there."""
+
+    def _entry(self):
+        records = _with_cost(_pgvector_records(),
+                             {(16, 200, None): {"index_bytes": 8110088192},
+                              (16, 400, None): {"index_bytes": 8110088192}})
+        return _entry(_summary(records), "pgvector")
+
+    def test_the_rule_says_sizes_were_equal(self):
+        entry = self._entry()
+        assert entry["smallest_qps_at_recall_95_ranked_by"] == \
+            frontier.BY_SIZE_THEN_M
+        table = frontier_render.smallest_table({"pgvector": entry})
+        assert "(=size)" in table
+        row = _row(table, render._label("pgvector"))
+        assert "(=size)" in row[2] and "(=size)" not in row[3]
+
+    def test_the_cost_table_flags_the_shared_size(self):
+        table = frontier_render.build_cost_table({"pgvector": self._entry()})
+        assert "7.6 GiB =" in table and "one reading per run" in table
+
+
+class TestAnExactQpsTieIsDeterministic:
+
+    def test_the_smaller_build_wins_a_tie(self):
+        """Two builds at exactly the same QPS above the floor: the smaller
+        is printed, whichever order the result files were walked in."""
+        a = _recall("mariadb", 0.95, 400.0, ef_search=10, m=32)
+        b = _recall("mariadb", 0.95, 400.0, ef_search=10, m=8)
+        for order in ([a, b], [b, a]):
+            entry = _entry(generate.summarize(order, {}), "mariadb")
+            assert entry["qps_at_recall_90_build_label"] == "M=8"
 
 
 def test_nothing_added_imports_the_orchestrator():

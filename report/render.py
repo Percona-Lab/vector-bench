@@ -1428,7 +1428,7 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
                     if (value != "—" and at is not None and lowest is not None
                             and lowest > floor / 100.0):
                         value += " †"
-                    # F12: the headline is the fastest build swept, which
+                    # The headline is the fastest build swept, which
                     # may not be the index §5 onward measured. Said beside
                     # the number, because that is where it gets copied from.
                     if value != "—":
@@ -1538,6 +1538,16 @@ def _reference_build_notes(per_engine: Dict[str, Any]) -> str:
                 f"run and the grid swept {entry.get('sweep_builds', 0)} "
                 f"builds, so this table prints no figure rather than guess "
                 f"which of them the ops pass measured.\n")
+        elif entry.get("reference_max_recall") is None and any(
+                value is None for value in entry["reference_build"].values()):
+            # Valkey on the 25 Aug run: the ops pass left efC to the server,
+            # so whether an ann build is the same index cannot be said --
+            # which is not the same as "nothing was measured at it".
+            lines.append(
+                f"- **{_label(engine)}**: its ops build (`{build}`) left a "
+                f"setting to the server default, which no record names, so "
+                f"no swept build can be matched to it and every floor here "
+                f"reads \"—\".\n")
         elif entry.get("reference_max_recall") is None:
             lines.append(
                 f"- **{_label(engine)}**: no recall point was measured at its "

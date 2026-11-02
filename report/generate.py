@@ -429,6 +429,7 @@ def summarize(records: List[Dict[str, Any]],
               memory: Optional[Dict[str, List[Dict[str, Any]]]] = None
               ) -> Dict[str, Any]:
     """Headline figures the narrative sections are written from."""
+    from report import builds as builds_mod
     from report.loaders import pareto_frontier
 
     recall_records = [r for r in records if r.get("phase") == "recall_qps"]
@@ -772,6 +773,9 @@ def summarize(records: List[Dict[str, Any]],
                     if r["dataset"] == dataset and r["engine"] == engine
                     and pass_or_unknown(
                         r.get("resource_pass")) == resource_pass]
+                # Ordered so an exact tie names the smaller build, whatever
+                # order the result files were walked in.
+                points = builds_mod.smaller_builds_last(points)
                 frontier = pareto_frontier(points)
                 if not frontier:
                     continue
@@ -1040,6 +1044,10 @@ def _floor_entry(points: List[Dict[str, Any]],
                   and r.get("dataset") == dataset
                   and pass_or_unknown(r.get("resource_pass")) == resource_pass]
     space = frontier_mod.swept_space(points)
+    # The ops build as far as a point can be compared with it: None when it
+    # is unknown, names an unrecorded server default, or matches no swept
+    # point -- "cannot be said", never "different" (`usable_reference`).
+    comparable = frontier_mod.usable_reference(build, points)
 
     entry: Dict[str, Any] = {
         "reference_build": build,
@@ -1049,7 +1057,7 @@ def _floor_entry(points: List[Dict[str, Any]],
         "points": len(points),
         "sweep_points": len(points),
         "sweep_builds": space["builds"],
-        # F12: what was actually swept, so a frontier from one build is
+        # What was actually swept, so a frontier from one build is
         # called a curve and a reader can see which axes were explored.
         "swept_space": space,
         # Which storage engine reached each floor, not only how fast. The
@@ -1060,12 +1068,13 @@ def _floor_entry(points: List[Dict[str, Any]],
                                    if p.get("storage_engine")}),
     }
     entry.update(builds.floor_figures(frontier, ""))
-    frontier_mod.ops_build_flags(entry, frontier, build)
+    frontier_mod.ops_build_flags(entry, frontier, comparable)
     entry.update(builds.floor_figures(frontier, "best_"))
     entry.update(builds.floor_figures(reference_frontier, "reference_"))
-    entry.update(frontier_mod.smallest_figures(points, ops_builds, build))
+    entry.update(frontier_mod.smallest_figures(points, ops_builds,
+                                               comparable))
     entry["frontier_builds"] = frontier_mod.frontier_builds(
-        points, frontier, ops_builds, build)
+        points, frontier, ops_builds, comparable)
     # The reference build's ceiling, which is what the secondary table's "—"
     # footnote prints: "its reference build peaks at 0.892" is the sentence
     # the 25 Aug post needed and did not have.
