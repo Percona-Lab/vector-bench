@@ -1113,6 +1113,16 @@ class TestRootOwnedCleanup:
             raise PermissionError(13, "Permission denied", str(path))
         monkeypatch.setattr(shutil, "rmtree", deny)
 
+    def test_the_ann_pass_clears_its_datadir_the_same_way(self):
+        """The ann pass cleared its per-engine datadir with a plain
+        `shutil.rmtree(state_dir, ignore_errors=True)`, which removed nothing
+        and said nothing, so the next sweep's server started on the previous
+        run's root-owned datadir."""
+        source = open(os.path.join(VB_ROOT, "orchestrator", "ann_pass.py")).read()
+        body = source.split("def run_engine")[1]
+        assert "remove_tree_as_root(state_dir" in body
+        assert "shutil.rmtree(state_dir" not in body
+
     def test_uses_a_container_when_not_root(self, tmp_path, monkeypatch):
         from orchestrator import docker_ctl
         target = tmp_path / "vol"

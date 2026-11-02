@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -443,8 +442,20 @@ def run_engine(engine: str, dataset: str, profile: Dict[str, Any],
     # Each configuration builds a fresh index, so the directory is cleared
     # rather than reused; leaving it would also make the ingest measurement
     # depend on whatever the previous run left behind.
+    #
+    # Cleared through `remove_tree_as_root`, as the ops pass clears its own: the
+    # engine writes this directory as root from inside the container, so a
+    # plain `shutil.rmtree(..., ignore_errors=True)` running as the host user
+    # removed nothing and said nothing, and the next run started on the
+    # previous run's datadir. With a server binary newer than the one that
+    # wrote it, a data-dictionary upgrade guard then refuses to start
+    # ("Upgrading from a development version is not allowed") and every
+    # configuration of the sweep dies at startup.
     state_dir = os.path.join(paths["engine_state"], "annb", f"{resource_pass}-{engine}")
-    shutil.rmtree(state_dir, ignore_errors=True)
+    if not docker_ctl.remove_tree_as_root(state_dir, image):
+        print(f"[ann] WARNING: {state_dir} survived teardown (still root-owned); "
+              f"the next server starts on the previous run's datadir",
+              file=sys.stderr)
     os.makedirs(state_dir, exist_ok=True)
 
     command = [
