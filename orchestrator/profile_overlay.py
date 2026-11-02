@@ -52,9 +52,14 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
+from . import ann_knobs
+from . import engines as engines_mod
+
 #: The `resources.extras` keys an overlay may set: every per-engine build axis
-#: `ann_pass.render_config` reads in the tuned pass.
+#: `ann_pass.render_config` reads in the tuned pass, and the exact build list
+#: (`ann_knobs.restrict_to_builds`) that keeps the lists from multiplying.
 OVERLAY_EXTRAS = frozenset({
+    "ann_builds_by_engine",
     "m_values_by_engine",
     "pgvector_ef_construction",
     "valkey_ef_construction",
@@ -130,9 +135,21 @@ def _is_list_of(value: Any, kind: type) -> bool:
                     for v in value))
 
 
+def _engine_of(name: str) -> str:
+    return name.rsplit("_ef_construction", 1)[0].rsplit("_quantization", 1)[0]
+
+
 def _value_problems(extras: Dict[str, Any]) -> list:
-    """Shapes, so a scalar where a list belongs is a refusal, not a
-    TypeError out of `render_config` after the run banner."""
+    """Shapes, engines and ranges, checked when the overlay is loaded.
+
+    Shapes so a scalar where a list belongs is a refusal and not a TypeError
+    out of `render_config` after the run banner; engine names so a typo is
+    not a selection nothing reads; ranges and enumerations
+    (`ann_knobs.KNOB_BOUNDS`, `ann_knobs.QUANTIZATIONS`) so a value the
+    engine cannot take is refused here, naming the overlay, rather than later
+    as a render error that names only the engine.
+    """
+    known = set(engines_mod.known_engines())
     problems = []
     for name, value in extras.items():
         if name == "m_values_by_engine":
@@ -140,45 +157,84 @@ def _value_problems(extras: Dict[str, Any]) -> list:
                     _is_list_of(v, int) for v in value.values()):
                 problems.append(f"{name} must map engines to non-empty "
                                 f"lists of integers; got {value!r}")
+                continue
+            for engine, ms in value.items():
+                problems += ([f"{name}: unknown engine {engine!r}"]
+                             if engine not in known
+                             else ann_knobs.knob_problems(engine, ms))
+        elif name == "ann_builds_by_engine":
+            problems += _builds_problems(value, known)
         elif name.endswith("_quantization"):
-            if not _is_list_of(value, str):
-                problems.append(f"{name} must be a non-empty list of names; "
-                                f"got {value!r}")
+            if not _is_list_of(value, str) or set(value) - set(
+                    ann_knobs.QUANTIZATIONS):
+                problems.append(f"{name} must be a non-empty list drawn from "
+                                f"{list(ann_knobs.QUANTIZATIONS)}; got "
+                                f"{value!r}")
         elif not _is_list_of(value, int):
             problems.append(f"{name} must be a non-empty list of integers; "
                             f"got {value!r}")
+        else:
+            problems += ann_knobs.knob_problems(_engine_of(name), (), value)
     return problems
 
 
-def extras_digest(extras: Dict[str, Any]) -> str:
-    """sha256 of the extras as canonical JSON. `select-builds` stores it in
-    `build_selection`, so the grid and its provenance cannot be edited apart:
-    the manifest's resume check compares the selection block, and without
-    this a hand edit to the lists under an unchanged block would resume as
-    'unchanged' with two grids under one manifest."""
-    blob = json.dumps(extras, sort_keys=True).encode()
+def _builds_problems(value: Any, known: set) -> list:
+    if not isinstance(value, dict):
+        return [f"ann_builds_by_engine must map engines to lists of builds; "
+                f"got {value!r}"]
+    problems = []
+    for engine, builds in value.items():
+        if engine not in known:
+            problems.append(f"ann_builds_by_engine: unknown engine {engine!r}")
+            continue
+        if not isinstance(builds, list) or not builds or not all(
+                isinstance(b, dict) and b
+                and set(b) <= set(ann_knobs.BUILD_AXES) for b in builds):
+            problems.append(f"ann_builds_by_engine.{engine} must be a "
+                            f"non-empty list of builds naming only "
+                            f"{list(ann_knobs.BUILD_AXES)}; got {builds!r}")
+    return problems
+
+
+def overlay_digest(extras: Dict[str, Any], selection: Dict[str, Any]) -> str:
+    """sha256 over the extras AND the whole provenance block (bar the digest
+    itself and the manifest's `recorded_at`), as canonical JSON.
+
+    `select-builds` stores it in `build_selection.overlay_sha256`. The
+    manifest's resume check compares the selection block, so without this a
+    hand edit to the lists under an unchanged block resumed as 'unchanged'
+    with two grids under one manifest -- and an edit to the kept/pruned lists
+    or the transfer-check points would record provenance that is not what
+    `select-builds` derived.
+    """
+    trimmed = {k: v for k, v in (selection or {}).items()
+               if k not in ("overlay_sha256", "recorded_at")}
+    blob = json.dumps({"extras": extras, "build_selection": trimmed},
+                      sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()
 
 
 def _digest_problems(overlay: Dict[str, Any], extras: Dict[str, Any]) -> list:
+    """Required, not optional: an overlay without its provenance block would
+    run and record nothing about where its grid came from."""
     selection = overlay.get("build_selection")
-    if not selection:
-        return []
-    recorded = selection.get("extras_sha256")
-    if recorded != extras_digest(extras):
-        return ["resources.extras does not match the digest select-builds "
-                "recorded in build_selection.extras_sha256: the grid was "
-                "edited apart from its provenance. Regenerate the overlay."]
+    if not isinstance(selection, dict) or not selection:
+        return ["the overlay has no build_selection block, so the run would "
+                "record no provenance for its grid. Overlays are written by "
+                "`select-builds`; regenerate it."]
+    if selection.get("overlay_sha256") != overlay_digest(extras, selection):
+        return ["the overlay does not match the digest select-builds recorded "
+                "in build_selection.overlay_sha256: its grid or its "
+                "provenance was edited. Regenerate the overlay."]
     return []
 
 
 def apply_overlay(profile: Dict[str, Any], overlay: Dict[str, Any]
                   ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    """(merged profile, provenance block or None). Raises ValueError, listing
-    every problem, when the overlay cannot be applied as written."""
+    """(merged profile, provenance block). Raises ValueError, listing every
+    problem, when the overlay cannot be applied as written."""
     problems = overlay_problems(overlay, str(profile.get("name")))
     if problems:
         raise ValueError("; ".join(problems))
     merged = deep_merge(profile, {"resources": overlay.get("resources") or {}})
-    selection = overlay.get("build_selection")
-    return merged, (dict(selection) if selection else None)
+    return merged, dict(overlay["build_selection"])
