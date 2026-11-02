@@ -102,6 +102,7 @@ an interrupted run can resume without recomputing points it already has.
 | `report` | Regenerate the report from an existing run directory | Runs → Report |
 | `export` | Package a run as a `.tar.gz` to send to someone | Runs → Report |
 | `render` | Regenerate the ann-benchmarks configs for a profile | — |
+| `select-builds` | Choose the full-size builds from a `frontier-explore` run (stage 2 of the two-stage frontier) | — |
 | `sources` | Export sources only, without building | — |
 | `web` | Serve the browser interface | — |
 | `clean` | Remove containers, networks and volumes left by a run | — |
@@ -129,6 +130,7 @@ only SSH'd into.
 | `--fail-fast` | off | Stop at the first failure instead of continuing |
 | `--no-report` | off | Skip report generation |
 | `--run-id` | timestamped | Reuse an id to add to an existing run directory |
+| `--overlay` | none | A `select-builds` overlay applied to `--profile`; tuned pass only, and a resume must pass the same one |
 
 **`--engines` and `--datasets` are not symmetrical, deliberately.** A profile's
 dataset list is a choice of corpus and `--datasets` replaces it outright. A
@@ -140,6 +142,34 @@ engine at another's grid. A profile that declares no `engines:` key is making no
 such claim, and `--engines` is free there. Omitting the key is also the only way
 to say "every engine": `engines: []` is refused as a half-finished edit, because
 reading it as "no restriction" is how a one-engine profile measured seven.
+
+### `select-builds` options — the two-stage frontier
+
+Stage 1 explores every build knob at 90,000 rows; this command keeps the
+builds worth measuring at 990,000; stage 2 measures them. The rule, its
+definition of "near" and the cost of each stage are in
+[07-planning-a-run.md §2a](07-planning-a-run.md#2a-exploring-the-whole-parameter-space-the-two-stage-frontier).
+
+```bash
+./run-benchmark.sh run --profile frontier-explore                    # stage 1
+./run-benchmark.sh select-builds --from results/<stage-1 run id> \
+    --out state/frontier-stage2.yml                                  # select
+./run-benchmark.sh run --profile tuned-complete --resource-pass tuned \
+    --overlay state/frontier-stage2.yml                              # stage 2
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--from` | required | The stage-1 run directory. Reads its `run-manifest.json` and `report/records.jsonl` (run `report --run-dir` first if the run skipped it) |
+| `--out` | required | The overlay to write. Generated — regenerate rather than edit it |
+| `--profile` | `tuned-complete` | The profile the overlay will be applied to; `run` refuses it on any other |
+| `--dataset` | the stage-1 corpus | Needed only when the stage-1 records hold more than one |
+
+It prints, per engine, how many builds it kept and pruned, the lists it wrote,
+any kept M at the edge of the explored grid and any floor stage 1 never
+reached. It refuses to write an overlay whose rendered grid is not exactly the
+kept set. `render --profile tuned-complete --resource-pass tuned --overlay
+<file>` shows the ann configs it produces without running anything.
 
 ### `build` options
 
