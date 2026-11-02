@@ -456,8 +456,15 @@ directory, and the rest would be measured on another index under one name.
 
 The manifest's `engines.<name>.presentation.reference_builds_by_dataset`
 carries the chosen build and its source (`frontier@0.95`, `below_target@0.95`,
-`fallback_reference`) to the report, which labels the headline with it, and
-every ops record carries the same facts in `extra.ops_build_selection`. Ops
+`fallback_reference`) to the report. It becomes the ops build the headline's ◇
+is judged against and the build of the "at the build the ops pass measured"
+table, and a line under that table says how each engine's build was chosen.
+Since the choice is the build fastest at 0.95 on the primary curve, the
+headline's 0.95 figure is normally that build and carries no ◇ — a ◇ there under
+`frontier` means the fastest point came from another storage engine or build
+mode, or the selection fell back. Every ops record carries the same facts in
+`extra.ops_build_selection`. With a `select-builds` overlay the grid the
+choice must lie in is the overlay's restricted one. Ops
 measurement version 10 marks the change: a version 9 and a version 10 figure
 for one engine may describe different indexes, and the report refuses to chart
 them together.

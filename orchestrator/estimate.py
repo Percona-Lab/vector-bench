@@ -464,12 +464,6 @@ def _ops_rows(ops: Dict[str, Any], dataset: str) -> int:
     return rows
 
 
-#: The M the ingest rates above were measured at -- the mid-grid default
-#: every rate table here was read off. A frontier-selected ops build is
-#: charged relative to it; see `frontier_ops_bound`.
-_RATE_REFERENCE_M = 16
-
-
 def _frontier(profile: Dict[str, Any]) -> bool:
     # Imported here: the selection module pulls in the manifest and docker
     # plumbing, which nothing else in this module needs.
@@ -477,50 +471,66 @@ def _frontier(profile: Dict[str, Any]) -> bool:
     return build_selection_mode(profile) == MODE_FRONTIER
 
 
-def frontier_ops_bound(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def frontier_ops_bound(profile: Dict[str, Any], engines: Sequence[str],
+                       passes: Sequence[str]) -> Optional[Dict[str, Any]]:
     """The ops build to charge when `ops.build_selection: frontier`, or None.
 
     Under `frontier` the ops build is not known until the ann phase of each
     (engine, dataset, pass) has run, so there is no build to estimate -- and
     printing the M=16 figure as though it were the plan would be the same
     unlabelled substitution the key exists to remove. What IS known is the
-    grid it will be chosen from, so the ops ingest is charged at the largest
-    M any engine sweeps, ONE build per unit (the selection picks exactly one
-    M, so `ops.m_values` no longer multiplies it).
+    grid it will be chosen from, so each engine's ops ingest is charged at
+    the largest M its RENDERED grid asks for -- `estimate_grid.ann_builds`,
+    which sees `m_values_by_engine`, the tuned extras and a select-builds
+    overlay exactly as the run will -- at ONE build per unit (the selection
+    picks exactly one, so `ops.m_values` no longer multiplies it).
 
-    The scaling is linear in M from the rate tables' own M=16, which is an
-    assumption, stated: an HNSW insert does work proportional to the
-    neighbour lists it links into, and nothing in this repo has measured the
-    curve. ef_construction is not modelled, because no ingest rate here was
-    measured at more than one value of it -- so where the grid sweeps it
-    above the rates' 200 (the tuned pass sweeps pgvector and Valkey to 400)
-    this is NOT an upper bound, and the printed line says so. Nor is the M
-    factor applied to an engine whose reference build names no M (Percona
-    Search: its M is a label in the result file name, not a knob, so a
-    larger grid M costs it nothing); see `ops_ingest_factor`.
+    The M price is `estimate_grid.m_cost_factor`, the rule the per-build ann
+    block beside this line uses, so the two blocks of one estimate cannot
+    disagree about what an M costs: ~M^1.1 from the M=16 rate for the engines
+    that build the graph inside every INSERT, and nothing for the others,
+    whose rate is the load alone -- which also covers Percona Search, whose M
+    is a label in a result file name and not a knob. ef_construction is not
+    priced, because no ingest rate here was measured at more than one value
+    of it -- so where the grid sweeps it above the rates' 200 (the tuned pass
+    sweeps pgvector and Valkey to 400) this is NOT an upper bound, and the
+    printed line says so.
     """
     if not _frontier(profile):
         return None
-    ann = profile.get("ann", {}) or {}
-    grid = [int(m) for m in ann.get("m_values", [16])]
-    for values in (ann.get("m_values_by_engine") or {}).values():
-        grid += [int(m) for m in values or []]
-    largest = max(grid or [_RATE_REFERENCE_M])
-    return {"m": largest,
-            "ingest_factor": round(max(1.0, largest / _RATE_REFERENCE_M), 3)}
+    from .config import load_resources, merge_resource_overrides
+    from .estimate_grid import ann_builds, m_cost_factor
+
+    per_engine: Dict[str, Dict[str, Any]] = {}
+    for engine in engines:
+        largest: Optional[int] = None
+        for resource_pass in passes:
+            resources = merge_resource_overrides(
+                load_resources(resource_pass), profile)
+            try:
+                builds = ann_builds(engine, profile, resources, resource_pass)
+            except ValueError:
+                # `run` refuses an unrenderable grid before it starts; the
+                # estimate has nothing to charge from and charges M=16.
+                builds = []
+            for build in builds:
+                if build.get("M") is not None:
+                    largest = max(int(build["M"]), largest or 0)
+        per_engine[engine] = {
+            "m": largest,
+            "ingest_factor": round(m_cost_factor(engine, largest), 3)}
+    return {"engines": per_engine,
+            "m": max((r["m"] for r in per_engine.values()
+                      if r["m"] is not None), default=None)}
 
 
 def ops_ingest_factor(bound: Optional[Dict[str, Any]], engine: str) -> float:
-    """The M factor one engine's ops ingest is charged at under `frontier`.
-
-    1.0 in `reference` mode, and for an engine whose declared reference
-    build names no M axis -- M is not a knob there (Percona Search).
-    """
+    """The M factor one engine's ops ingest is charged at: 1.0 in `reference`
+    mode, else what `frontier_ops_bound` priced for that engine."""
     if not bound:
         return 1.0
-    from . import engines as engines_mod
-    axes = {axis for axis, _ in engines_mod.get(engine).reference_build}
-    return bound["ingest_factor"] if "m" in axes else 1.0
+    return ((bound.get("engines") or {}).get(engine) or {}).get(
+        "ingest_factor", 1.0)
 
 
 def _ops_units(profile: Dict[str, Any], engine: str) -> int:
@@ -1329,7 +1339,7 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
     what is named as unknown instead of being guessed at.
     """
     m_count = max(1, len(profile.get("ann", {}).get("m_values", [16])))
-    ops_bound = frontier_ops_bound(profile)
+    ops_bound = frontier_ops_bound(profile, engines, passes)
     ops_m = (1 if ops_bound
              else max(1, len(profile.get("ops", {}).get("m_values", [16]))))
     per_engine: Dict[str, float] = {}
@@ -1475,13 +1485,18 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
               f"amount nothing here knows.")
     bound = estimate.get("ops_build_bound")
     if bound:
+        priced = ", ".join(
+            f"{engine} M={row['m']} x{row['ingest_factor']:g}"
+            for engine, row in bound["engines"].items()
+            if row["ingest_factor"] != 1.0)
         print(f"  ops build: unknown until each ann phase has run "
               f"(ops.build_selection: frontier); the ops ingest above is "
-              f"charged\n    at the largest swept build, M={bound['m']} "
-              f"(x{bound['ingest_factor']:g} the M=16 rate, assumed linear in "
-              f"M;\n    not applied to Percona Search, whose M is a label). "
-              f"ef_construction is not modelled, so where\n    the grid "
-              f"sweeps it above 200 this is not an upper bound.")
+              f"charged\n    one build per unit at each engine's largest "
+              f"swept M"
+              + (f" ({priced})" if priced else "")
+              + f", priced as the\n    per-build block prices M. "
+              f"ef_construction is not priced, so where the grid sweeps it\n"
+              f"    above 200 this is not an upper bound.")
     if estimate["long_run"] and axis_hint:
         print(f"  ! This is a long run. Each M value costs a full reload of every "
               f"dataset,\n    and MHNSW/VIDX build incrementally at a few hundred "

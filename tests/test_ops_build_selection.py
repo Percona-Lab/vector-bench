@@ -637,13 +637,30 @@ class TestEstimate:
         frontier = {**base, "ops": {"m_values": [16, 32],
                                     "build_selection": "frontier"}}
         ref = estimate_load_hours(base, ["mariadb"], ["glove-100-angular"],
-                                  ["tuned"], ["ops"])
+                                  ["normalized"], ["ops"])
         est = estimate_load_hours(frontier, ["mariadb"],
-                                  ["glove-100-angular"], ["tuned"], ["ops"])
-        assert est["ops_build_bound"] == {"m": 48, "ingest_factor": 3.0}
+                                  ["glove-100-angular"], ["normalized"], ["ops"])
+        from orchestrator.estimate_grid import m_cost_factor
+        factor = m_cost_factor("mariadb", 48)          # ~M^1.1, as #82 prices
+        assert est["ops_build_bound"]["m"] == 48
+        assert est["ops_build_bound"]["engines"]["mariadb"] == {
+            "m": 48, "ingest_factor": round(factor, 3)}
         assert est["ops_m_values"] == 1
         assert est["ingest_hours"] == pytest.approx(
-            ref["ingest_hours"] * 3.0, rel=0.01)
+            ref["ingest_hours"] * factor, rel=0.01)
+
+    def test_the_bound_reads_the_rendered_grid_overlay_included(self):
+        """`m_values_by_engine` from a select-builds overlay or the tuned
+        extras is what the run renders, so it is what the bound charges."""
+        from orchestrator.estimate import frontier_ops_bound
+        profile = {"ann": {"m_values": [16]},
+                   "ops": {"build_selection": "frontier"},
+                   "resources": {"extras": {
+                       "m_values_by_engine": {"mariadb": [8, 32]}}}}
+        bound = frontier_ops_bound(profile, ["mariadb", "alisql"], ["tuned"])
+        assert bound["engines"]["mariadb"]["m"] == 32
+        assert bound["engines"]["alisql"]["m"] == 16
+        assert bound["engines"]["alisql"]["ingest_factor"] == 1.0
 
     def test_the_estimate_says_the_build_is_unknown(self):
         from orchestrator.estimate import print_load_estimate
@@ -652,7 +669,7 @@ class TestEstimate:
         out = io.StringIO()
         with redirect_stdout(out):
             print_load_estimate(profile, ["mariadb"],
-                                ["dbpedia-openai-1000k-angular"], ["tuned"],
+                                ["dbpedia-openai-1000k-angular"], ["normalized"],
                                 ["ann", "ops"])
         assert "unknown until each ann phase" in out.getvalue()
         assert "M=32" in out.getvalue()
@@ -1051,6 +1068,41 @@ class TestChoiceOutsideTheGrid:
         with pytest.raises(sel.SelectionRefused, match="m=32"):
             self._go(manifest, 32)
 
+    def test_an_overlay_restricts_the_grid_the_choice_must_lie_in(self):
+        """Stage 2 (`run --overlay`) renders exactly the kept builds; a
+        choice the full product would contain but the overlay dropped is
+        refused. The overlay reaches `resources` through the profile's
+        `resources:` block, as `cmd_run` merges it."""
+        from orchestrator.config import (load_profile, load_resources,
+                                         merge_resource_overrides)
+        from orchestrator import profile_overlay
+        extras = {"m_values_by_engine": {"pgvector": [4, 16, 48]},
+                  "pgvector_ef_construction": [64, 200, 400],
+                  "ann_builds_by_engine": {"pgvector": [
+                      {"M": 4, "efConstruction": 64},
+                      {"M": 16, "efConstruction": 200},
+                      {"M": 48, "efConstruction": 400}]}}
+        selection = {"stage1": {"run_id": "s1"}, "kept": {}}
+        selection["overlay_sha256"] = profile_overlay.overlay_digest(
+            extras, selection)
+        profile, _ = profile_overlay.apply_overlay(
+            load_profile("tuned-complete"),
+            {"overlay_of": "tuned-complete", "resources": {"extras": extras},
+             "build_selection": selection})
+        assert sel.build_selection_mode(profile) == "frontier"
+        resources = merge_resource_overrides(load_resources("tuned"), profile)
+        for kept in ({"m": 4, "ef_construction": 64},
+                     {"m": 48, "ef_construction": 400}):
+            assert sel.grid_problem("pgvector", profile, resources, "tuned",
+                                    kept) is None
+        problem = sel.grid_problem("pgvector", profile, resources, "tuned",
+                                   {"m": 4, "ef_construction": 400})
+        assert problem and "not in the tuned ann grid" in problem
+        # And the pre-run check select-builds and run share still passes.
+        from orchestrator.reference_build import reference_build_problem
+        assert reference_build_problem("pgvector", profile, resources,
+                                       "tuned") is None
+
     def test_a_fallback_is_not_grid_checked_here(self, tmp_path):
         # reference_build_problem already checks it before the run.
         manifest = Manifest(str(tmp_path / "run"), "grid-2")
@@ -1063,11 +1115,18 @@ class TestEstimateLabels:
     def test_percona_search_is_not_charged_the_m_factor(self):
         from orchestrator.estimate import (frontier_ops_bound,
                                            ops_ingest_factor)
+        from orchestrator.estimate_grid import m_cost_factor
         bound = frontier_ops_bound({"ann": {"m_values": [16, 48]},
-                                    "ops": {"build_selection": "frontier"}})
+                                    "ops": {"build_selection": "frontier"}},
+                                   ["mongodb", "pgvector", "mariadb"],
+                                   ["normalized"])
         assert ops_ingest_factor(bound, "mongodb") == 1.0
-        assert ops_ingest_factor(bound, "pgvector") == 3.0
-        assert ops_ingest_factor(None, "pgvector") == 1.0
+        # pgvector's rate is the load alone; the bulk build is in neither
+        # figure, as the per-build ann block says of the same engine.
+        assert ops_ingest_factor(bound, "pgvector") == 1.0
+        assert ops_ingest_factor(bound, "mariadb") == round(
+            m_cost_factor("mariadb", 48), 3)
+        assert ops_ingest_factor(None, "mariadb") == 1.0
 
     def test_the_line_says_efc_is_not_bounded(self):
         from orchestrator.estimate import print_load_estimate
@@ -1076,7 +1135,101 @@ class TestEstimateLabels:
             print_load_estimate({"ann": {"m_values": [16, 32]},
                                  "ops": {"build_selection": "frontier"}},
                                 ["mariadb"], ["dbpedia-openai-1000k-angular"],
-                                ["tuned"], ["ann", "ops"])
+                                ["normalized"], ["ann", "ops"])
         text = " ".join(out.getvalue().split())
         assert "not an upper bound" in text
-        assert "not applied to Percona Search" in text
+        assert "priced as the per-build block prices M" in text
+        assert "mariadb M=32" in text
+
+    def test_both_estimate_blocks_print_coherently(self, capsys):
+        """`cmd_run` prints the headline (with the ops-build line) and then
+        #82's per-build ann block; under frontier both appear, the M price is
+        one rule, and the headline drops its "Reduce ann.m_values" advice for
+        the block that names the real multiplier."""
+        from orchestrator.estimate import (estimate_load_hours,
+                                           print_load_estimate)
+        from orchestrator.estimate_grid import ann_grid_prints, print_ann_grid
+        profile = {"ann": {"m_values": [16]},
+                   "ops": {"build_selection": "frontier"},
+                   "resources": {"extras": {
+                       "m_values_by_engine": {"mariadb": [8, 16, 48]}}}}
+        args = (profile, ["mariadb"], ["dbpedia-openai-1000k-angular"],
+                ["tuned"], ["ann", "ops"])
+        prints = ann_grid_prints(*args)
+        assert prints
+        print_load_estimate(*args, axis_hint=not prints)
+        print_ann_grid(*args, estimate_load_hours(*args))
+        text = " ".join(capsys.readouterr().out.split())
+        assert "ops build: unknown until each ann phase" in text
+        assert "mariadb M=48" in text
+        assert "ann builds the rendered grid asks for" in text
+        assert "Reduce ann.m_values" not in text
+
+
+# ---------------------------------------------------------------------------
+# End to end with #80's headline: the frontier-chosen ops build IS the
+# headline build at the calibration target, so no ◇ there
+# ---------------------------------------------------------------------------
+
+class TestTheChosenBuildIsTheHeadlineBuild:
+
+    @pytest.fixture(autouse=True)
+    def _numpy(self):
+        pytest.importorskip("numpy")
+
+    def _run(self):
+        from report import generate
+        from report.ops_build_choice import choose_ops_build
+        from tests.test_e26_report_build_labels import (
+            DATASET as E26_DATASET, _mongodb_records, _pgvector_records,
+            _valkey_records)
+        records = (_mongodb_records() + _pgvector_records()
+                   + _valkey_records())
+        engines: Dict[str, Any] = {}
+        chosen: Dict[str, Any] = {}
+        for engine in ("mongodb", "pgvector", "valkey"):
+            points = [r for r in records if r["engine"] == engine]
+            choice = choose_ops_build(points, TARGET)
+            selection = sel._from_choice(engine, choice, TARGET)
+            chosen[engine] = selection
+            engines[engine] = {"presentation": {
+                # The declared build, which the old headline used and which
+                # is NOT the frontier's fastest for any of the three.
+                "reference_builds": {"tuned": {"m": 16,
+                                               "ef_construction": 200}},
+                sel.PRESENTATION_KEY: {"tuned": {E26_DATASET: {
+                    "build": selection["reference_build"],
+                    "source": selection["source"],
+                    "status": selection["status"]}}}}}
+        manifest = {"run_id": "r", "phases": [], "engines": engines,
+                    "config": {"resource_pass": "tuned",
+                               "profile": {"name": "t"}}}
+        summary = generate.summarize(records, manifest)
+        per_engine = summary["per_dataset"][E26_DATASET]["tuned"]
+        return summary, per_engine, chosen
+
+    def test_no_mismatch_mark_at_the_target(self):
+        summary, per_engine, chosen = self._run()
+        for engine, entry in per_engine.items():
+            assert chosen[engine]["status"] == "selected", engine
+            assert entry["reference_source"] == "manifest: frontier@0.95"
+            assert entry["qps_at_recall_95_is_ops_build"] is True, engine
+            # The ops-build table's 0.95 figure is the headline's.
+            assert entry["reference_qps_at_recall_95"] == \
+                entry["qps_at_recall_95"]
+        assert chosen["mongodb"]["reference_build"] == {"quantization": "none"}
+        assert chosen["pgvector"]["reference_build"] == {
+            "m": 16, "ef_construction": 400}
+
+    def test_the_page_carries_no_mark_at_95_and_says_how_it_was_chosen(self):
+        from report import frontier_render, render
+        summary, per_engine, _ = self._run()
+        page = render._headline_tables(summary)
+        headline = page.split(frontier_render.OPS_TABLE_HEADING)[0]
+        for engine in per_engine:
+            row = next(l for l in headline.splitlines()
+                       if l.startswith(f"| {render._label(engine)} "))
+            cell_95 = row.strip("|").split("|")[2]
+            assert frontier_render.OPS_MISMATCH_MARK not in cell_95, engine
+        assert "chosen from this run's frontier as the build fastest at " \
+               "recall 0.95" in page
