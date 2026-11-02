@@ -35,10 +35,17 @@ vector index:
 6. The REFERENCE build of the target profile (what its ops pass builds;
    `reference_build.resolve_reference_build`) is always kept. `run` refuses a
    grid that does not contain it, and the headline figures are taken from it.
-7. The overlay can only spell lists, which `render_config` multiplies, so the
-   product of the kept values can contain builds rules 2-6 did not choose.
-   Those are kept and recorded as "grid closure", never hidden; any the engine
-   cannot build is dropped by `render_config` and recorded with its reason.
+7. NO CLOSURE. The overlay names the kept builds exactly
+   (`resources.extras.ann_builds_by_engine`, applied by
+   `ann_knobs.restrict_to_builds`), beside the per-axis lists that make the
+   values legal for the render. Lists alone are multiplied out by upstream,
+   and on a synthetic stage 1 three chosen pgvector builds came back as eight
+   -- five full 990,000-row loads nobody chose.
+8. A NEIGHBOUR WITH NO STAGE-1 POINTS is dropped, and recorded among the
+   pruned builds with that reason, rather than kept. Rule 5 keeps a neighbour
+   so stage 2 can compare it with stage 1; with no stage-1 point there is
+   nothing to compare it with, and a build that failed or fell back to a scan
+   at 90,000 rows is an hours-long failure waiting at 990,000.
 
 Everything else explored at stage 1 is pruned, with the reason. The overlay's
 `build_selection` block -- stage-1 run id and path, the grid explored, kept
@@ -81,8 +88,10 @@ SCHEMA = 1
 
 REASON_REFERENCE = ("reference build of the target profile (what its ops "
                     "pass builds; `run` refuses a grid without it)")
-REASON_CLOSURE = ("grid closure: the overlay's per-engine lists form a "
-                  "cartesian product, and this build is in it")
+REASON_NEIGHBOUR_UNMEASURED = (
+    "M neighbour of kept build {kept}, dropped: no stage-1 point used the "
+    "vector index, so there is nothing to confirm a transfer against, and a "
+    "build that failed at 90k is hours lost at 990k")
 REASON_NO_POINTS = ("no stage-1 point used the vector index (not measured, "
                     "failed, or every point fell back to a scan)")
 REASON_PRUNED = ("no frontier point at or within +/-{near} of any floor "
@@ -247,25 +256,43 @@ def _frontier_reasons(points: Sequence[Dict[str, Any]],
     return kept, unreached
 
 
-def _neighbours(build: Dict[str, Any], explored: Sequence[Dict[str, Any]]
+def _neighbours(engine: str, build: Dict[str, Any],
+                explored: Sequence[Dict[str, Any]]
                 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Rule 5: the explored builds one M step either side, same other axes,
-    and an edge note per side that has none."""
+    and an edge note per side that has none.
+
+    The note says WHY there is none. Past the grid's own edge the frontier
+    may continue; but pgvector's M=32 at ef_construction 64 has M=48 above it
+    in the grid and not at 64, because pgvector cannot build it there -- a
+    different statement, and "largest M explored" would have hidden it.
+    """
     if "M" not in build:
         return [], []
     rest = {a: v for a, v in build.items() if a != "M"}
     ms = sorted({b["M"] for b in explored if "M" in b and
                  {a: v for a, v in b.items() if a != "M"} == rest})
+    every_m = sorted({b["M"] for b in explored if "M" in b})
     m = build["M"]
-    below = [v for v in ms if v < m]
-    above = [v for v in ms if v > m]
     found, edges = [], []
-    for side, values, pick in (("below", below, max), ("above", above, min)):
-        if values:
-            found.append({**rest, "M": pick(values)})
+    for side, pick in (("below", max), ("above", min)):
+        here = [v for v in ms if (v < m if side == "below" else v > m)]
+        if here:
+            found.append({**rest, "M": pick(here)})
+            continue
+        elsewhere = [v for v in every_m
+                     if (v < m if side == "below" else v > m)]
+        illegal = (excluded_builds(engine, [pick(elsewhere)],
+                                   [rest["efConstruction"]])
+                   if elsewhere and "efConstruction" in rest else [])
+        if illegal:
+            edges.append(f"M={m} at {key(rest)} has no neighbour {side} it: "
+                         f"M={illegal[0][0]} is in the grid but cannot be "
+                         f"built here -- {illegal[0][2]}")
         else:
-            edges.append(f"M={m} is the {'smallest' if side == 'below' else 'largest'}"
-                         f" M explored at {key(rest) if rest else 'this engine'}"
+            edges.append(f"M={m} is the "
+                         f"{'smallest' if side == 'below' else 'largest'} M "
+                         f"explored at {key(rest) if rest else 'this engine'}"
                          f"; the frontier may continue {side} it")
     return found, edges
 
@@ -275,19 +302,26 @@ def select_engine(engine: str, points: Sequence[Dict[str, Any]],
                   reference: Optional[Dict[str, Any]],
                   floors: Sequence[float] = FLOORS,
                   near: float = NEAR_RECALL) -> Dict[str, Any]:
-    """Apply rules 2-7 to one engine. Pure: points and grids in, lists out."""
+    """Apply rules 2-8 to one engine. Pure: points and grids in, lists out."""
     points = [{**p, "build": normalize(engine, p["build"])} for p in points]
     explored = [normalize(engine, b) for b in explored]
     reference = normalize(engine, reference) if reference else None
     kept, unreached = _frontier_reasons(points, floors, near)
+    measured = {key(p["build"]) for p in points}
     edges: List[str] = []
+    dropped: Dict[str, str] = {}
     by_key = {key(b): b for b in explored}
     for point in points:
         by_key.setdefault(key(point["build"]), point["build"])
     for chosen in [json.loads(k) for k in list(kept)]:
-        found, notes = _neighbours(chosen, list(by_key.values()))
+        found, notes = _neighbours(engine, chosen, list(by_key.values()))
         edges += [n for n in notes if n not in edges]
         for neighbour in found:
+            if key(neighbour) not in measured:
+                dropped.setdefault(key(neighbour),
+                                   REASON_NEIGHBOUR_UNMEASURED.format(
+                                       kept=key(chosen)))
+                continue
             reasons = kept.setdefault(key(neighbour), [])
             reason = f"M neighbour of kept build {key(chosen)}"
             if reason not in reasons:
@@ -295,25 +329,21 @@ def select_engine(engine: str, points: Sequence[Dict[str, Any]],
     if reference:
         kept.setdefault(key(reference), []).append(REASON_REFERENCE)
         by_key.setdefault(key(reference), reference)
-    lists = overlay_lists(engine, [json.loads(k) for k in kept], reference)
-    closure, excluded = _closure(engine, lists)
-    for build in closure:
-        if key(build) not in kept:
-            kept[key(build)] = [REASON_CLOSURE]
-            by_key.setdefault(key(build), build)
-    measured = {key(p["build"]) for p in points}
-    pruned = [{"build": b, "reason": (REASON_PRUNED.format(
-                   near=near, floors="/".join(f"{f:.2f}" for f in floors))
-                   if k in measured else REASON_NO_POINTS)}
+    builds = [json.loads(k) for k in sorted(kept)]
+    generic = REASON_PRUNED.format(
+        near=near, floors="/".join(f"{f:.2f}" for f in floors))
+    pruned = [{"build": b, "reason": dropped.get(k) or (
+                   generic if k in measured else REASON_NO_POINTS)}
               for k, b in by_key.items() if k not in kept]
     return {
         "kept": [{"build": json.loads(k), "reasons": r}
                  for k, r in sorted(kept.items())],
         "pruned": sorted(pruned, key=lambda e: key(e["build"])),
-        "excluded": excluded,
         "edges": edges,
         "floors_unreached": unreached,
-        "lists": lists,
+        "lists": overlay_lists(engine, builds, reference),
+        "builds": sorted_builds(builds),
+        "explored_count": len(by_key),
     }
 
 
@@ -321,8 +351,9 @@ def overlay_lists(engine: str, builds: Sequence[Dict[str, Any]],
                   reference: Optional[Dict[str, Any]]) -> Dict[str, List[Any]]:
     """The per-axis value lists the overlay writes for one engine.
 
-    M only for an engine with a graph-degree knob (`ann_knobs.KNOB_BOUNDS`):
-    mongot's M is a label and must not grow into seven identical curves.
+    They make every kept value legal for the render; which COMBINATIONS are
+    built is `ann_builds_by_engine` (rule 7). M only for an engine with a
+    graph-degree knob (`ann_knobs.KNOB_BOUNDS`): mongot's M is a label.
     Ascending, except quantization, whose reference value goes first: the ops
     pass takes the head of `mongodb_quantization` (`ops_pass._quantization`)
     and the headline build must not move. No other list is read by position.
@@ -340,26 +371,3 @@ def overlay_lists(engine: str, builds: Sequence[Dict[str, Any]],
             values = [head] + [v for v in values if v != head]
         lists[axis] = values
     return lists
-
-
-def _closure(engine: str, lists: Dict[str, List[Any]]
-             ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Rule 7: every build the lists multiply out to, split into the ones the
-    engine can build and the ones `render_config` will drop."""
-    ms = lists.get("M") or [None]
-    efcs = lists.get("efConstruction") or [None]
-    qs = lists.get("quantization") or [None]
-    illegal = {(m, e): r for m, e, r in excluded_builds(
-        engine, [m for m in ms if m is not None],
-        [e for e in efcs if e is not None])}
-    builds, excluded = [], []
-    for m in ms:
-        for e in efcs:
-            for q in qs:
-                build = {a: v for a, v in (("M", m), ("efConstruction", e),
-                                           ("quantization", q)) if v is not None}
-                if (m, e) in illegal:
-                    excluded.append({"build": build, "reason": illegal[(m, e)]})
-                else:
-                    builds.append(build)
-    return builds, excluded

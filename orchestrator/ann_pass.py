@@ -19,7 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import docker_ctl
 from . import engines as engines_mod
-from .ann_knobs import efc_run_groups, excluded_builds, knob_problems
+from .ann_knobs import (efc_run_groups, excluded_builds, knob_problems,
+                        restrict_to_builds)
 from .config import ResolvedResources, server_args, server_env
 
 # Re-exported, not just imported: `cli.py` and a dozen tests reach these
@@ -347,6 +348,12 @@ def render_config(engine: str, profile: Dict[str, Any],
 
     else:
         raise ValueError(f"unknown engine: {engine}")
+
+    # A stage-2 selection names its builds exactly (`select-builds`); see
+    # `ann_knobs.restrict_to_builds` for why the lists alone were not enough.
+    selected = (extras.get("ann_builds_by_engine") or {}).get(engine)
+    if selected:
+        run_groups = restrict_to_builds(engine, run_groups, selected)
 
     return {
         "float": {

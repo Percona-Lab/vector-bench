@@ -191,3 +191,59 @@ def efc_run_groups(base_name: str, arg_group: Dict[str, Any], engine: str,
             "query_args": query_args,
         }
     return groups
+
+
+#: What Percona Search's ann module accepts (`mongodb/module.py` refuses
+#: anything else at construction); pinned to that source by test.
+QUANTIZATIONS = ("none", "scalar", "binary")
+
+#: The build axes a selected build may name, as `render_config` spells them.
+BUILD_AXES = ("M", "efConstruction", "quantization")
+
+
+def restrict_to_builds(engine: str, run_groups: Dict[str, Dict[str, Any]],
+                       selected: List[Dict[str, Any]]
+                       ) -> Dict[str, Dict[str, Any]]:
+    """Keep only the builds `selected` names, one run group per build.
+
+    WHY. A profile's grid is per-axis lists, which upstream multiplies, so a
+    stage-2 selection written as lists alone re-admits every product of the
+    kept values: three chosen pgvector builds came back as eight, five of them
+    builds nobody chose, each a full 990,000-row load. The tuned pass's
+    `resources.extras.ann_builds_by_engine` names the builds themselves, and
+    this cuts the rendered grid down to exactly those.
+
+    A selected build matches a rendered combination when every axis it names
+    is equal -- so a mongodb entry naming only `quantization` matches the
+    combination carrying mongot's M label. Each match becomes its own run
+    group whose list values are one-element lists (scalars stay scalars), so
+    the expansion, and therefore the result file name, is the one the full
+    grid would have produced. A selected build the grid does not contain is
+    refused: measuring fewer builds than the selection lists, silently, is
+    the failure this exists to prevent.
+    """
+    from .ann_config import _expand
+
+    wanted = [dict(b) for b in selected]
+    matched = set()
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, group in run_groups.items():
+        for entry in group["arg_groups"]:
+            for combo in _expand(entry):
+                hits = [i for i, b in enumerate(wanted)
+                        if all(combo.get(a) == v for a, v in b.items())]
+                if not hits:
+                    continue
+                matched.update(hits)
+                out[f"{name}_{len(out)}"] = {
+                    "arg_groups": [{k: ([combo[k]] if isinstance(v, list)
+                                        else v) for k, v in entry.items()}],
+                    "args": {},
+                    "query_args": group["query_args"],
+                }
+    missing = [b for i, b in enumerate(wanted) if i not in matched]
+    if missing:
+        raise ValueError(f"{engine}: ann_builds_by_engine names build(s) the "
+                         f"grid does not contain: {missing}. Add their values "
+                         f"to the per-axis lists, or regenerate the overlay.")
+    return out

@@ -21,7 +21,7 @@ from .ann_pass import excluded_ann_builds
 from .config import load_profile, load_resources, merge_resource_overrides
 from .estimate_grid import ann_builds
 from .manifest import Manifest
-from .profile_overlay import OVERLAY_EXTRAS, apply_overlay, extras_digest
+from .profile_overlay import OVERLAY_EXTRAS, apply_overlay, overlay_digest
 from .reference_build import (GRID_ARGUMENT, reference_build_problem,
                               resolve_reference_build)
 
@@ -71,6 +71,9 @@ def _extras(chosen: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
                 raise ValueError(f"{engine}: no resources.extras key carries "
                                  f"its {axis} axis ({name})")
             extras[name] = lists[axis]
+        # The builds themselves; the lists above only make their values
+        # legal for the render (build_selection rule 7: no closure).
+        extras.setdefault("ann_builds_by_engine", {})[engine] = result["builds"]
     return extras
 
 
@@ -91,6 +94,14 @@ def select(stage1_dir: str, target_name: str = "tuned-complete",
         if len(ann.get(name) or ["post"]) > 1:
             raise ValueError(f"stage 1 swept ann.{name} {ann[name]}; a "
                              f"selection cannot tell the modes apart")
+    # The same for MariaDB's storage engine: points from InnoDB and MyISAM
+    # would merge under one M.
+    extras = _resources(stage1_profile).get("extras") or {}
+    storages = (extras.get("mariadb_storage_engines")
+                or ann.get("mariadb_storage_engines") or ["InnoDB"])
+    if len(storages) > 1:
+        raise ValueError(f"stage 1 swept mariadb_storage_engines {storages}; "
+                         f"a selection cannot tell the storage engines apart")
     target = load_profile(target_name)
     chosen: Dict[str, Dict[str, Any]] = {}
     grid: Dict[str, Any] = {}
@@ -123,8 +134,8 @@ def select(stage1_dir: str, target_name: str = "tuned-complete",
         engine: (f"no stage-1 point used the vector index; {target_name}'s "
                  f"own grid is measured for it")
         for engine in sorted(attempted - set(chosen))}
-    document["build_selection"]["extras_sha256"] = extras_digest(
-        document["resources"]["extras"])
+    document["build_selection"]["overlay_sha256"] = overlay_digest(
+        document["resources"]["extras"], document["build_selection"])
     return document
 
 
@@ -178,7 +189,9 @@ def _document(stage1_dir: str, manifest: Dict[str, Any], notes: Dict[str, Any],
         "stage1_excluded": stage1_excluded,
         "kept": {e: r["kept"] for e, r in chosen.items()},
         "pruned": {e: r["pruned"] for e, r in chosen.items()},
-        "excluded": {e: r["excluded"] for e, r in chosen.items()},
+        # Always zero since the overlay names its builds; recorded so a reader
+        # of the manifest does not have to know that to trust the kept list.
+        "closure_builds": 0,
         "edges": {e: r["edges"] for e, r in chosen.items() if r["edges"]},
         "floors_unreached": {e: r["floors_unreached"]
                              for e, r in chosen.items()
@@ -252,7 +265,9 @@ def summary(document: Dict[str, Any]) -> List[str]:
             ("M", (extras.get("m_values_by_engine") or {}).get(engine)),
             ("efC", extras.get(f"{engine}_ef_construction")),
             ("quantization", extras.get(f"{engine}_quantization"))) if v}
-        lines.append(f"  {engine:<11} keep {len(kept):>2}, prune "
+        explored = len(block["grid_explored"].get(engine) or [])
+        lines.append(f"  {engine:<11} keep {len(kept):>2} of {explored:>2} "
+                     f"explored (exact builds, 0 closure), prune "
                      f"{len(pruned):>2}  {json.dumps(lists)}")
         for edge in (block.get("edges") or {}).get(engine, []):
             lines.append(f"    ! {edge}")
