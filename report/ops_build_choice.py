@@ -28,20 +28,29 @@ ef_search calibration then chases on the index it builds, read from one
 place on the host and passed in here. The build whose qualifying point is
 fastest wins. A build with no point at the target does not compete.
 
-TIE-BREAK, deterministic and in this order: higher QPS; then higher recall
-at the qualifying point; then the cheaper build -- smaller M, then smaller
-ef_construction (a missing value sorts as 0, the engine having no knob) --
-because between two indexes that serve the target equally fast the one that
-costs less to build and hold is what an operator would deploy; then the
-(M, ef_construction, quantization) key as a string, which is stable across
-runs and machines and, since storage and mode are filtered out first, never
-decides between two storage engines. QPS
-is a float measured to three decimals, so an exact tie is rare, but "rare"
-is not "never" and the choice has to be the same on every re-read.
+A STORAGE ENGINE OR BUILD MODE IS FILTERED ONLY WHERE THE ANN GRID SWEPT IT
+-- more than one value among this engine's points, `frontier.swept_flags`,
+the rule the report's headline already uses. Every ann module stamps both
+axes whether or not they vary: Percona Search writes `async`/`wiredTiger`
+on every point while the ops pass's build mode is `post`, so filtering on
+the ops value there dropped every point and turned the scalar-versus-none
+choice into a fallback with a reason about missing points. Where an axis
+does vary (MariaDB's InnoDB and MyISAM, pgvector's and Valkey's post and
+incremental), the ann values and the ops pass's are the same words.
+
+TIE-BREAK, deterministic, and the same key the report's headline breaks an
+exact QPS tie with (`builds._fastest_then_smallest`), so where the report
+and the ops pass see the same points they name the same build: higher QPS;
+then the smaller measured index size; then smaller M; then smaller
+ef_construction; then the build signature as a string. Smaller wins because
+between two indexes that serve the target equally fast the one that costs
+less to build and hold is what an operator would deploy. QPS is a float
+measured to three decimals, so an exact tie is rare, but "rare" is not
+"never" and the choice has to be the same on every re-read.
 
 NOTHING REACHES THE TARGET. Then the build with the highest maximum recall
-wins (ties: higher QPS at that point, then the same cheaper-build and
-signature order), and the status says `below_target`. That is the build
+wins (ties: higher QPS at that point, then the same smaller-build order),
+and the status says `below_target`. That is the build
 closest to the target the calibration is about to chase, and the record
 says it never got there.
 
@@ -80,10 +89,10 @@ def _build_key(point: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     return (params["m"], params["ef_construction"], params["quantization"])
 
 
-def _rank_key(key: Tuple[Any, Any, Any]) -> Tuple[int, int, str]:
-    """Cheaper build first, then the key as a string: the last two tie-breaks."""
-    m, ef_construction, _quantization = key
-    return (int(m or 0), int(ef_construction or 0), str(key))
+def _smaller_first(point: Dict[str, Any]) -> Tuple[Any, ...]:
+    """The report's tie-break after QPS: size, M, ef_construction, signature."""
+    from report.builds import _fastest_then_smallest
+    return _fastest_then_smallest(point)[1:]
 
 
 def _usable(point: Dict[str, Any]) -> bool:
@@ -152,11 +161,16 @@ def choose_ops_build(points: Sequence[Dict[str, Any]],
     engine does not sweep. See the module docstring for the rule, the
     tie-break and the below-target fallback.
     """
+    from report.frontier import swept_flags
     from report.loaders import pareto_frontier
 
+    usable = [p for p in points if _usable(p)]
+    swept = swept_flags(usable)
+    storage_engine = storage_engine if swept["storage_engine"] else None
+    build_mode = build_mode if swept["build_mode"] else None
     groups: Dict[Tuple[Any, Any, Any], List[Dict[str, Any]]] = {}
-    for point in points:
-        if _usable(point) and _on_primary(point, storage_engine, build_mode):
+    for point in usable:
+        if _on_primary(point, storage_engine, build_mode):
             groups.setdefault(_build_key(point), []).append(point)
     if not groups:
         return None
@@ -176,13 +190,12 @@ def choose_ops_build(points: Sequence[Dict[str, Any]],
 
     if reaching:
         key, point, size = min(
-            reaching, key=lambda c: (-c[1]["qps"], -c[1]["recall_at_k"],
-                                     _rank_key(c[0])))
+            reaching, key=lambda c: (-c[1]["qps"], *_smaller_first(c[1])))
         status = STATUS_SELECTED
     else:
         key, point, size = min(
             ceilings, key=lambda c: (-c[1]["recall_at_k"], -c[1]["qps"],
-                                     _rank_key(c[0])))
+                                     *_smaller_first(c[1])))
         status = STATUS_BELOW_TARGET
     return {"status": status, "target_recall": target_recall,
             "builds_considered": len(groups),

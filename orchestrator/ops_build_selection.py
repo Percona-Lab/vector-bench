@@ -367,6 +367,15 @@ def choose(manifest_data: Dict[str, Any], *, engine: str, dataset: str,
                             "result file"),
                 "ann_attempt": attempt_identity(attempt)}
     payload = chooser(files=files, target_recall=target) or {}
+    if payload.get("error"):
+        # Once more before a fallback is stored. A stored fallback is
+        # replaced on the next resume (a completed ann attempt exists), and
+        # if ops units were measured on it in between, that replacement is
+        # refused -- so one transient docker hiccup would otherwise lock the
+        # unit out until someone moved its ops files aside.
+        print(f"[ops] retrying the build selection once: "
+              f"{payload['error']}", file=sys.stderr)
+        payload = chooser(files=files, target_recall=target) or {}
     choice = payload.get("choice")
     if not choice:
         why = (f"the selection could not read the ann results: "

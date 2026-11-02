@@ -86,16 +86,27 @@ class TestChoice:
         assert choice["builds_considered"] == 3
         assert choice["builds_reaching_target"] == 2
 
-    def test_tie_on_qps_goes_to_higher_recall_then_cheaper_build(self):
-        # Equal QPS at the target: higher recall wins.
+    def test_an_exact_qps_tie_breaks_as_the_report_breaks_it(self):
+        """`builds._fastest_then_smallest`: size, then M, then efC, then the
+        signature -- not recall, which the headline does not consult either,
+        so the two never name different builds for the same points."""
+        from report import builds
+        # Equal QPS: the smaller M, even at the lower recall.
         points = (_curve(16, [(0.951, 500.0, 40)])
                   + _curve(32, [(0.97, 500.0, 40)]))
-        assert self._choose(points)["build"]["m"] == 32
-        # Equal QPS and recall: the smaller M, whatever the input order.
-        points = (_curve(32, [(0.96, 500.0, 40)])
-                  + _curve(16, [(0.96, 500.0, 40)]))
         assert self._choose(points)["build"]["m"] == 16
+        best = min([p for p in points if p["recall_at_k"] >= TARGET],
+                   key=builds._fastest_then_smallest)
+        assert best["m"] == 16
+        # Whatever the input order.
         assert self._choose(list(reversed(points)))["build"]["m"] == 16
+        # A measured index size outranks M.
+        sized = (_curve(16, [(0.96, 500.0, 40)])
+                 + _curve(32, [(0.96, 500.0, 40)]))
+        for p in sized:
+            p["index_bytes"] = 9_000 if p["m"] == 16 else 4_000
+        assert self._choose(sized)["build"]["m"] == 32
+        assert min(sized, key=builds._fastest_then_smallest)["m"] == 32
         # Then the smaller ef_construction.
         points = (_curve(16, [(0.96, 500.0, 40)], ef_construction=400)
                   + _curve(16, [(0.96, 500.0, 40)], ef_construction=64))
@@ -189,10 +200,21 @@ class TestChoice:
                                         "quantization"}
 
     def test_nothing_on_the_primary_curve_is_none(self):
-        points = _curve(16, [(0.96, 500.0, 40)], engine="mariadb")
-        for p in points:
-            p["storage_engine"] = "MyISAM"
+        points = (_curve(16, [(0.96, 500.0, 40)], engine="mariadb")
+                  + _curve(32, [(0.97, 400.0, 40)], engine="mariadb"))
+        points[0]["storage_engine"] = "MyISAM"
+        points[1]["storage_engine"] = "Aria"
         assert self._choose_on(points, storage="InnoDB") is None
+
+    def test_an_axis_the_grid_did_not_sweep_is_not_filtered(self):
+        # One value only: the stamp, not a sweep -- MyISAM-only grid points
+        # still compete, and the record says no filter was applied.
+        points = _curve(16, [(0.96, 500.0, 40)], engine="mariadb")
+        points[0]["storage_engine"] = "MyISAM"
+        choice = self._choose_on(points, storage="InnoDB", mode="post")
+        assert choice["build"]["m"] == 16
+        assert choice["selected_on"] == {"storage_engine": None,
+                                         "build_mode": None}
 
 
 class TestContainerEntryPoint:
@@ -1233,3 +1255,150 @@ class TestTheChosenBuildIsTheHeadlineBuild:
             assert frontier_render.OPS_MISMATCH_MARK not in cell_95, engine
         assert "chosen from this run's frontier as the build fastest at " \
                "recall 0.95" in page
+        assert "The ops build was chosen per engine" in page
+
+
+# ---------------------------------------------------------------------------
+# Every engine gets a frontier choice from the axis values its ann module
+# really stamps, through the primary curve `cmd_run` really passes
+# ---------------------------------------------------------------------------
+
+#: (storage_engine, build_mode) exactly as each overlay module writes them:
+#: vb_mysql's MySQL family writes its ENGINE= and no build mode; pgvector
+#: `heap`, Valkey `memory` and both their build_mode; Percona Search
+#: `wiredTiger` and `async` on every point.
+STAMPS = {"mariadb": ("InnoDB", None), "mariadb123": ("InnoDB", None),
+          "alisql": ("InnoDB", None), "percona": ("InnoDB", None),
+          "myvector": ("InnoDB", None), "pgvector": ("heap", "post"),
+          "valkey": ("memory", "post"), "mongodb": ("wiredTiger", "async")}
+
+#: Two builds per engine on the axis the tuned pass sweeps for it; the
+#: second is the faster at 0.95 and must be chosen.
+TWO_BUILDS = {
+    "mariadb": ({"m": 16}, {"m": 32}), "mariadb123": ({"m": 16}, {"m": 32}),
+    "alisql": ({"m": 16}, {"m": 32}),
+    "percona": ({"m": 16, "ef_construction": 200},
+                {"m": 16, "ef_construction": 400}),
+    "myvector": ({"m": 16, "ef_construction": 200},
+                 {"m": 16, "ef_construction": 400}),
+    "pgvector": ({"m": 16, "ef_construction": 200},
+                 {"m": 16, "ef_construction": 400}),
+    "valkey": ({"m": 16, "ef_construction": 200},
+               {"m": 16, "ef_construction": 400}),
+    "mongodb": ({"m": 16, "quantization": "scalar"},
+                {"m": 16, "quantization": "none"}),
+}
+
+
+class TestEveryEngineGetsAFrontierChoice:
+
+    @pytest.fixture(autouse=True)
+    def _numpy(self):
+        pytest.importorskip("numpy")
+
+    def _primary(self, engine, profile_name="tuned-complete"):
+        from orchestrator import cli
+        from orchestrator.config import (load_profile, load_resources,
+                                         merge_resource_overrides)
+        profile = load_profile(profile_name)
+        resources = merge_resource_overrides(load_resources("tuned"), profile)
+        return cli._ops_primary_curve(engine, profile,
+                                      cli.load_engine(engine), resources,
+                                      "tuned")
+
+    def _points(self, engine, extra_modes=()):
+        storage, mode = STAMPS[engine]
+        slow, fast = TWO_BUILDS[engine]
+        points = []
+        for build, rows in ((slow, [(0.90, 900.0, 10), (0.951, 400.0, 40)]),
+                            (fast, [(0.93, 950.0, 10), (0.96, 700.0, 40)])):
+            for recall, qps, ef in rows:
+                p = _point(recall, qps, m=build["m"], ef_search=ef,
+                           ef_construction=build.get("ef_construction"),
+                           quantization=build.get("quantization"),
+                           engine=engine)
+                p["storage_engine"], p["build_mode"] = storage, mode
+                points.append(p)
+        for other in extra_modes:
+            # The same two builds measured in another mode, faster still --
+            # which must not decide the build the primary mode is measured at.
+            for build in (slow,):
+                p = _point(0.99, 5000.0, m=build["m"],
+                           ef_construction=build.get("ef_construction"),
+                           quantization=build.get("quantization"),
+                           engine=engine)
+                p["storage_engine"], p["build_mode"] = storage, other
+                points.append(p)
+        return points
+
+    @pytest.mark.parametrize("engine", sorted(STAMPS))
+    def test_a_selected_choice_from_realistic_points(self, engine):
+        from report.ops_build_choice import choose_ops_build
+        storage, mode = self._primary(engine)
+        choice = choose_ops_build(self._points(engine), TARGET,
+                                  storage_engine=storage, build_mode=mode)
+        assert choice is not None, (engine, storage, mode)
+        assert choice["status"] == "selected"
+        fast = TWO_BUILDS[engine][1]
+        for axis, value in fast.items():
+            assert choice["build"][axis] == value, (engine, axis)
+        assert choice["point"]["qps"] == 700.0
+
+    def test_percona_search_async_points_survive_the_post_primary(self):
+        """The reviewer's reproduction: one `async` point, primary `post`."""
+        from report.ops_build_choice import choose_ops_build
+        assert self._primary("mongodb")[1] == "post"
+        point = _point(0.97, 100.0, quantization="none", engine="mongodb")
+        point["storage_engine"], point["build_mode"] = "wiredTiger", "async"
+        choice = choose_ops_build([point], TARGET, None, "post")
+        assert choice and choice["status"] == "selected"
+
+    @pytest.mark.parametrize("engine", ["pgvector", "valkey"])
+    def test_a_swept_build_mode_is_still_filtered(self, engine):
+        from report.ops_build_choice import choose_ops_build
+        storage, mode = self._primary(engine)
+        choice = choose_ops_build(
+            self._points(engine, extra_modes=("incremental",)), TARGET,
+            storage_engine=storage, build_mode=mode)
+        assert choice["build"] == {
+            **{"m": None, "ef_construction": None, "quantization": None},
+            **TWO_BUILDS[engine][1]}
+        assert choice["selected_on"]["build_mode"] == "post"
+
+
+@pytest.mark.usefixtures("any_grid")
+class TestTheContainerIsRetriedOnce:
+
+    def test_a_transient_failure_does_not_store_a_fallback(self, tmp_path):
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        answers = [{"error": "the selection container exited 125"},
+                   _payload(m=32)]
+        calls = []
+
+        def chooser(**kw):
+            calls.append(kw)
+            return answers.pop(0)
+        selection, _, err = _ensure(manifest, chooser)
+        assert len(calls) == 2
+        assert selection["status"] == "selected"
+        assert "retrying the build selection once" in err
+
+    def test_two_failures_fall_back_naming_the_second(self, tmp_path):
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        answers = [{"error": "first"}, {"error": "timed out after 1800 s"}]
+        calls = []
+
+        def chooser(**kw):
+            calls.append(kw)
+            return answers.pop(0)
+        selection, _, _ = _ensure(manifest, chooser)
+        assert len(calls) == 2
+        assert selection["status"] == "fallback_reference"
+        assert "timed out" in selection["reason"]
+
+    def test_an_empty_answer_is_not_retried(self, tmp_path):
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        chooser = _Chooser({"points": 0, "files": 2, "choice": None})
+        selection, _, _ = _ensure(manifest, chooser)
+        assert len(chooser.calls) == 1
+        assert selection["status"] == "fallback_reference"

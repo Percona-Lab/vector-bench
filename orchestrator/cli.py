@@ -31,7 +31,7 @@ import threading
 import sys
 import traceback
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 VB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, VB_ROOT)
@@ -1348,6 +1348,26 @@ def _memory_refusal(engine: str, engine_cfg: Dict[str, Any], dataset: str,
         m_values=m_values)
 
 
+def _ops_primary_curve(engine: str, profile: Dict[str, Any],
+                       engine_cfg: Dict[str, Any], resources: Dict[str, Any],
+                       resource_pass: str
+                       ) -> Tuple[Optional[str], Optional[str]]:
+    """(storage engine, build mode) the frontier is ranked on for this engine.
+
+    The heads of the lists the ops pass measures, because the chosen M is
+    then built for every one of them. Storage is a MariaDB axis only;
+    anywhere else the ann records' storage_engine is the engine's own (heap,
+    memory, wiredTiger). The selection applies each one only where the ann
+    grid swept that axis (`report/ops_build_choice.py`), because every ann
+    module stamps both -- Percona Search's points all say `async`, which is
+    not the ops pass's `post`.
+    """
+    storage = (_ops_storage_engines(engine, profile, resources,
+                                    resource_pass)[0]
+               if engine in ann_pass.MARIADB_ENGINES else None)
+    return storage, _ops_build_modes(engine, profile, engine_cfg)[0]
+
+
 def _ops_selection(manifest: Manifest, phase: str, engine: str, dataset: str,
                    profile: Dict[str, Any], engine_cfg: Dict[str, Any],
                    resources: Dict[str, Any], resolved: Any,
@@ -1363,15 +1383,8 @@ def _ops_selection(manifest: Manifest, phase: str, engine: str, dataset: str,
             or ops_build_selection.build_selection_mode(profile)
             != ops_build_selection.MODE_FRONTIER):
         return None
-    # The frontier is ranked on the curve the ops pass treats as primary --
-    # the head of the storage engines and build modes it measures -- because
-    # the chosen M is then built for every one of them. Storage is a MariaDB
-    # axis only; anywhere else the ann records' storage_engine is the
-    # engine's own (heap, memory, wiredTiger) and never filters.
-    storage = (_ops_storage_engines(engine, profile, resources,
-                                    resource_pass)[0]
-               if engine in ann_pass.MARIADB_ENGINES else None)
-    mode = _ops_build_modes(engine, profile, engine_cfg)[0]
+    storage, mode = _ops_primary_curve(engine, profile, engine_cfg,
+                                       resources, resource_pass)
     # What is on disk, not what --resume chose to honour: units measured
     # under an earlier choice are there either way.
     prefix = f"{resource_pass}/{engine}/{dataset}/ops/"

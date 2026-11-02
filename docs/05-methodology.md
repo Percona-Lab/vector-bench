@@ -424,10 +424,11 @@ frontier figure from one build beside throughput measured on another.
   lists it measures (InnoDB for MariaDB unless the profile reorders them; the
   first of `pgvector_build_modes`) — because the chosen M is then built for
   every declared storage engine and build mode, and a MyISAM or incremental
-  curve must not choose the M InnoDB or `post` is measured at. Points that fell
-  back to a table scan are excluded. Ties go to the higher recall at that
-  point, then the cheaper build (smaller M, then smaller `ef_construction`),
-  then the build's name, so the choice is the same on every re-read. The ops
+  curve must not choose the M InnoDB or `post` is measured at (an axis the
+  grid did not sweep is not filtered; see below). Points that fell back to a
+  table scan are excluded. Ties go to the smaller index, then the smaller M,
+  then the smaller `ef_construction`, then the build's name, so the choice is
+  the same on every re-read. The ops
   pass then builds exactly that M, `ef_construction` and quantization, in
   every declared storage engine and build mode; the record says which curve
   the ranking was done on (`selected_on`).
@@ -459,10 +460,20 @@ carries the chosen build and its source (`frontier@0.95`, `below_target@0.95`,
 `fallback_reference`) to the report. It becomes the ops build the headline's ◇
 is judged against and the build of the "at the build the ops pass measured"
 table, and a line under that table says how each engine's build was chosen.
-Since the choice is the build fastest at 0.95 on the primary curve, the
-headline's 0.95 figure is normally that build and carries no ◇ — a ◇ there under
-`frontier` means the fastest point came from another storage engine or build
-mode, or the selection fell back. Every ops record carries the same facts in
+The choice breaks an exact QPS tie with the headline's own key (index size,
+then M, then `ef_construction`, then the build's name), so where both see the
+same points they name the same build, and the headline's 0.95 figure is
+normally the ops build and carries no ◇. Under `frontier` a ◇ can still appear
+at 0.95 in exactly these cases: the fastest point at 0.95 is on a storage
+engine or build mode other than the ops pass's primary one (only possible
+where the grid swept that axis); `ops.target_recall` is not 0.95, so the build
+was chosen at another recall; the status is `below_target` or
+`fallback_reference`; or the ann points the report reads are not the ones the
+selection read (a report over a wider ann tree than the phase's own files).
+A storage engine or build mode is filtered at all only where the ann grid
+swept more than one value of it — every ann module stamps both axes, and
+Percona Search's `async`/`wiredTiger` are not the ops pass's words. Every ops
+record carries the same facts in
 `extra.ops_build_selection`. With a `select-builds` overlay the grid the
 choice must lie in is the overlay's restricted one. Ops
 measurement version 10 marks the change: a version 9 and a version 10 figure

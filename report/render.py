@@ -1596,7 +1596,11 @@ def _chosen_build_notes(per_engine: Dict[str, Any]) -> str:
         build = entry.get("reference_build_label") or "not recorded"
         lines.append(f"- **{_label(engine)}**: `{build}` -- {words} "
                      f"(`{how}`).\n")
-    return ("\n" + "".join(lines)) if lines else ""
+    if not lines:
+        return ""
+    return ("\n_The ops build was chosen per engine from this run's ann "
+            "frontier (`ops.build_selection: frontier`) rather than declared; "
+            "how each engine's was chosen:_\n\n" + "".join(lines))
 
 
 # The ops harness stamps a storage engine on every unit and defaults to
