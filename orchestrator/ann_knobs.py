@@ -69,6 +69,20 @@ are read-only):
   so hnswlib's own mechanics -- the 1/log(M) floor and the ef_construction
   raise -- are enforced and nothing else. A value valkey-search refuses fails
   FT.CREATE loudly and the phase reports the missing definitions.
+* VillageSQL 0.0.7 + vsql_vector at `bac885dd` (the extension, not the
+  server, owns the index options): `src/index/hnsw/storage.h`,
+  `Options::MAX_M = 128` and `MAX_EF_CONSTRUCTION_FACTOR = 32`;
+  `Options::validate` in `src/index/hnsw/storage.cc` refuses `M < 2`,
+  `M > MAX_M`, `ef_construction < M` and `ef_construction > M * 32`. The
+  last two are combination rules (`excluded_builds`); on their own the values
+  run from 2 (the smallest M) to 4096 (32 x the largest). The source is not in
+  this checkout -- `scripts/prepare-sources.sh` fetches it into `sources/` --
+  so these constants are pinned by `tests/test_e26_villagesql_engine.py`
+  against the overlay module, which refuses the same combinations itself,
+  and against the exported tree where it exists. The PR that added the engine
+  CLAMPED ef_construction to 32 x M (200 became 192 at M=6) and recorded both
+  values; the result file was still labelled 200, which is the mislabelling
+  this module exists to prevent, so the combination is dropped instead.
 * Percona Search (mongot): no knob. `render_config` carries M as a label and
   never sends it, so there is nothing to bound; the profiles pin it to one
   value per run (`m_values[:1]`).
@@ -89,6 +103,7 @@ KNOB_BOUNDS: Dict[str, Dict[str, Tuple[Optional[int], Optional[int]]]] = {
     "percona": {"M": (2, 200), "efConstruction": (1, 4096)},
     "myvector": {"M": (2, 10000)},
     "valkey": {"M": (2, 10000)},
+    "villagesql": {"M": (2, 128), "efConstruction": (2, 4096)},
 }
 
 #: Engines whose HNSW is hnswlib's, which raises ef_construction to M silently.
@@ -97,6 +112,12 @@ HNSWLIB_ENGINES = ("myvector", "valkey")
 REASON_PGVECTOR_2M = ("pgvector refuses ef_construction < 2 * m "
                       "(hnswbuild.c: 'ef_construction must be greater than or "
                       "equal to 2 * m')")
+#: vsql_vector's `Options::validate`: M <= ef_construction <= 32 * M.
+VILLAGESQL_EFC_FACTOR = 32
+REASON_VILLAGESQL_EFC = ("vsql_vector refuses ef_construction < M or > 32 * M "
+                         "(storage.cc Options::validate: 'ef_construction "
+                         "(%u) must be >= M' / 'exceeds maximum allowed "
+                         "value (%u) for M=%u')")
 REASON_HNSWLIB_EFC = ("hnswlib raises ef_construction to M without a word "
                       "(ef_construction_ = max(ef_construction, M_)), so the "
                       "build would not be the one its label names")
@@ -137,6 +158,9 @@ def excluded_builds(engine: str, m_values: Iterable[int],
                 out.append((m, efc, REASON_PGVECTOR_2M))
             elif engine in HNSWLIB_ENGINES and efc < m:
                 out.append((m, efc, REASON_HNSWLIB_EFC))
+            elif engine == "villagesql" and not (
+                    m <= efc <= VILLAGESQL_EFC_FACTOR * m):
+                out.append((m, efc, REASON_VILLAGESQL_EFC))
     return out
 
 

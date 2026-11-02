@@ -84,9 +84,13 @@ DEFAULT_EF_SEARCH = 40
 MAX_EF_SEARCH = 65536
 
 #: `Options::DEFAULT_EF_CONSTRUCTION` and the extension's validation, which
-#: refuses ef_construction above 32 x M (`MAX_EF_CONSTRUCTION_FACTOR`).
+#: refuses ef_construction below M or above 32 x M
+#: (`MAX_EF_CONSTRUCTION_FACTOR`).
 DEFAULT_EF_CONSTRUCTION = 200
 MAX_EF_CONSTRUCTION_FACTOR = 32
+#: `Options::validate`'s M floor and `Options::MAX_M` (storage.cc / .h).
+MIN_M = 2
+MAX_M = 128
 
 DELETE_REJECTED = (
     "DELETE on a table with a custom index (USING EXTENDED) is not supported "
@@ -144,18 +148,32 @@ def text_literal(vector) -> str:
     return "[" + ",".join(str(x) for x in arr) + "]"
 
 
-def clamp_ef_construction(m: int, ef_construction: Optional[int]) -> int:
-    """The ef_construction a build at `m` will be given.
+def checked_ef_construction(m: int, ef_construction: Optional[int]) -> int:
+    """The ef_construction a build at `m` is given, or ValueError.
 
-    The extension rejects ef_construction > 32 x M, so a profile's single
-    value (200, shared with every engine that has the knob) is not buildable
-    at M=6 (limit 192). Clamped rather than failed, and the clamped value is
-    what `capabilities()` and the ann module record, so a reader sees what
-    was built rather than what was asked for.
+    The extension refuses ef_construction < M and > 32 x M
+    (`Options::validate`, src/index/hnsw/storage.cc). This driver used to
+    CLAMP into that range -- 200 became 192 at M=6 -- and record both values,
+    but every label upstream of the driver (the ann result file, the frontier
+    choice, the ops build selection) still said 200, and a build that is not
+    the one its label names is the failure `orchestrator/ann_knobs.py`
+    exists to prevent. The orchestrator drops those combinations from the
+    render (`ann_knobs.excluded_builds`), so reaching this refusal means a
+    caller bypassed it; it is refused here before the server refuses it with
+    nothing better than "Custom type operation failed".
     """
     ef = int(ef_construction if ef_construction is not None
              else DEFAULT_EF_CONSTRUCTION)
-    return max(1, min(ef, MAX_EF_CONSTRUCTION_FACTOR * int(m)))
+    m = int(m)
+    if not MIN_M <= m <= MAX_M:
+        raise ValueError(f"vsql_vector refuses M={m}: it must lie in "
+                         f"[{MIN_M}, {MAX_M}]")
+    if not m <= ef <= MAX_EF_CONSTRUCTION_FACTOR * m:
+        raise ValueError(
+            f"vsql_vector refuses ef_construction={ef} at M={m}: it must lie "
+            f"in [M, {MAX_EF_CONSTRUCTION_FACTOR} x M] = "
+            f"[{m}, {MAX_EF_CONSTRUCTION_FACTOR * m}]")
+    return ef
 
 
 class VillageSQLDriver(MySQLFamilyDriver):
@@ -203,7 +221,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
         caps: Dict[str, Any] = {"incremental_index": incremental,
                                 "ef_construction_tunable": True}
         if self._index is not None:
-            caps["ef_construction"] = clamp_ef_construction(
+            caps["ef_construction"] = checked_ef_construction(
                 self._index.m, self._index.ef_construction)
         return caps
 
@@ -226,7 +244,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
         profile, _function = PROFILES[metric]
         return self.dialect.index_clause.format(
             name=self.dialect.index_name, profile=profile, m=int(index.m),
-            ef_construction=clamp_ef_construction(index.m,
+            ef_construction=checked_ef_construction(index.m,
                                                    index.ef_construction))
 
     def create_schema(self, index: IndexSpec) -> None:
@@ -260,7 +278,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
         sql = (f"CREATE INDEX {self.dialect.index_name} ON {TABLE} "
                f"(v {profile}) USING EXTENDED(hnsw) WITH (M = {int(index.m)}, "
                f"ef_construction = "
-               f"{clamp_ef_construction(index.m, index.ef_construction)})")
+               f"{checked_ef_construction(index.m, index.ef_construction)})")
         self._bytes_before_index = self._tablespace_bytes()
         if not self.bulk_vector_index_build:
             print(f"[{self.name}] WARNING: the engine config declares this "

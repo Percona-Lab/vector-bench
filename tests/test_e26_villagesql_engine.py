@@ -9,8 +9,10 @@ against the real build, each measured on it (2026-10-30):
   brute force as ANN recall/QPS -- the driver and the ann module must REFUSE;
 * SVECTOR has only a text input, so the encoding must round-trip float32
   exactly or every stored vector is silently perturbed;
-* the extension refuses ef_construction > 32 x M, so a profile's 200 at M=6
-  would fail the build unless clamped and recorded;
+* the extension refuses ef_construction < M and > 32 x M, so a profile's
+  200 at M=6 is not buildable -- the render drops it by name and the driver
+  and module refuse it, because a clamped build under the requested label is
+  a result file naming a build that never existed;
 * DELETE is rejected, and the bulk CREATE INDEX intermittently aborts the
   server, which the configuration and the orchestrator must route around.
 """
@@ -148,11 +150,11 @@ class TestWiring:
 
     def test_ann_and_ops_build_at_one_ef_construction(self):
         from orchestrator import ann_pass, ops_pass
-        profile = {"ann": {"m_values": [6, 16], "ef_search": [10, 40]},
+        profile = {"ann": {"m_values": [8, 16], "ef_search": [10, 40]},
                    "ops": {}}
         body = ann_pass.render_config("villagesql", profile, {}, "normalized")
         group = body["float"]["any"][0]["run_groups"]["innodb"]
-        assert group["arg_groups"] == [{"M": [6, 16], "efConstruction": [200]}]
+        assert group["arg_groups"] == [{"M": [8, 16], "efConstruction": [200]}]
         assert body["float"]["any"][0]["constructor"] == "VillageSQL"
         args = ops_pass.harness_args({**profile, "name": "t", "k": 10}, 16,
                                      "villagesql", None, "normalized", {})
@@ -199,13 +201,22 @@ class TestSchema:
         assert d._cur.statements == before
         assert d.index_bytes() == 0
 
-    @pytest.mark.parametrize("m,want", [(6, 192), (8, 200), (4, 128)])
-    def test_ef_construction_is_clamped_to_what_the_extension_accepts(
-            self, m, want):
+    @pytest.mark.parametrize("m", [7, 8, 16, 128])
+    def test_a_buildable_ef_construction_is_sent_as_asked(self, m):
         d = driver(m=m)
         d.create_schema(d._index)
-        assert f"ef_construction = {want})" in d._cur.statements[-1]
-        assert d.capabilities()["ef_construction"] == want
+        assert "ef_construction = 200)" in d._cur.statements[-1]
+        assert d.capabilities()["ef_construction"] == 200
+
+    @pytest.mark.parametrize("m,what", [(6, "ef_construction=200"),
+                                        (4, "ef_construction=200"),
+                                        (129, "M=129")])
+    def test_an_unbuildable_one_is_refused_not_clamped(self, m, what):
+        """200 at M=6 used to become 192 under a label saying 200."""
+        d = driver(m=m)
+        with pytest.raises(ValueError, match=rf"refuses {what}"):
+            d.create_schema(d._index)
+        assert not any("CREATE TABLE" in s for s in d._cur.statements)
 
     def test_effective_ef_is_floored_at_k(self):
         d = driver()
@@ -383,8 +394,7 @@ def _algo(annmod, m=16, ef_construction=200, **cursor):
     """A VillageSQL instance without __init__, which would start a server."""
     algo = object.__new__(annmod.VillageSQL)
     algo._m, algo._metric, algo._metric_fn = m, "l2", "l2"
-    algo._ef_construction_requested = ef_construction
-    algo._ef_construction = annmod.clamp_ef_construction(m, ef_construction)
+    algo._ef_construction = annmod.checked_ef_construction(m, ef_construction)
     algo.dialect = annmod.dataclasses.replace(
         annmod.VILLAGESQL, ef_construction=algo._ef_construction)
     algo._storage_engine = "InnoDB"
@@ -400,7 +410,7 @@ def _algo(annmod, m=16, ef_construction=200, **cursor):
 
 class TestAnnModule:
     def test_fit_declares_the_index_inline_and_loads_text(self, annmod):
-        algo = _algo(annmod, m=6)
+        algo = _algo(annmod, m=6, ef_construction=192)
         algo.fit(numpy.ones((3, 4), dtype="<f4"))
         create = next(s for s in algo._cur.statements
                       if s.startswith("CREATE TABLE t1"))
@@ -431,23 +441,36 @@ class TestAnnModule:
             "SELECT id FROM t1 ORDER BY L2_DISTANCE(v, '[1.0,1.0,1.0,1.0]') "
             "LIMIT 10")
 
-    def test_the_records_carry_requested_and_built_ef_construction(
+    def test_the_records_carry_the_ef_construction_built(
             self, annmod, monkeypatch):
         monkeypatch.setattr(annmod.VBMySQLBase, "get_additional",
                             lambda self: {})
-        algo = _algo(annmod, m=6)
+        algo = _algo(annmod, m=8)
         extra = algo.get_additional()
-        assert extra["ef_construction"] == 192
-        assert extra["ef_construction_requested"] == 200
+        assert extra["ef_construction"] == 200
+        # No second, "requested" value any more: nothing is clamped, so the
+        # label and the build are one number.
+        assert "ef_construction_requested" not in extra
         assert extra["vector_binding"].startswith("text")
         assert extra["extension_status"].startswith("preview")
 
     def test_the_module_and_driver_encode_identically(self, annmod):
         v = numpy.random.RandomState(3).normal(size=32)
         assert annmod.text_literal(v) == vs.text_literal(v)
-        for m in (4, 6, 8, 16):
-            assert annmod.clamp_ef_construction(m, 200) == \
-                vs.clamp_ef_construction(m, 200)
+        for m, efc in ((4, 128), (8, 200), (16, 16), (16, 512)):
+            assert annmod.checked_ef_construction(m, efc) == \
+                vs.checked_ef_construction(m, efc) == efc
+        for m, efc in ((4, 129), (6, 200), (16, 15), (16, 513)):
+            for fn in (annmod.checked_ef_construction,
+                       vs.checked_ef_construction):
+                with pytest.raises(ValueError):
+                    fn(m, efc)
+
+    @pytest.mark.parametrize("m", [1, 129])
+    def test_the_module_refuses_an_m_outside_the_extensions_range(
+            self, annmod, m):
+        with pytest.raises(ValueError, match=rf"M={m}"):
+            annmod.checked_ef_construction(m, max(m, 2))
 
 
 class TestTheBulkBuildDeclaration:
@@ -469,3 +492,93 @@ class TestTheBulkBuildDeclaration:
             {"name": "t", "k": 10, "ops": {}}, 16, "villagesql", None,
             "normalized", {}, bulk_vector_index_build=False)
         assert "--no-bulk-vector-index-build" in argv
+
+
+# ---------------------------------------------------------------------------
+# §6 what master's engine contract asks of it: knob bounds, reference build
+# ---------------------------------------------------------------------------
+
+#: vsql-vector at EXTENSION_PIN, as `scripts/prepare-sources.sh` fetches it.
+#: Generated and gitignored, so the source half runs only where it exists.
+EXTENSION_TREE = os.path.join(VB_ROOT, "sources", "vsql-vector-git")
+
+
+class TestKnobBoundsAndReferenceBuild:
+    def test_the_bounds_match_the_overlay_module_and_the_driver(self, annmod):
+        """`ann_knobs` cannot import either; this stops the copies drifting."""
+        from orchestrator import ann_knobs
+        bounds = ann_knobs.KNOB_BOUNDS["villagesql"]
+        for mod in (annmod, vs):
+            assert bounds["M"] == (mod.MIN_M, mod.MAX_M)
+            assert mod.MAX_EF_CONSTRUCTION_FACTOR == \
+                ann_knobs.VILLAGESQL_EFC_FACTOR
+        assert bounds["efConstruction"] == (
+            annmod.MIN_M, annmod.MAX_M * annmod.MAX_EF_CONSTRUCTION_FACTOR)
+
+    @pytest.mark.parametrize("relpath,pattern,expected", [
+        ("src/index/hnsw/storage.h", r"MAX_M = (\d+);", 128),
+        ("src/index/hnsw/storage.h", r"MAX_EF_CONSTRUCTION_FACTOR = (\d+);",
+         32),
+        ("src/index/hnsw/storage.h", r"DEFAULT_EF_CONSTRUCTION = (\d+);", 200),
+        ("src/index/hnsw/storage.cc", r"if \(M < (\d+)\)", 2),
+    ])
+    def test_the_bounds_match_the_pinned_source_when_it_is_fetched(
+            self, relpath, pattern, expected):
+        import re
+        path = os.path.join(EXTENSION_TREE, relpath)
+        if not os.path.exists(path):
+            pytest.skip(f"vsql-vector not fetched into {EXTENSION_TREE}")
+        match = re.search(pattern, open(path).read())
+        assert match and int(match.group(1)) == expected
+
+    def test_out_of_range_combinations_are_dropped_by_name(self):
+        from orchestrator import ann_knobs
+        dropped = ann_knobs.excluded_builds("villagesql", [4, 6, 8, 16, 48],
+                                            [64, 200, 400])
+        assert [(m, e) for m, e, _ in dropped] == [
+            (4, 200), (4, 400), (6, 200), (6, 400), (8, 400)]
+        assert "32 * M" in dropped[0][2]
+        # ef_construction < M: legal value by value, refused together.
+        assert [(m, e) for m, e, _ in ann_knobs.excluded_builds(
+            "villagesql", [100], [64])] == [(100, 64)]
+
+    @pytest.mark.parametrize("m", [1, 129])
+    def test_an_m_outside_the_range_refuses_the_render(self, m):
+        from orchestrator import ann_pass
+        profile = {"ann": {"m_values": [m], "ef_search": [10]}}
+        with pytest.raises(ValueError, match=rf"M={m} is outside"):
+            ann_pass.render_config("villagesql", profile, {}, "normalized")
+
+    def test_an_m_buildable_at_no_pinned_ef_construction_is_refused(self):
+        """M=6 at the one ef_construction 200: dropping it would remove the
+        value from the grid without a combination left to name it."""
+        from orchestrator import ann_pass
+        profile = {"ann": {"m_values": [6, 16], "ef_search": [10]}}
+        with pytest.raises(ValueError, match="M=6 is buildable at none"):
+            ann_pass.render_config("villagesql", profile, {}, "normalized")
+
+    @pytest.mark.parametrize("profile_name", ["smoke", "main",
+                                              "tuned-complete", "m-sweep",
+                                              "frontier-explore"])
+    def test_the_reference_build_resolves_and_is_in_the_grid(self,
+                                                             profile_name):
+        from orchestrator.config import (load_profile, load_resources,
+                                         merge_resource_overrides)
+        from orchestrator.reference_build import (reference_build_problem,
+                                                  resolve_reference_build)
+        # frontier-explore pins 64: the one value every M in its normalized
+        # grid can take (see the profile).
+        want = 64 if profile_name == "frontier-explore" else 200
+        profile = load_profile(profile_name)
+        for resource_pass in ("normalized", "tuned"):
+            resources = merge_resource_overrides(
+                load_resources(resource_pass), profile)
+            assert resolve_reference_build(
+                "villagesql", profile, resources, resource_pass) == {
+                    "m": 16, "ef_construction": want}
+            assert reference_build_problem("villagesql", profile, resources,
+                                           resource_pass) is None
+
+    def test_select_builds_can_write_its_ef_construction_axis(self):
+        from orchestrator.profile_overlay import OVERLAY_EXTRAS
+        assert "villagesql_ef_construction" in OVERLAY_EXTRAS

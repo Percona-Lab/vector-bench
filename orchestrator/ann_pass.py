@@ -329,21 +329,19 @@ def render_config(engine: str, profile: Dict[str, Any],
         # options) and a query-time one (`vsql_vector.ef_search`). Pinned in
         # the normalized pass at the value every engine with the knob is built
         # at, swept only where the tuned pass asks. The extension refuses
-        # ef_construction > 32 x M; the module clamps per M and records both
-        # the requested and the built value. One build mode, after the load
-        # (`CREATE INDEX`), which is what the module does.
+        # ef_construction < M and > 32 x M, so those combinations are dropped
+        # by name (`ann_knobs.excluded_builds`), never clamped. One build
+        # mode: the module declares the index in CREATE TABLE and the load
+        # builds it (`capabilities.bulk_vector_index_build: false`).
         if resource_pass == "tuned" and extras.get("villagesql_ef_construction"):
             ef_constructions = list(extras["villagesql_ef_construction"])
         else:
             ef_constructions = [int(ann.get("villagesql_ef_construction", 200))]
-        run_groups["innodb"] = {
-            "arg_groups": [{
-                "M": m_values,
-                "efConstruction": ef_constructions,
-            }],
-            "args": {},
-            "query_args": query_args,
-        }
+        _refuse_efc(engine, m_values, ef_constructions)
+        run_groups.update(efc_run_groups("innodb", {
+            "M": m_values,
+            "efConstruction": ef_constructions,
+        }, engine, query_args))
 
     elif engine == "mongodb":
         # Quantization is the one axis no other engine has, so it follows the

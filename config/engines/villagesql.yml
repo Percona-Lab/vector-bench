@@ -110,6 +110,20 @@ server:
     - --innodb-doublewrite=0
     - --innodb-flush-method=O_DIRECT
     - --skip-log-bin
+  # Opt-in, ops path only, exactly as config/engines/myvector.yml (the other
+  # MySQL 9.7.2 tree here): rendered after the pass's flags when a profile
+  # sets `ops.server_wait_instruments: true`, and recorded in
+  # `engines_resolved` and on every record when it is. The driver's wait
+  # snapshot is MySQLFamilyDriver's performance_schema read, unchanged; the
+  # extension's own page latches are taken through InnoDB's buffer pool
+  # (`storage_abi.cc` `buf_page_get`), so they show up under InnoDB's
+  # instruments rather than under any of the extension's. Not yet observed
+  # on a live VillageSQL server.
+  wait_instruments:
+    - --performance-schema=ON
+    - --performance-schema-instrument=wait/synch/mutex/%=ON
+    - --performance-schema-instrument=wait/synch/rwlock/%=ON
+    - --performance-schema-instrument=wait/synch/sxlock/%=ON
 
 storage_engines:
   normalized: [InnoDB]
@@ -163,3 +177,14 @@ runtime:
     linestyle: "--"
     label: "VillageSQL 0.0.7 (vsql_vector HNSW)"
   label: "VillageSQL 0.0.7 (vsql_vector HNSW)"
+  # The index the ops pass builds, and the fallback under
+  # `ops.build_selection: frontier` when the ann phase gives no usable point
+  # -- which at this pin is always: the module refuses every query because
+  # none reaches the index (see the header). `ef_construction: ops` resolves
+  # through `ops_pass.ops_ef_construction` to
+  # `ann.villagesql_ef_construction` (default 200), the key the ann render
+  # reads in the normalized pass. M=16 at 200 is inside vsql_vector's
+  # M <= ef_construction <= 32 x M (`orchestrator/ann_knobs.py`).
+  reference_build:
+    m: 16
+    ef_construction: ops

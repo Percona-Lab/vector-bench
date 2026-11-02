@@ -1266,10 +1266,15 @@ class TestTheChosenBuildIsTheHeadlineBuild:
 #: (storage_engine, build_mode) exactly as each overlay module writes them:
 #: vb_mysql's MySQL family writes its ENGINE= and no build mode; pgvector
 #: `heap`, Valkey `memory` and both their build_mode; Percona Search
-#: `wiredTiger` and `async` on every point.
+#: `wiredTiger` and `async` on every point. VillageSQL's module is a
+#: vb_mysql subclass too (`_storage_engine` defaults to InnoDB, no build
+#: mode), while its ops primary is `incremental`
+#: (`capabilities.bulk_vector_index_build: false`) -- points without the
+#: axis must still pass that filter.
 STAMPS = {"mariadb": ("InnoDB", None), "mariadb123": ("InnoDB", None),
           "alisql": ("InnoDB", None), "percona": ("InnoDB", None),
-          "myvector": ("InnoDB", None), "pgvector": ("heap", "post"),
+          "myvector": ("InnoDB", None), "villagesql": ("InnoDB", None),
+          "pgvector": ("heap", "post"),
           "valkey": ("memory", "post"), "mongodb": ("wiredTiger", "async")}
 
 #: Two builds per engine on the axis the tuned pass sweeps for it; the
@@ -1281,6 +1286,8 @@ TWO_BUILDS = {
                 {"m": 16, "ef_construction": 400}),
     "myvector": ({"m": 16, "ef_construction": 200},
                  {"m": 16, "ef_construction": 400}),
+    "villagesql": ({"m": 16, "ef_construction": 200},
+                   {"m": 16, "ef_construction": 400}),
     "pgvector": ({"m": 16, "ef_construction": 200},
                  {"m": 16, "ef_construction": 400}),
     "valkey": ({"m": 16, "ef_construction": 200},

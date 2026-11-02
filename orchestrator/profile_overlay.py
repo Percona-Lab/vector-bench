@@ -65,6 +65,7 @@ OVERLAY_EXTRAS = frozenset({
     "valkey_ef_construction",
     "percona_ef_construction",
     "myvector_ef_construction",
+    "villagesql_ef_construction",
     "mongodb_quantization",
 })
 

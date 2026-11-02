@@ -236,12 +236,17 @@ query, and before tuned-complete's ops phase. So it is done in two stages.
 
 **Stage 1 -- explore at 90,000 rows** (`config/profiles/frontier-explore.yml`).
 Every engine with a graph-degree knob sweeps the reviewer's seven M values;
-pgvector, Valkey, Percona Server and MyVector also sweep ef_construction
-64/200/400; Percona Search sweeps quantization scalar/none at one M label
-(mongot exposes no graph degree here -- the profile header says why
-`maxEdges` is not used). One build is left out by name: pgvector refuses
-ef_construction < 2·M, so M=48 at 64 is dropped and printed before the run
-(`orchestrator/ann_knobs.py`), never clamped. `runs: 2`, because the
+pgvector, Valkey, Percona Server, MyVector and VillageSQL also sweep
+ef_construction 64/200/400; Percona Search sweeps quantization scalar/none at
+one M label (mongot exposes no graph degree here -- the profile header says
+why `maxEdges` is not used). Seven builds are left out by name, each printed
+before the run (`orchestrator/ann_knobs.py`) and never clamped: pgvector
+refuses ef_construction < 2·M, so M=48 at 64 is dropped, and vsql_vector
+refuses ef_construction > 32·M, so VillageSQL loses 200 and 400 at M=4 and 6
+and 400 at M=8 and 12. At its pin VillageSQL's ann phase then produces no
+point at all -- no query reaches its index, and the module refuses to time
+the full scan instead -- so its 15 builds buy build records only; leave it
+out with `--engines` until a pin whose index is used. `runs: 2`, because the
 selection is made on QPS too and a single cold draw can push a build off the
 frontier.
 
@@ -254,6 +259,7 @@ frontier.
 | `pgvector` | 20 | ~0.3 h |
 | `valkey`, `mongodb` | 21, 2 | minutes |
 | `myvector` | 21 | no measured rate |
+| `villagesql` | 15 | no measured rate |
 
 About **15 h of loads** plus the queries, which no rate prices (the recall
 sweep is named under the total as always); the bulk index builds of the

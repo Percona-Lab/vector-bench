@@ -325,7 +325,8 @@ build supplies which stretch of a line.
 Each engine declares its reference build in `config/engines/<e>.yml`
 (`runtime.reference_build`) as the index the ops pass builds — M=16 for the
 MySQL family, `ef_construction` as the ops pass sets it for pgvector, Valkey,
-Percona Server and MyVector, and the pass's quantization for Percona Search.
+Percona Server, MyVector and VillageSQL, and the pass's quantization for
+Percona Search.
 `orchestrator/reference_build.py` resolves it per profile and pass, `run`
 refuses one the ann grid does not contain, and the manifest carries it to the
 report in `engines.<name>.presentation.reference_builds`. An archived run whose

@@ -527,7 +527,7 @@ Server `villagesql/villagesql-server` tag `publish/mysql-9.7_0.0.7`
 | Value input | **text only**, `'[a,b,…]'`, parsed with `strtof` per element — no binary path |
 | Index DDL | `INDEX vi (v hnsw_l2) USING EXTENDED(hnsw) WITH (M = 16, ef_construction = 200)` inline, or `CREATE INDEX vi ON t1 (…)` |
 | Metric | chosen by the key part's profile: `hnsw_l2`, `hnsw_cosine`, `hnsw_l1`, `hnsw_inner_product` |
-| **ef_construction** | `WITH (ef_construction = …)`, default 200, **rejected above 32 × M** with only `InnoDB: Custom type operation failed. See server error log for details.` (M=4: 128 accepted, 129 refused); so 192 at M=6, which the driver and module clamp to and record |
+| **ef_construction** | `WITH (ef_construction = …)`, default 200, **rejected above 32 × M** with only `InnoDB: Custom type operation failed. See server error log for details.` (M=4: 128 accepted, 129 refused), and below M (`Options::validate`, src/index/hnsw/storage.cc; M itself is 2..128). So 200 is not buildable at M=6 or below. The engine's first version clamped to 192 and recorded both values, but the result file and every label downstream still said 200; the combination is now dropped from the render by name (`orchestrator/ann_knobs.py`), and the driver and module refuse it if anything bypasses that. m-sweep gives VillageSQL M 8..32 for this reason |
 | Search width | `SET SESSION vsql_vector.ef_search = n` (default 40, 1..65536); the scan searches at `max(k, ef)` |
 | Distance fn | `L2_DISTANCE`, `COSINE_DISTANCE`, `L1_DISTANCE`, `INNER_PRODUCT` |
 | Graph location | extension segments inside `t1.ibd`; the catalog reports one page for `vi` |

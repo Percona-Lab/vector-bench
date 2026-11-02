@@ -263,7 +263,10 @@ These are the reasons the code looks over-defensive. Do not relax them.
   index (churn declined), filtered search cannot be verified (declined), vectors are text
   literals (no binary input), and the bulk `CREATE INDEX` intermittently deadlocks and aborts
   the server, so `capabilities.bulk_vector_index_build: false` makes `incremental` its build
-  mode. See `docs/04-engine-notes.md`.
+  mode. vsql_vector refuses `ef_construction` outside `[M, 32 x M]`, so 200 is unbuildable at
+  M=6: the combination is dropped from the render by name (`ann_knobs.excluded_builds`), never
+  clamped under a label it was not built with, and `m-sweep` gives it M 8..32. See
+  `docs/04-engine-notes.md`.
 
 ## Cost awareness
 

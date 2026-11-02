@@ -5,9 +5,11 @@
 #
 # `M` and `efConstruction` are index options (`WITH (M = .., ef_construction =
 # ..)`). efConstruction is pinned at 200, the value every other engine with the
-# knob is built at; the extension refuses ef_construction > 32 x M, so at M=6
-# the module builds at 192 and records both values. The ef_search grid matches
-# every other engine's; the scan searches at max(ef_search, k).
+# knob is built at; the extension refuses ef_construction < M and > 32 x M,
+# and the module refuses such a build rather than clamp it under a label it was
+# not built with, so M=6 (limit 192) is left out here as it is in m-sweep.
+# The ef_search grid matches every other engine's; the scan searches at
+# max(ef_search, k).
 #
 # At the pinned build no query reaches the index (see
 # harness/drivers/villagesql.py) and the module refuses to time a full scan,
@@ -22,6 +24,6 @@ float:
     name: villagesql
     run_groups:
       innodb:
-        arg_groups: [{M: [6, 8, 16, 24, 32], efConstruction: [200]}]
+        arg_groups: [{M: [8, 16, 24, 32], efConstruction: [200]}]
         args: {}
         query_args: [[10, 20, 40, 80, 120, 200, 400, 800]]

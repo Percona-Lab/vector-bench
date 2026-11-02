@@ -46,7 +46,14 @@ import numpy
 from ...vb_mysql import (DATABASE, INSERT_BATCH, PROGRESS_INTERVAL_S, TABLE,
                          Dialect, VBMySQLBase)
 
+# vsql-vector bac885d, src/index/hnsw/storage.h (`Options::DEFAULT_M`,
+# `DEFAULT_EF_CONSTRUCTION`, `MAX_M`, `MAX_EF_CONSTRUCTION_FACTOR`) and
+# `Options::validate` in storage.cc (the M floor of 2). Repeated as
+# `KNOB_BOUNDS["villagesql"]` in orchestrator/ann_knobs.py, which cannot
+# import this file; tests/test_e26_villagesql_engine.py fails if they differ.
 DEFAULT_EF_CONSTRUCTION = 200
+MIN_M = 2
+MAX_M = 128
 MAX_EF_CONSTRUCTION_FACTOR = 32
 PLAN_MARKER = "Custom index distance scan on vi"
 METRIC_NAMES = {"angular": "cosine", "euclidean": "l2"}
@@ -62,9 +69,21 @@ def text_literal(vector) -> str:
     return "[" + ",".join(str(x) for x in arr) + "]"
 
 
-def clamp_ef_construction(m: int, ef_construction: int) -> int:
-    """The extension refuses ef_construction > 32 x M; clamp and record."""
-    return max(1, min(int(ef_construction), MAX_EF_CONSTRUCTION_FACTOR * int(m)))
+def checked_ef_construction(m: int, ef_construction: int) -> int:
+    """`harness/drivers/villagesql.py:checked_ef_construction`: the extension
+    refuses ef_construction < M and > 32 x M, and a build whose result file
+    names a value it was not built with is refused rather than clamped. The
+    render never emits one (`orchestrator/ann_knobs.py` excluded_builds)."""
+    ef, m = int(ef_construction), int(m)
+    if not MIN_M <= m <= MAX_M:
+        raise ValueError(f"vsql_vector refuses M={m}: it must lie in "
+                         f"[{MIN_M}, {MAX_M}]")
+    if not m <= ef <= MAX_EF_CONSTRUCTION_FACTOR * m:
+        raise ValueError(
+            f"vsql_vector refuses ef_construction={ef} at M={m}: it must lie "
+            f"in [M, {MAX_EF_CONSTRUCTION_FACTOR} x M] = "
+            f"[{m}, {MAX_EF_CONSTRUCTION_FACTOR * m}]")
+    return ef
 
 
 @dataclasses.dataclass
@@ -107,10 +126,8 @@ class VillageSQL(VBMySQLBase):
 
     def __init__(self, metric: str, method_param: Dict[str, Any]):
         m = int(method_param["M"])
-        self._ef_construction_requested = int(
-            method_param.get("efConstruction", DEFAULT_EF_CONSTRUCTION))
-        self._ef_construction = clamp_ef_construction(
-            m, self._ef_construction_requested)
+        self._ef_construction = checked_ef_construction(
+            m, method_param.get("efConstruction", DEFAULT_EF_CONSTRUCTION))
         self._dim = 0
         self.dialect = dataclasses.replace(
             VILLAGESQL, ef_construction=self._ef_construction)
@@ -181,6 +198,10 @@ class VillageSQL(VBMySQLBase):
                 "scan on vi'; the server would answer by sorting a full table "
                 "scan, which is exact and is not ANN search. Refusing to "
                 "measure it (see harness/drivers/villagesql.py).")
+        # After the plan check, so a refused full scan is not warmed first:
+        # once per built index, then the per-configuration top-up
+        # (vb_warmup.py, ANN_MEASUREMENT_VERSION 3).
+        self._warm_index_once()
         self._warm_cache()
 
     def _warm_cache(self) -> None:
@@ -250,7 +271,6 @@ class VillageSQL(VBMySQLBase):
     def get_additional(self) -> Dict[str, Any]:
         extra = super().get_additional()
         extra["ef_construction"] = self._ef_construction
-        extra["ef_construction_requested"] = self._ef_construction_requested
         extra["build_seconds"] = round(self._build_seconds, 3)
         extra["vector_binding"] = "text literal (SVECTOR has no binary input)"
         extra["extension_status"] = ("preview (vsql_allow_preview_extensions=ON; "
