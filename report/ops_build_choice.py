@@ -14,9 +14,15 @@ With `ops.build_selection: frontier` the host runs this module after the ann
 phase of an (engine, dataset, pass) and before its ops phase, and the ops
 pass builds what it picks.
 
-THE RULE. Group the ann phase's points by build (`builds.build_signature`:
-everything about a measurement except the query effort). Take each build's
-own Pareto frontier (`loaders.pareto_frontier`) and, on it, the fastest
+THE RULE. Keep only the points of the ops pass's PRIMARY storage engine
+and build mode -- the head of the lists the ops pass measures, which the
+host passes in -- and group them by the three axes the ops pass actually
+sets from the choice: (M, ef_construction, quantization), read through
+`builds.build_params`. Not by `builds.build_signature`, which also keys
+storage engine and build mode: the ops pass builds the chosen M for EVERY
+declared storage engine and build mode, so a MyISAM or incremental curve
+winning would choose the M that InnoDB / post is then measured at, on
+another curve's evidence. Take each build's own Pareto frontier (`loaders.pareto_frontier`) and, on it, the fastest
 point at or above the target recall -- the same target the ops pass's
 ef_search calibration then chases on the index it builds, read from one
 place on the host and passed in here. The build whose qualifying point is
@@ -27,7 +33,9 @@ at the qualifying point; then the cheaper build -- smaller M, then smaller
 ef_construction (a missing value sorts as 0, the engine having no knob) --
 because between two indexes that serve the target equally fast the one that
 costs less to build and hold is what an operator would deploy; then the
-build signature as a string, which is stable across runs and machines. QPS
+(M, ef_construction, quantization) key as a string, which is stable across
+runs and machines and, since storage and mode are filtered out first, never
+decides between two storage engines. QPS
 is a float measured to three decimals, so an exact tie is rare, but "rare"
 is not "never" and the choice has to be the same on every re-read.
 
@@ -64,8 +72,18 @@ STATUS_SELECTED = "selected"
 STATUS_BELOW_TARGET = "below_target"
 
 
-def _cost_key(point: Dict[str, Any]) -> Tuple[int, int]:
-    return (int(point.get("m") or 0), int(point.get("ef_construction") or 0))
+def _build_key(point: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+    """The three axes the ops pass sets from the choice."""
+    from report.builds import build_params
+
+    params = build_params(point)
+    return (params["m"], params["ef_construction"], params["quantization"])
+
+
+def _rank_key(key: Tuple[Any, Any, Any]) -> Tuple[int, int, str]:
+    """Cheaper build first, then the key as a string: the last two tie-breaks."""
+    m, ef_construction, _quantization = key
+    return (int(m or 0), int(ef_construction or 0), str(key))
 
 
 def _usable(point: Dict[str, Any]) -> bool:
@@ -81,71 +99,95 @@ def _usable(point: Dict[str, Any]) -> bool:
             and point.get("vector_index_used") is not False)
 
 
-def _describe(signature: Any, point: Dict[str, Any],
-              frontier_size: int) -> Dict[str, Any]:
-    from report.builds import build_params
+def _on_primary(point: Dict[str, Any], storage_engine: Optional[str],
+                build_mode: Optional[str]) -> bool:
+    """Whether a point was measured on the ops pass's primary storage and mode.
 
-    params = build_params(point)
+    A point that does not name the axis passes: the ann overlay declares
+    `build_mode` for pgvector alone, and `storage_engine` is a MySQL ENGINE=
+    choice only for MariaDB, so the host passes None for an axis the engine
+    does not sweep and a point with no value cannot be on another curve.
+    """
+    storage = point.get("storage_engine")
+    if (storage_engine is not None and storage is not None
+            and str(storage).lower() != str(storage_engine).lower()):
+        return False
+    mode = point.get("build_mode")
+    return build_mode is None or mode is None or mode == build_mode
+
+
+def _describe(key: Tuple[Any, Any, Any], point: Dict[str, Any],
+              frontier_size: int, storage_engine: Optional[str],
+              build_mode: Optional[str]) -> Dict[str, Any]:
     extra = point.get("extra") or {}
+    m, ef_construction, quantization = key
     return {
-        "signature": str(signature),
-        "build": {"m": params["m"],
-                  "ef_construction": params["ef_construction"],
-                  "quantization": params["quantization"],
-                  "storage_engine": point.get("storage_engine"),
-                  "build_mode": point.get("build_mode")},
+        "signature": str(key),
+        "build": {"m": m, "ef_construction": ef_construction,
+                  "quantization": quantization},
+        # Where the ranking was done, not what the ops pass builds: it builds
+        # this M / efC / quantization for every declared storage engine and
+        # build mode.
+        "selected_on": {"storage_engine": storage_engine,
+                        "build_mode": build_mode},
         "point": {"recall": point.get("recall_at_k"), "qps": point.get("qps"),
                   "ef_search": point.get("ef_search"),
+                  "storage_engine": point.get("storage_engine"),
+                  "build_mode": point.get("build_mode"),
                   "source_file": extra.get("source_file")},
         "frontier_points": frontier_size,
     }
 
 
 def choose_ops_build(points: Sequence[Dict[str, Any]],
-                     target_recall: float) -> Optional[Dict[str, Any]]:
+                     target_recall: float,
+                     storage_engine: Optional[str] = None,
+                     build_mode: Optional[str] = None
+                     ) -> Optional[Dict[str, Any]]:
     """The build the ops pass should measure, or None with nothing usable.
 
     `points` are recall/QPS records of ONE engine on ONE dataset in one
-    pass, as `loaders.load_annb_results` emits them. See the module
-    docstring for the rule, the tie-break and the below-target fallback.
+    pass, as `loaders.load_annb_results` emits them. `storage_engine` and
+    `build_mode` are the ops pass's primary ones, or None for an axis the
+    engine does not sweep. See the module docstring for the rule, the
+    tie-break and the below-target fallback.
     """
-    from report.builds import build_signature
     from report.loaders import pareto_frontier
 
-    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    groups: Dict[Tuple[Any, Any, Any], List[Dict[str, Any]]] = {}
     for point in points:
-        if _usable(point):
-            groups.setdefault(build_signature(point), []).append(point)
+        if _usable(point) and _on_primary(point, storage_engine, build_mode):
+            groups.setdefault(_build_key(point), []).append(point)
     if not groups:
         return None
 
     reaching: List[Tuple[Any, Dict[str, Any], int]] = []
     ceilings: List[Tuple[Any, Dict[str, Any], int]] = []
-    for signature, group in groups.items():
+    for key, group in groups.items():
         frontier = pareto_frontier(group)
         qualifying = [p for p in frontier
                       if p["recall_at_k"] >= target_recall]
         if qualifying:
             best = max(qualifying, key=lambda p: (p["qps"], p["recall_at_k"]))
-            reaching.append((signature, best, len(frontier)))
+            reaching.append((key, best, len(frontier)))
         # The frontier's last point is its highest recall, and the fastest
         # point at that recall by construction.
-        ceilings.append((signature, frontier[-1], len(frontier)))
+        ceilings.append((key, frontier[-1], len(frontier)))
 
     if reaching:
-        signature, point, size = min(
+        key, point, size = min(
             reaching, key=lambda c: (-c[1]["qps"], -c[1]["recall_at_k"],
-                                     _cost_key(c[1]), str(c[0])))
+                                     _rank_key(c[0])))
         status = STATUS_SELECTED
     else:
-        signature, point, size = min(
+        key, point, size = min(
             ceilings, key=lambda c: (-c[1]["recall_at_k"], -c[1]["qps"],
-                                     _cost_key(c[1]), str(c[0])))
+                                     _rank_key(c[0])))
         status = STATUS_BELOW_TARGET
     return {"status": status, "target_recall": target_recall,
             "builds_considered": len(groups),
             "builds_reaching_target": len(reaching),
-            **_describe(signature, point, size)}
+            **_describe(key, point, size, storage_engine, build_mode)}
 
 
 def _link_tree(annb_dir: str, files: Sequence[str]) -> str:
@@ -179,6 +221,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--engine", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--target-recall", type=float, required=True)
+    parser.add_argument("--storage-engine", default=None)
+    parser.add_argument("--build-mode", default=None)
     parser.add_argument("--files", required=True,
                         help="JSON list of result files, relative to "
                              "--annb-dir, that the ann phase wrote or reused")
@@ -191,7 +235,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     points = [p for p in load_annb_results(tree, args.datasets_dir, "")
               if p.get("engine") == args.engine
               and p.get("dataset") == args.dataset]
-    choice = choose_ops_build(points, args.target_recall)
+    choice = choose_ops_build(points, args.target_recall,
+                              storage_engine=args.storage_engine,
+                              build_mode=args.build_mode)
     payload = {"points": len(points), "files": len(files), "choice": choice}
     print(RESULT_MARKER + json.dumps(payload, sort_keys=True, default=str))
     return 0

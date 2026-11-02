@@ -20,9 +20,11 @@ TWO MODES.
 * `frontier` -- after the ann phase of an (engine, dataset, pass) and before
   its ops phase, `report/ops_build_choice.py` reads THAT ann phase's result
   files (the ones `ann_provenance` recorded it wrote or reused, so a stale
-  file from another grid cannot be chosen), and picks the build whose
-  frontier point at the ops calibration target is fastest. The ops pass then
-  builds exactly that M, ef_construction and quantization, and the manifest
+  file from another grid cannot be chosen), keeps the points of the ops
+  pass's primary storage engine and build mode, and picks the
+  (M, ef_construction, quantization) whose frontier point at the ops
+  calibration target is fastest. The ops pass then builds exactly that, for
+  every declared storage engine and build mode, and the manifest
   presentation names it, with its source, per dataset.
 
 NEVER SILENTLY. Three outcomes, each recorded on the manifest and on every
@@ -32,16 +34,26 @@ ops record (`extra.ops_build_selection.status`):
 * `below_target` -- none did; the build with the highest recall is used, and
   a warning says so. The calibration that follows will report it missed.
 * `fallback_reference` -- the ann phase did not run in this run directory,
-  failed, or produced no usable point; the declared reference build is
+  failed, produced no usable point, or the selection container could not
+  read it (image missing, non-zero exit, unparsable output, timeout, a
+  docker CLI that would not start); the declared reference build is
   measured, as `reference` mode would, and a warning says why.
 
-RESUME. The choice is persisted in the manifest under
-`ops_build_selection["<pass>/<engine>/<dataset>"]` the moment it is made,
-and a resumed run reuses it rather than choosing again. Choosing again could
-pick a different build -- a re-run ann phase can move a QPS by more than the
-gap between two builds -- and the ops units checkpointed under the first
-choice would then sit beside units measured on another index, under one
-engine name.
+RESUME, AND WHEN A STORED CHOICE IS NOT REUSED. The choice is persisted in
+the manifest under `ops_build_selection["<pass>/<engine>/<dataset>"]` the
+moment it is made, together with the identity of the ann attempt it was
+computed from (attempt number, start time, and a digest of its file list).
+A `selected` or `below_target` choice is reused only while that attempt is
+still the latest completed ann attempt of the unit: a `--resume` after an
+ann re-run (`--force`, a changed grid, a retried failure) chooses again from
+the new attempt, because the old choice may name a build the new grid does
+not even contain. A `fallback_reference` is never reused once a completed
+ann attempt exists -- the fallback was for its absence. Any choice, stored
+or fresh, that names a build outside the grid this profile renders now is
+refused rather than measured. And a re-selection that changes the build
+after ops units of this (engine, dataset, pass) were already measured on the
+old one is refused too: those units' records stay in the run directory, and
+measuring the rest on another index would put two builds under one name.
 
 A module of its own because `cli.py` and `ops_pass.py` are far past the
 repository's line ceiling and a sibling change is editing `cli.py` too; the
@@ -50,17 +62,19 @@ call sites there are a few lines each.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
 from . import docker_ctl
 from . import engines as engines_mod
-from .ann_pass import annb_results_dir
+from .ann_pass import annb_results_dir, render_config
 from .manifest import utcnow
 from .ops_pass import ops_target_recall
-from .reference_build import resolve_reference_build
+from .reference_build import _grid_contains, resolve_reference_build
 
 MODE_REFERENCE = "reference"
 MODE_FRONTIER = "frontier"
@@ -79,8 +93,14 @@ MANIFEST_KEY = "ops_build_selection"
 PRESENTATION_KEY = "reference_builds_by_dataset"
 #: Mirrors `report/ops_build_choice.py`'s `RESULT_MARKER`; pinned by a test.
 RESULT_MARKER = "VB_OPS_BUILD_CHOICE "
+#: How long the selection container may take. It reads one engine's result
+#: files for one corpus; minutes at the outside. A stuck container must not
+#: hold the run, and the fallback it produces is visible.
+CHOICE_TIMEOUT_S = 1800
 
-Chooser = Callable[..., Optional[Dict[str, Any]]]
+
+class SelectionRefused(RuntimeError):
+    """A frontier choice that cannot be measured honestly. Fails the unit."""
 
 
 def build_selection_mode(profile: Dict[str, Any]) -> str:
@@ -109,15 +129,15 @@ def stored_selection(manifest_data: Dict[str, Any], resource_pass: str,
     return dict(entry) if isinstance(entry, dict) else None
 
 
-def ann_phase_files(manifest_data: Dict[str, Any], engine: str, dataset: str,
-                    resource_pass: str) -> Optional[List[str]]:
-    """The result files the latest completed ann attempt wrote or reused.
+def latest_ann_attempt(manifest_data: Dict[str, Any], engine: str,
+                       dataset: str, resource_pass: str
+                       ) -> Optional[Dict[str, Any]]:
+    """The latest completed ann attempt of this unit that recorded files.
 
-    None when no ann attempt of this unit completed in this run directory --
-    the phase was not asked for (`--phases ops`), failed, or ran under code
-    that recorded no files. The latest completed attempt, because it is the
-    one whose grid the ops pass follows; its `skipped` list already names the
-    earlier attempts' files it stood on.
+    None when there is none in this run directory -- the phase was not asked
+    for (`--phases ops`), failed, or ran under code that recorded no files.
+    The latest, because it is the one whose grid the ops pass follows; its
+    `skipped` list already names the earlier attempts' files it stood on.
     """
     attempts = [p for p in manifest_data.get("phases") or []
                 if isinstance(p, dict) and p.get("phase") == "ann"
@@ -125,25 +145,75 @@ def ann_phase_files(manifest_data: Dict[str, Any], engine: str, dataset: str,
                 and p.get("resource_pass") == resource_pass
                 and p.get("status") == "completed"
                 and isinstance(p.get("files"), dict)]
-    if not attempts:
-        return None
-    files = attempts[-1]["files"]
+    return attempts[-1] if attempts else None
+
+
+def _attempt_files(attempt: Optional[Dict[str, Any]]) -> List[str]:
+    files = (attempt or {}).get("files") or {}
     paths = [entry.get("path") for key in ("written", "skipped")
              for entry in files.get(key) or [] if isinstance(entry, dict)]
     return sorted({p for p in paths if p})
 
 
+def ann_phase_files(manifest_data: Dict[str, Any], engine: str, dataset: str,
+                    resource_pass: str) -> Optional[List[str]]:
+    """The files the latest completed ann attempt wrote or reused, or None."""
+    attempt = latest_ann_attempt(manifest_data, engine, dataset,
+                                 resource_pass)
+    return _attempt_files(attempt) if attempt is not None else None
+
+
+def attempt_identity(attempt: Optional[Dict[str, Any]]
+                     ) -> Optional[Dict[str, Any]]:
+    """What a stored choice records about the ann attempt it came from.
+
+    The attempt number and start time name the attempt; the digest of its
+    file list catches a hand-edited or rewritten phase entry that kept both.
+    """
+    if attempt is None:
+        return None
+    files = _attempt_files(attempt)
+    digest = hashlib.sha256(json.dumps(files).encode()).hexdigest()
+    return {"attempt": attempt.get("attempt"),
+            "started_at": attempt.get("started_at"),
+            "files_digest": digest}
+
+
+def _failure(message: str) -> Dict[str, Any]:
+    print(f"[ops] build selection could not read the ann results: {message}",
+          file=sys.stderr)
+    return {"error": message}
+
+
 def run_choice_container(*, image: str, ann_tree: str, datasets_dir: str,
                          vb_root: str, engine: str, dataset: str,
-                         files: List[str],
-                         target_recall: float) -> Optional[Dict[str, Any]]:
-    """Run `report/ops_build_choice.py` in a bench image; its payload or None.
+                         files: List[str], target_recall: float,
+                         storage_engine: Optional[str] = None,
+                         build_mode: Optional[str] = None,
+                         timeout_s: int = CHOICE_TIMEOUT_S
+                         ) -> Dict[str, Any]:
+    """Run `report/ops_build_choice.py` in a bench image.
+
+    Returns its payload, or `{"error": why}` -- never raises for a failure of
+    the container, the docker CLI or the output, because every one of those
+    must end in a visible `fallback_reference` and not in a traceback that
+    fails the ops unit with nothing recorded. A container that outlives the
+    timeout (the CLI is killed, the container is not) is removed here.
 
     In a container for the reason `cli.generate_report` is: the choice needs
     h5py and numpy to read the result files and score recall, and the host
     has neither by design.
     """
     output: List[str] = []
+    command = ["/vb/report/ops_build_choice.py",
+               "--annb-dir", "/annb", "--datasets-dir", "/datasets",
+               "--engine", engine, "--dataset", dataset,
+               "--target-recall", str(target_recall),
+               "--files", json.dumps(files)]
+    if storage_engine:
+        command += ["--storage-engine", storage_engine]
+    if build_mode:
+        command += ["--build-mode", build_mode]
     spec = docker_ctl.ContainerSpec(
         name=f"vb-ops-build-{os.getpid()}",
         image=image,
@@ -157,29 +227,40 @@ def run_choice_container(*, image: str, ann_tree: str, datasets_dir: str,
             f"{ann_tree}:/annb:ro",
             f"{datasets_dir}:/datasets:ro",
         ],
-        command=["/vb/report/ops_build_choice.py",
-                 "--annb-dir", "/annb", "--datasets-dir", "/datasets",
-                 "--engine", engine, "--dataset", dataset,
-                 "--target-recall", str(target_recall),
-                 "--files", json.dumps(files)],
+        command=command,
         detach=False,
     )
     try:
-        rc = docker_ctl.run_foreground(spec, timeout=1800, stream=False,
+        rc = docker_ctl.run_foreground(spec, timeout=timeout_s, stream=False,
                                        sink=output)
-    except docker_ctl.DockerError as exc:
-        print(f"[ops] build selection container failed: {exc}",
-              file=sys.stderr)
-        return None
+    except (docker_ctl.DockerError, subprocess.TimeoutExpired,
+            OSError) as exc:
+        _remove_quietly(spec.name)
+        kind = ("timed out after " f"{timeout_s} s"
+                if isinstance(exc, subprocess.TimeoutExpired)
+                else f"{type(exc).__name__}: {exc}")
+        return _failure(f"the selection container {kind}")
     if rc != 0:
-        return None
+        _remove_quietly(spec.name)
+        return _failure(f"the selection container exited {rc}")
     for line in reversed(output):
         if line.startswith(RESULT_MARKER):
             try:
-                return json.loads(line[len(RESULT_MARKER):])
-            except ValueError:
-                return None
-    return None
+                payload = json.loads(line[len(RESULT_MARKER):])
+            except ValueError as exc:
+                return _failure(f"its result line is not JSON ({exc})")
+            if not isinstance(payload, dict):
+                return _failure("its result line is not a JSON object")
+            return payload
+    return _failure("the selection container printed no result line")
+
+
+def _remove_quietly(name: str) -> None:
+    try:
+        docker_ctl.remove(name)
+    except (docker_ctl.DockerError, subprocess.TimeoutExpired, OSError):
+        print(f"[ops] could not remove container {name}; "
+              f"`docker rm -f {name}` by hand", file=sys.stderr)
 
 
 def _declared_axes(engine: str) -> List[str]:
@@ -200,6 +281,36 @@ def _presentation_build(engine: str, build: Dict[str, Any]) -> Dict[str, Any]:
     return {axis: build.get(axis) for axis in _declared_axes(engine)}
 
 
+def grid_problem(engine: str, profile: Dict[str, Any],
+                 resources: Dict[str, Any], resource_pass: str,
+                 build: Dict[str, Any]) -> Optional[str]:
+    """Why `build` is not in the ann grid this profile renders now, or None.
+
+    Checked on the engine's reference axes, as `reference_build_problem` is,
+    because those are the axes the report matches on. A stored choice from an
+    attempt the grid has since moved away from is the case: measuring it would
+    publish ops figures for a build with no recall point in the report.
+    """
+    wanted = {axis: value
+              for axis, value in _presentation_build(engine, build).items()
+              if value is not None}
+    if not wanted:
+        return None
+    try:
+        body = render_config(engine, profile, resources, resource_pass)
+    except ValueError as exc:
+        return f"the ann grid cannot be rendered: {exc}"
+    groups = [group
+              for algorithm in body["float"]["any"]
+              for run_group in algorithm["run_groups"].values()
+              for group in run_group["arg_groups"]]
+    if _grid_contains(groups, wanted):
+        return None
+    spelled = ", ".join(f"{k}={v}" for k, v in sorted(wanted.items()))
+    return (f"the chosen build ({spelled}) is not in the {resource_pass} ann "
+            f"grid this profile renders now")
+
+
 def _fallback(engine: str, profile: Dict[str, Any], resources: Dict[str, Any],
               resource_pass: str, target: float, reason: str
               ) -> Dict[str, Any]:
@@ -208,7 +319,7 @@ def _fallback(engine: str, profile: Dict[str, Any], resources: Dict[str, Any],
     return {"mode": MODE_FRONTIER, "status": STATUS_FALLBACK,
             "source": STATUS_FALLBACK, "target_recall": target,
             "build": dict(reference), "reference_build": dict(reference),
-            "ann_point": None, "reason": reason}
+            "selected_on": None, "ann_point": None, "reason": reason}
 
 
 def _from_choice(engine: str, choice: Dict[str, Any], target: float
@@ -216,7 +327,9 @@ def _from_choice(engine: str, choice: Dict[str, Any], target: float
     status = choice["status"]
     source = (f"frontier@{target:g}" if status == STATUS_SELECTED
               else f"{STATUS_BELOW_TARGET}@{target:g}")
-    build = dict(choice.get("build") or {})
+    raw = choice.get("build") or {}
+    build = {axis: raw.get(axis)
+             for axis in ("m", "ef_construction", "quantization")}
     reason = None
     if status == STATUS_BELOW_TARGET:
         reason = (f"none of the {choice.get('builds_considered')} swept "
@@ -226,6 +339,7 @@ def _from_choice(engine: str, choice: Dict[str, Any], target: float
     return {"mode": MODE_FRONTIER, "status": status, "source": source,
             "target_recall": target, "build": build,
             "reference_build": _presentation_build(engine, build),
+            "selected_on": choice.get("selected_on"),
             "ann_point": choice.get("point"),
             "signature": choice.get("signature"),
             "builds_considered": choice.get("builds_considered"),
@@ -237,24 +351,34 @@ def choose(manifest_data: Dict[str, Any], *, engine: str, dataset: str,
            resource_pass: str, profile: Dict[str, Any],
            resources: Dict[str, Any], chooser: Callable[..., Any]
            ) -> Dict[str, Any]:
-    """A fresh selection for one unit. `chooser(files=..., target_recall=...)`
-    returns the container's payload, or None when it could not run."""
+    """A fresh selection for one unit.
+
+    `chooser(files=..., target_recall=...)` returns the container's payload,
+    or `{"error": why}` (or None) when it could not produce one.
+    """
     target = ops_target_recall(profile)
-    files = ann_phase_files(manifest_data, engine, dataset, resource_pass)
+    attempt = latest_ann_attempt(manifest_data, engine, dataset,
+                                 resource_pass)
+    files = _attempt_files(attempt)
     if not files:
-        return _fallback(engine, profile, resources, resource_pass, target,
-                         "no completed ann phase of this engine and dataset "
-                         "in this run directory recorded any result file")
-    payload = chooser(files=files, target_recall=target)
-    choice = (payload or {}).get("choice")
+        return {**_fallback(engine, profile, resources, resource_pass, target,
+                            "no completed ann phase of this engine and "
+                            "dataset in this run directory recorded any "
+                            "result file"),
+                "ann_attempt": attempt_identity(attempt)}
+    payload = chooser(files=files, target_recall=target) or {}
+    choice = payload.get("choice")
     if not choice:
-        why = ("the selection could not read the ann results"
-               if payload is None else
+        why = (f"the selection could not read the ann results: "
+               f"{payload['error']}" if payload.get("error") else
                f"the ann phase's {len(files)} result file(s) held no usable "
-               f"recall/QPS point")
-        return _fallback(engine, profile, resources, resource_pass, target,
-                         why)
-    return _from_choice(engine, choice, target)
+               f"recall/QPS point on the primary storage engine and build "
+               f"mode")
+        selection = _fallback(engine, profile, resources, resource_pass,
+                              target, why)
+    else:
+        selection = _from_choice(engine, choice, target)
+    return {**selection, "ann_attempt": attempt_identity(attempt)}
 
 
 def _record(manifest: Any, engine: str, dataset: str, resource_pass: str,
@@ -283,7 +407,8 @@ def presentation_entries(manifest_data: Dict[str, Any], engine: str
     out: Dict[str, Dict[str, Any]] = {}
     for key, selection in sorted((manifest_data.get(MANIFEST_KEY)
                                   or {}).items()):
-        resource_pass, chosen_engine, dataset = (key.split("/", 2) + ["", ""])[:3]
+        resource_pass, chosen_engine, dataset = (key.split("/", 2)
+                                                 + ["", ""])[:3]
         if chosen_engine != engine or not isinstance(selection, dict):
             continue
         out.setdefault(resource_pass, {})[dataset] = {
@@ -293,23 +418,65 @@ def presentation_entries(manifest_data: Dict[str, Any], engine: str
     return {PRESENTATION_KEY: out} if out else {}
 
 
+def _reusable(stored: Dict[str, Any], current: Optional[Dict[str, Any]]
+              ) -> Optional[str]:
+    """None if `stored` may be reused, else why it is chosen again."""
+    if stored.get("status") == STATUS_FALLBACK:
+        if current is not None and _attempt_files(current):
+            return ("the stored choice was a fallback for a missing ann "
+                    "phase, and a completed ann attempt now exists")
+        return None
+    if current is None:
+        return ("the ann attempt the stored choice was computed from is no "
+                "longer the latest completed one, and none is")
+    if stored.get("ann_attempt") != attempt_identity(current):
+        return ("the ann phase has run again since the stored choice was "
+                "made (attempt " f"{(stored.get('ann_attempt') or {}).get('attempt')}"
+                f" -> {current.get('attempt')})")
+    return None
+
+
 def ensure_selection(manifest: Any, *, engine: str, dataset: str,
                      resource_pass: str, profile: Dict[str, Any],
-                     resources: Dict[str, Any], chooser: Callable[..., Any]
-                     ) -> Dict[str, Any]:
-    """The stored choice for this unit, or a new one, recorded and announced."""
+                     resources: Dict[str, Any], chooser: Callable[..., Any],
+                     ops_units_done: bool = False) -> Dict[str, Any]:
+    """The choice for this unit -- reused, or made, recorded and announced.
+
+    Raises `SelectionRefused` for a choice outside the current grid and for a
+    re-selection that would change the build under already-measured units.
+    `ops_units_done` says whether any ops unit of this (engine, dataset,
+    pass) is already checkpointed.
+    """
+    key = selection_key(resource_pass, engine, dataset)
     stored = stored_selection(manifest.data, resource_pass, engine, dataset)
+    current = latest_ann_attempt(manifest.data, engine, dataset,
+                                 resource_pass)
     if stored is not None:
-        print(f"[ops] reusing the build chosen earlier in this run: "
-              f"{_spell(stored)} ({stored.get('source')})")
-        return stored
+        why_not = _reusable(stored, current)
+        if why_not is None:
+            _check_grid(engine, profile, resources, resource_pass, key,
+                        stored)
+            print(f"[ops] reusing the build chosen earlier in this run: "
+                  f"{_spell(stored)} ({stored.get('source')})")
+            return stored
+        print(f"[ops] {key}: choosing the ops build again -- {why_not}")
     selection = {**choose(manifest.data, engine=engine, dataset=dataset,
                           resource_pass=resource_pass, profile=profile,
                           resources=resources, chooser=chooser),
                  "selected_at": utcnow()}
+    _check_grid(engine, profile, resources, resource_pass, key, selection)
+    if (stored is not None and ops_units_done
+            and stored.get("build") != selection.get("build")):
+        raise SelectionRefused(
+            f"{key}: the ops build would change from {_spell(stored)} to "
+            f"{_spell(selection)}, but ops units of this engine and dataset "
+            f"were already measured on the first; their records stay in the "
+            f"run directory and the rest would be measured on another index. "
+            f"Start a fresh --run-id, or move this unit's ops-*.jsonl aside "
+            f"and drop its ops checkpoints.")
     _record(manifest, engine, dataset, resource_pass, selection)
-    line = (f"{selection_key(resource_pass, engine, dataset)}: ops build "
-            f"{_spell(selection)} ({selection['source']})")
+    line = (f"{key}: ops build {_spell(selection)} "
+            f"({selection['source']})")
     if selection["status"] == STATUS_SELECTED:
         print(f"[ops] {line}")
     else:
@@ -319,12 +486,33 @@ def ensure_selection(manifest: Any, *, engine: str, dataset: str,
     return selection
 
 
+def _check_grid(engine: str, profile: Dict[str, Any],
+                resources: Dict[str, Any], resource_pass: str, key: str,
+                selection: Dict[str, Any]) -> None:
+    # A fallback's grid membership is already checked before the run, by
+    # `reference_build_problem`.
+    if selection.get("status") == STATUS_FALLBACK:
+        return
+    problem = grid_problem(engine, profile, resources, resource_pass,
+                           selection.get("build") or {})
+    if problem:
+        raise SelectionRefused(
+            f"{key}: {problem}; it was chosen from ann attempt "
+            f"{(selection.get('ann_attempt') or {}).get('attempt')}. Re-run "
+            f"the ann phase under this grid (--phases ann) or restore the "
+            f"grid it was chosen under.")
+
+
 def _spell(selection: Dict[str, Any]) -> str:
     build = selection.get("build") or {}
     parts = [f"{axis}={build[axis]}" for axis in
-             ("m", "ef_construction", "quantization", "storage_engine",
-              "build_mode") if build.get(axis) is not None]
-    return " ".join(parts) or "engine defaults"
+             ("m", "ef_construction", "quantization")
+             if build.get(axis) is not None]
+    text = " ".join(parts) or "engine defaults"
+    on = selection.get("selected_on") or {}
+    where = "/".join(str(v) for v in (on.get("storage_engine"),
+                                      on.get("build_mode")) if v)
+    return f"{text}, selected on {where}" if where else text
 
 
 def ops_m_values(selection: Optional[Dict[str, Any]],
@@ -354,25 +542,34 @@ def disclosure(selection: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         return None
     return {key: selection.get(key) for key in
             ("mode", "status", "source", "target_recall", "build",
-             "ann_point", "reason")}
+             "selected_on", "ann_point", "reason")}
 
 
 def default_chooser(*, engine: str, dataset: str, resource_pass: str,
                     resolved: Any, paths: Dict[str, str],
-                    engine_cfg: Dict[str, Any],
-                    vb_root: str) -> Callable[..., Any]:
-    """The production chooser: the container, on this engine's bench image."""
+                    engine_cfg: Dict[str, Any], vb_root: str,
+                    storage_engine: Optional[str] = None,
+                    build_mode: Optional[str] = None) -> Callable[..., Any]:
+    """The production chooser: the container, on this engine's bench image.
+
+    `storage_engine` and `build_mode` are the ops pass's primary ones (the
+    heads of the lists it measures), or None for an axis the engine's ann
+    grid does not sweep; the choice ranks only points measured on them.
+    """
     image = (engine_cfg.get("image") or {}).get("bench", "")
 
-    def chooser(*, files: List[str], target_recall: float
-                ) -> Optional[Dict[str, Any]]:
-        if not image or not docker_ctl.image_exists(image):
-            print(f"[ops] no bench image {image!r} to read the ann results "
-                  f"with", file=sys.stderr)
-            return None
+    def chooser(*, files: List[str], target_recall: float) -> Dict[str, Any]:
+        try:
+            present = bool(image) and docker_ctl.image_exists(image)
+        except (docker_ctl.DockerError, subprocess.TimeoutExpired,
+                OSError) as exc:
+            return _failure(f"cannot ask docker for image {image!r}: {exc}")
+        if not present:
+            return _failure(f"no bench image {image!r} to read them with")
         return run_choice_container(
             image=image,
             ann_tree=annb_results_dir(paths, resource_pass, resolved),
             datasets_dir=paths["datasets"], vb_root=vb_root, engine=engine,
-            dataset=dataset, files=files, target_recall=target_recall)
+            dataset=dataset, files=files, target_recall=target_recall,
+            storage_engine=storage_engine, build_mode=build_mode)
     return chooser

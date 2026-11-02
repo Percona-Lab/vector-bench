@@ -128,6 +128,72 @@ class TestChoice:
         points[0]["quantization"] = None
         assert self._choose(points)["build"]["quantization"] == "none"
 
+    # -- ranked on the primary storage engine and build mode only ----------
+
+    def _choose_on(self, points, storage=None, mode=None):
+        from report.ops_build_choice import choose_ops_build
+        return choose_ops_build(points, TARGET, storage_engine=storage,
+                                build_mode=mode)
+
+    def test_a_myisam_curve_does_not_choose_the_innodb_build(self):
+        innodb = _curve(16, [(0.96, 500.0, 40)], engine="mariadb")
+        myisam = _curve(32, [(0.97, 1200.0, 40)], engine="mariadb")
+        for p in innodb:
+            p["storage_engine"] = "InnoDB"
+        for p in myisam:
+            p["storage_engine"] = "MyISAM"
+        choice = self._choose_on(innodb + myisam, storage="InnoDB")
+        assert choice["build"] == {"m": 16, "ef_construction": None,
+                                   "quantization": None}
+        assert choice["selected_on"] == {"storage_engine": "InnoDB",
+                                         "build_mode": None}
+        assert choice["point"]["storage_engine"] == "InnoDB"
+        assert choice["builds_considered"] == 1
+        # Case-insensitive, as MariaDB reports it.
+        assert self._choose_on(innodb + myisam,
+                               storage="innodb")["build"]["m"] == 16
+
+    def test_an_incremental_curve_does_not_choose_the_post_build(self):
+        post = _curve(16, [(0.96, 500.0, 40)], ef_construction=200)
+        incremental = _curve(32, [(0.96, 900.0, 40)], ef_construction=200)
+        for p in incremental:
+            p["build_mode"] = "incremental"
+        choice = self._choose_on(post + incremental, mode="post")
+        assert choice["build"]["m"] == 16
+        assert choice["selected_on"]["build_mode"] == "post"
+        assert self._choose_on(post + incremental,
+                               mode="incremental")["build"]["m"] == 32
+
+    def test_points_without_the_axis_pass_the_filter(self):
+        # pgvector's ann records name no storage engine in the MySQL sense,
+        # Percona's name no build mode: neither is filtered away.
+        points = _curve(16, [(0.96, 500.0, 40)])
+        for p in points:
+            p["storage_engine"] = None
+            p["build_mode"] = None
+        assert self._choose_on(points, storage="InnoDB",
+                               mode="incremental")["build"]["m"] == 16
+
+    def test_builds_considered_counts_distinct_m_efc_quantization(self):
+        # One M in two storage engines, unfiltered: one build, not two, and
+        # the two curves pool into one frontier.
+        a = _curve(16, [(0.96, 500.0, 40)])
+        b = _curve(16, [(0.97, 600.0, 80)])
+        for p in a:
+            p["storage_engine"] = "InnoDB"
+        for p in b:
+            p["storage_engine"] = "MyISAM"
+        choice = self._choose_on(a + b)
+        assert choice["builds_considered"] == 1
+        assert set(choice["build"]) == {"m", "ef_construction",
+                                        "quantization"}
+
+    def test_nothing_on_the_primary_curve_is_none(self):
+        points = _curve(16, [(0.96, 500.0, 40)], engine="mariadb")
+        for p in points:
+            p["storage_engine"] = "MyISAM"
+        assert self._choose_on(points, storage="InnoDB") is None
+
 
 class TestContainerEntryPoint:
     """`main` reads only the files the ann phase named, and prints one line."""
@@ -240,15 +306,25 @@ class _Chooser:
         return self.payload
 
 
-def _ensure(manifest, chooser, profile=PROFILE, engine="pgvector"):
+def _ensure(manifest, chooser, profile=PROFILE, engine="pgvector",
+            resources=None, resource_pass="tuned", ops_units_done=False):
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
         selection = sel.ensure_selection(
-            manifest, engine=engine, dataset=DATASET, resource_pass="tuned",
-            profile=profile, resources={}, chooser=chooser)
+            manifest, engine=engine, dataset=DATASET,
+            resource_pass=resource_pass, profile=profile,
+            resources=resources or {}, chooser=chooser,
+            ops_units_done=ops_units_done)
     return selection, out.getvalue(), err.getvalue()
 
 
+@pytest.fixture
+def any_grid(monkeypatch):
+    """The grid check is exercised on its own, against a real render."""
+    monkeypatch.setattr(sel, "grid_problem", lambda *a, **kw: None)
+
+
+@pytest.mark.usefixtures("any_grid")
 class TestHostSelection:
 
     def test_mode_defaults_to_reference_and_refuses_typos(self):
@@ -671,3 +747,336 @@ class TestRunUnitWiring:
         assert cli._ops_selection(manifest, "ann", "pgvector", DATASET,
                                   PROFILE, {}, {}, None, "tuned", {}) is None
         assert "ops_build_selection" not in manifest.data
+
+    def test_frontier_passes_the_primary_curve_and_measured_units(
+            self, monkeypatch, tmp_path):
+        from orchestrator import cli
+        seen: Dict[str, Any] = {}
+
+        def fake_default_chooser(**kw):
+            seen["chooser"] = kw
+            return lambda **_: None
+
+        def fake_ensure(manifest, **kw):
+            seen["ensure"] = kw
+            return {"status": "selected"}
+
+        monkeypatch.setattr(sel, "default_chooser", fake_default_chooser)
+        monkeypatch.setattr(sel, "ensure_selection", fake_ensure)
+        cp = tmp_path / "cp.json"
+        cp.write_text(json.dumps([f"tuned/mariadb/{DATASET}/ops/m16-post"]))
+        profile = {"ops": {"build_selection": "frontier",
+                           "storage_engines": ["InnoDB", "MyISAM"]}}
+        cli._ops_selection(None, "ops", "mariadb", DATASET, profile,
+                           cli.load_engine("mariadb"), {}, None, "tuned",
+                           {"checkpoints": str(cp)})
+        assert seen["chooser"]["storage_engine"] == "InnoDB"
+        assert seen["chooser"]["build_mode"] == "post"
+        assert seen["ensure"]["ops_units_done"] is True
+        cli._ops_selection(None, "ops", "pgvector", DATASET,
+                           {"ops": {"build_selection": "frontier"},
+                            "ann": {"pgvector_build_modes": ["incremental",
+                                                             "post"]}},
+                           cli.load_engine("pgvector"), {}, None, "normalized",
+                           {"checkpoints": str(cp)})
+        assert seen["chooser"]["storage_engine"] is None
+        assert seen["chooser"]["build_mode"] == "incremental"
+        assert seen["ensure"]["ops_units_done"] is False
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM-1: every way the selection container can fail ends in a visible
+# fallback, never in a traceback that fails the unit with nothing recorded
+# ---------------------------------------------------------------------------
+
+class TestContainerFailures:
+
+    def _patch(self, monkeypatch, *, run=None, exists=True):
+        removed: List[str] = []
+        monkeypatch.setattr(sel.docker_ctl, "remove",
+                            lambda name: removed.append(name))
+        if callable(exists):
+            monkeypatch.setattr(sel.docker_ctl, "image_exists", exists)
+        else:
+            monkeypatch.setattr(sel.docker_ctl, "image_exists",
+                                lambda image: exists)
+        if run is not None:
+            monkeypatch.setattr(sel.docker_ctl, "run_foreground", run)
+        return removed
+
+    def _chooser(self, tmp_path):
+        return sel.default_chooser(
+            engine="pgvector", dataset=DATASET, resource_pass="tuned",
+            resolved=None, paths={"datasets": str(tmp_path),
+                                  "annb_results": str(tmp_path / "annb")},
+            engine_cfg={"image": {"bench": "vector-bench/pgvector-bench"}},
+            vb_root=VB_ROOT)
+
+    def _call(self, chooser):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            result = chooser(files=["a.hdf5"], target_recall=TARGET)
+        return result, err.getvalue()
+
+    @pytest.fixture(autouse=True)
+    def _tree(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sel, "annb_results_dir",
+                            lambda paths, p, r: str(tmp_path / "annb"))
+
+    def _raising(self, exc):
+        def run(spec, **kw):
+            raise exc
+        return run
+
+    def test_image_missing(self, monkeypatch, tmp_path):
+        removed = self._patch(monkeypatch, exists=False,
+                              run=self._raising(AssertionError("ran")))
+        result, err = self._call(self._chooser(tmp_path))
+        assert "no bench image" in result["error"]
+        assert "no bench image" in err
+        assert removed == []
+
+    def test_docker_unavailable_while_checking_the_image(self, monkeypatch,
+                                                        tmp_path):
+        def exists(image):
+            raise FileNotFoundError("docker")
+        self._patch(monkeypatch, exists=exists)
+        result, _ = self._call(self._chooser(tmp_path))
+        assert "cannot ask docker" in result["error"]
+
+    def test_nonzero_exit(self, monkeypatch, tmp_path):
+        removed = self._patch(monkeypatch, run=lambda spec, **kw: 3)
+        result, err = self._call(self._chooser(tmp_path))
+        assert result["error"] == "the selection container exited 3"
+        assert removed and removed[0].startswith("vb-ops-build-")
+
+    @pytest.mark.parametrize("lines, expected", [
+        ([sel.RESULT_MARKER + "{not json"], "not JSON"),
+        ([sel.RESULT_MARKER + "[1, 2]"], "not a JSON object"),
+        (["Traceback ...", "boom"], "printed no result line"),
+    ])
+    def test_unparsable_output(self, monkeypatch, tmp_path, lines,
+                               expected):
+        def run(spec, timeout, stream, sink):
+            sink.extend(lines)
+            return 0
+        self._patch(monkeypatch, run=run)
+        result, _ = self._call(self._chooser(tmp_path))
+        assert expected in result["error"]
+
+    def test_timeout_removes_the_container(self, monkeypatch, tmp_path):
+        import subprocess
+        removed = self._patch(monkeypatch, run=self._raising(
+            subprocess.TimeoutExpired(["docker", "run"], 1800)))
+        result, _ = self._call(self._chooser(tmp_path))
+        assert "timed out after 1800 s" in result["error"]
+        assert removed and removed[0].startswith("vb-ops-build-")
+
+    @pytest.mark.parametrize("exc", [FileNotFoundError("docker"),
+                                     PermissionError("docker.sock"),
+                                     sel.docker_ctl.DockerError("daemon")])
+    def test_exec_error_removes_the_container(self, monkeypatch, tmp_path,
+                                              exc):
+        removed = self._patch(monkeypatch, run=self._raising(exc))
+        result, _ = self._call(self._chooser(tmp_path))
+        assert type(exc).__name__ in result["error"]
+        assert removed
+
+    def test_a_failing_remove_is_reported_not_raised(self, monkeypatch,
+                                                     tmp_path):
+        import subprocess
+        self._patch(monkeypatch, run=lambda spec, **kw: 1)
+
+        def remove(name):
+            raise subprocess.TimeoutExpired(["docker", "rm"], 120)
+        monkeypatch.setattr(sel.docker_ctl, "remove", remove)
+        result, err = self._call(self._chooser(tmp_path))
+        assert result["error"] and "docker rm -f" in err
+
+    def test_the_success_path_parses_the_marked_line(self, monkeypatch,
+                                                     tmp_path):
+        captured: Dict[str, Any] = {}
+
+        def run(spec, timeout, stream, sink):
+            captured["spec"] = spec
+            sink.extend(["noise", sel.RESULT_MARKER + json.dumps(_payload())])
+            return 0
+        removed = self._patch(monkeypatch, run=run)
+        chooser = sel.default_chooser(
+            engine="mariadb", dataset=DATASET, resource_pass="tuned",
+            resolved=None, paths={"datasets": str(tmp_path)},
+            engine_cfg={"image": {"bench": "img"}}, vb_root=VB_ROOT,
+            storage_engine="InnoDB", build_mode="post")
+        result, _ = self._call(chooser)
+        assert result["choice"]["build"]["m"] == 32
+        command = captured["spec"].command
+        assert command[command.index("--storage-engine") + 1] == "InnoDB"
+        assert command[command.index("--build-mode") + 1] == "post"
+        assert removed == []
+
+    def test_a_failure_ends_in_a_visible_fallback(self, monkeypatch,
+                                                  tmp_path, any_grid):
+        import subprocess
+        self._patch(monkeypatch, run=self._raising(
+            subprocess.TimeoutExpired(["docker"], 1800)))
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        selection, _, err = _ensure(manifest, self._chooser(tmp_path))
+        assert selection["status"] == "fallback_reference"
+        assert "timed out" in selection["reason"]
+        assert "fallback_reference" in err
+        assert any("timed out" in w for w in manifest.data["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM-2: a stored choice is reused only while it still describes the run
+# ---------------------------------------------------------------------------
+
+def _add_ann(manifest, files=FILES, status="completed"):
+    manifest.add_phase("ann", "pgvector", DATASET, status, "t-new", "t-end",
+                       {"resource_pass": "tuned", "files": files})
+
+
+@pytest.mark.usefixtures("any_grid")
+class TestStoredChoiceLifetime:
+
+    def test_a_fallback_is_not_reused_once_ann_has_completed(self, tmp_path):
+        manifest = _manifest(tmp_path)                  # no ann attempt
+        first, _, _ = _ensure(manifest, _Chooser(_payload()))
+        assert first["status"] == "fallback_reference"
+        _add_ann(manifest)                              # --resume ran ann
+        chooser = _Chooser(_payload(m=32))
+        second, out, _ = _ensure(manifest, chooser)
+        assert len(chooser.calls) == 1
+        assert second["status"] == "selected"
+        assert "a completed ann attempt now exists" in out
+        assert manifest.data["ops_build_selection"][
+            f"tuned/pgvector/{DATASET}"]["status"] == "selected"
+
+    def test_a_fallback_is_reused_while_ann_is_still_missing(self, tmp_path):
+        manifest = _manifest(tmp_path)
+        first, _, _ = _ensure(manifest, _Chooser(_payload()))
+        _add_ann(manifest, status="failed")
+        chooser = _Chooser(_payload())
+        second, out, _ = _ensure(manifest, chooser)
+        assert chooser.calls == [] and second == first
+        assert "reusing" in out
+
+    def test_a_choice_is_rechosen_after_the_ann_phase_ran_again(self,
+                                                                 tmp_path):
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        first, _, _ = _ensure(manifest, _Chooser(_payload(m=32)))
+        assert first["ann_attempt"]["attempt"] == 1
+        _add_ann(manifest, files={"written": [{"path": "new.hdf5"}]})
+        chooser = _Chooser(_payload(m=24))
+        second, out, _ = _ensure(manifest, chooser)
+        assert chooser.calls[0]["files"] == ["new.hdf5"]
+        assert second["build"]["m"] == 24
+        assert second["ann_attempt"]["attempt"] == 2
+        assert "has run again" in out
+
+    def test_a_failed_later_attempt_does_not_invalidate_the_choice(
+            self, tmp_path):
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        first, _, _ = _ensure(manifest, _Chooser(_payload(m=32)))
+        _add_ann(manifest, status="failed")
+        chooser = _Chooser(_payload(m=24))
+        second, _, _ = _ensure(manifest, chooser)
+        assert chooser.calls == [] and second == first
+
+    def test_a_rewritten_file_list_is_a_different_attempt(self, tmp_path):
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        _ensure(manifest, _Chooser(_payload(m=32)))
+        manifest.data["phases"][-1]["files"] = {
+            "written": [{"path": "edited.hdf5"}]}
+        chooser = _Chooser(_payload(m=24))
+        second, _, _ = _ensure(manifest, chooser)
+        assert len(chooser.calls) == 1 and second["build"]["m"] == 24
+
+    def test_a_changed_build_under_measured_units_is_refused(self, tmp_path):
+        manifest = _manifest(tmp_path, ann={"files": FILES})
+        _ensure(manifest, _Chooser(_payload(m=32)))
+        _add_ann(manifest, files={"written": [{"path": "new.hdf5"}]})
+        with pytest.raises(sel.SelectionRefused, match="already measured"):
+            _ensure(manifest, _Chooser(_payload(m=24)), ops_units_done=True)
+        # The stored choice is untouched by the refusal.
+        assert manifest.data["ops_build_selection"][
+            f"tuned/pgvector/{DATASET}"]["build"]["m"] == 32
+        # The same build re-chosen is not a change, measured units or not.
+        same, _, _ = _ensure(manifest, _Chooser(_payload(m=32)),
+                             ops_units_done=True)
+        assert same["ann_attempt"]["attempt"] == 2
+
+
+class TestChoiceOutsideTheGrid:
+    """Against a real `render_config`, not a stub."""
+
+    PROFILE = {"name": "t", "datasets": [DATASET], "k": 10,
+               "ann": {"enabled": True, "m_values": [16, 32],
+                       "ef_search": [10, 40]},
+               "ops": {"enabled": True, "build_selection": "frontier"}}
+
+    def _resources(self):
+        from orchestrator.config import load_resources, merge_resource_overrides
+        return merge_resource_overrides(load_resources("normalized"),
+                                        self.PROFILE)
+
+    def _manifest(self, tmp_path):
+        manifest = Manifest(str(tmp_path / "run"), "grid-1")
+        manifest.add_phase("ann", "mariadb", DATASET, "completed", "t0",
+                           "t1", {"resource_pass": "normalized",
+                                  "files": FILES})
+        return manifest
+
+    def _go(self, manifest, m):
+        return _ensure(manifest, _Chooser(_payload(m=m, efc=None)),
+                       profile=self.PROFILE, engine="mariadb",
+                       resources=self._resources(),
+                       resource_pass="normalized")
+
+    def test_a_build_in_the_grid_is_accepted(self, tmp_path):
+        selection, _, _ = self._go(self._manifest(tmp_path), 32)
+        assert selection["reference_build"] == {"m": 32}
+        assert sel.grid_problem("mariadb", self.PROFILE, self._resources(),
+                                "normalized", {"m": 16}) is None
+
+    def test_a_fresh_choice_outside_the_grid_is_refused(self, tmp_path):
+        with pytest.raises(sel.SelectionRefused, match="not in the normalized"):
+            self._go(self._manifest(tmp_path), 48)
+
+    def test_a_stored_choice_the_grid_moved_away_from_is_refused(
+            self, tmp_path, monkeypatch):
+        manifest = self._manifest(tmp_path)
+        self._go(manifest, 32)
+        monkeypatch.setitem(self.PROFILE["ann"], "m_values", [16])
+        with pytest.raises(sel.SelectionRefused, match="m=32"):
+            self._go(manifest, 32)
+
+    def test_a_fallback_is_not_grid_checked_here(self, tmp_path):
+        # reference_build_problem already checks it before the run.
+        manifest = Manifest(str(tmp_path / "run"), "grid-2")
+        selection, _, _ = self._go(manifest, 48)
+        assert selection["status"] == "fallback_reference"
+
+
+class TestEstimateLabels:
+
+    def test_percona_search_is_not_charged_the_m_factor(self):
+        from orchestrator.estimate import (frontier_ops_bound,
+                                           ops_ingest_factor)
+        bound = frontier_ops_bound({"ann": {"m_values": [16, 48]},
+                                    "ops": {"build_selection": "frontier"}})
+        assert ops_ingest_factor(bound, "mongodb") == 1.0
+        assert ops_ingest_factor(bound, "pgvector") == 3.0
+        assert ops_ingest_factor(None, "pgvector") == 1.0
+
+    def test_the_line_says_efc_is_not_bounded(self):
+        from orchestrator.estimate import print_load_estimate
+        out = io.StringIO()
+        with redirect_stdout(out):
+            print_load_estimate({"ann": {"m_values": [16, 32]},
+                                 "ops": {"build_selection": "frontier"}},
+                                ["mariadb"], ["dbpedia-openai-1000k-angular"],
+                                ["tuned"], ["ann", "ops"])
+        text = " ".join(out.getvalue().split())
+        assert "not an upper bound" in text
+        assert "not applied to Percona Search" in text

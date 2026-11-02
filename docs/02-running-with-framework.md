@@ -360,8 +360,10 @@ The knobs worth changing first:
   phase did not run in this run directory (`--phases ops`, a failed ann phase)
   measures the reference build and says `fallback_reference` in a warning, the
   manifest and every record. A resumed run reuses the build chosen before the
-  interruption. The cost estimate cannot know the build ahead of time and
-  charges the ops ingest at the largest M in the grid instead. See
+  interruption while the ann attempt it came from is still the latest one,
+  and chooses again after an ann re-run. The cost estimate cannot know the
+  build ahead of time and charges the ops ingest at the largest M in the grid
+  instead (not for Percona Search, and not a bound on `ef_construction`). See
   [05-methodology.md](05-methodology.md) §2.1.
 - `memory.server_limit_gb` in `config/resources/normalized.yml` — the single
   most consequential value, because an engine whose graph does not fit in cache

@@ -416,26 +416,43 @@ frontier figure from one build beside throughput measured on another.
 - **`frontier`** (`tuned-complete`): after the ann phase of each
   (engine, dataset, pass), and from **that phase's own result files** — the
   ones it wrote or reused, as recorded in the manifest, so a stale file from
-  another grid cannot be chosen — the ops pass picks the build whose frontier
-  point at the ops calibration target (`ops.target_recall`, 0.95 by default,
-  the same value §2.0's calibration then chases) has the highest QPS. Points
-  that fell back to a table scan are excluded. Ties go to the higher recall at
-  that point, then the cheaper build (smaller M, then smaller
-  `ef_construction`), then the build's name, so the choice is the same on
-  every re-read. The ops pass then builds exactly that M, `ef_construction`
-  and quantization; storage engines and build modes are still the declared
-  ones, because §4 already names the storage engine that won each cell.
+  another grid cannot be chosen — the ops pass picks the
+  (M, `ef_construction`, quantization) whose frontier point at the ops
+  calibration target (`ops.target_recall`, 0.95 by default, the same value
+  §2.0's calibration then chases) has the highest QPS. Only points of the ops
+  pass's **primary** storage engine and build mode compete — the head of the
+  lists it measures (InnoDB for MariaDB unless the profile reorders them; the
+  first of `pgvector_build_modes`) — because the chosen M is then built for
+  every declared storage engine and build mode, and a MyISAM or incremental
+  curve must not choose the M InnoDB or `post` is measured at. Points that fell
+  back to a table scan are excluded. Ties go to the higher recall at that
+  point, then the cheaper build (smaller M, then smaller `ef_construction`),
+  then the build's name, so the choice is the same on every re-read. The ops
+  pass then builds exactly that M, `ef_construction` and quantization, in
+  every declared storage engine and build mode; the record says which curve
+  the ranking was done on (`selected_on`).
 
 Nothing substitutes silently. If no build reaches the target, the build with
 the highest recall is measured and the status is **`below_target`**; if the ann
-phase did not run in this run directory, failed, or left no usable point, the
-declared reference build is measured and the status is
-**`fallback_reference`**. Both print a warning and land in the manifest's
-`warnings`. The choice is stored in the manifest
-(`ops_build_selection["<pass>/<engine>/<dataset>"]`) when it is made, and a
-resumed run reuses it rather than choosing again — a re-measured ann curve can
-move by more than the gap between two builds, and units already checkpointed
-under the first choice must not sit beside units measured on another index.
+phase did not run in this run directory, failed, or left no usable point —
+or the selection container could not read it (no bench image, a non-zero
+exit, unparsable output, a timeout, a docker CLI that would not start; the
+container is removed) — the declared reference build is measured and the
+status is **`fallback_reference`**. Both print a warning and land in the
+manifest's `warnings`.
+
+The choice is stored in the manifest
+(`ops_build_selection["<pass>/<engine>/<dataset>"]`) when it is made, with
+the identity of the ann attempt it came from (attempt number, start time, a
+digest of its file list). A resumed run reuses a `selected` or `below_target`
+choice only while that attempt is still the latest completed ann attempt of
+the unit; after an ann re-run (`--force`, a changed grid, a retried failure)
+it chooses again. A `fallback_reference` is never reused once a completed ann
+attempt exists. Two cases are refused rather than measured: a choice, stored
+or fresh, naming a build outside the grid the profile renders now, and a
+re-selection that would change the build after ops units of that engine and
+dataset were already measured on the old one — their records stay in the run
+directory, and the rest would be measured on another index under one name.
 
 The manifest's `engines.<name>.presentation.reference_builds_by_dataset`
 carries the chosen build and its source (`frontier@0.95`, `below_target@0.95`,

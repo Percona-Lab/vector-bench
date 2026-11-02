@@ -1363,13 +1363,28 @@ def _ops_selection(manifest: Manifest, phase: str, engine: str, dataset: str,
             or ops_build_selection.build_selection_mode(profile)
             != ops_build_selection.MODE_FRONTIER):
         return None
+    # The frontier is ranked on the curve the ops pass treats as primary --
+    # the head of the storage engines and build modes it measures -- because
+    # the chosen M is then built for every one of them. Storage is a MariaDB
+    # axis only; anywhere else the ann records' storage_engine is the
+    # engine's own (heap, memory, wiredTiger) and never filters.
+    storage = (_ops_storage_engines(engine, profile, resources,
+                                    resource_pass)[0]
+               if engine in ann_pass.MARIADB_ENGINES else None)
+    mode = _ops_build_modes(engine, profile, engine_cfg)[0]
+    # What is on disk, not what --resume chose to honour: units measured
+    # under an earlier choice are there either way.
+    prefix = f"{resource_pass}/{engine}/{dataset}/ops/"
+    measured = any(key.startswith(prefix)
+                   for key in _load_checkpoints(paths["checkpoints"]))
     return ops_build_selection.ensure_selection(
         manifest, engine=engine, dataset=dataset,
         resource_pass=resource_pass, profile=profile, resources=resources,
+        ops_units_done=measured,
         chooser=ops_build_selection.default_chooser(
             engine=engine, dataset=dataset, resource_pass=resource_pass,
             resolved=resolved, paths=paths, engine_cfg=engine_cfg,
-            vb_root=VB_ROOT))
+            vb_root=VB_ROOT, storage_engine=storage, build_mode=mode))
 
 
 def _run_unit(phase: str, engine: str, dataset: str, profile: Dict[str, Any],
