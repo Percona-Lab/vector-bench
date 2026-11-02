@@ -5234,11 +5234,63 @@ class TestAProfileThatNamesItsEnginesGetsThem:
             self, monkeypatch, tmp_path):
         """The default that this change must not touch. `run` defaulted to the
         original three long after six existed; narrowing it again for profiles
-        that make no claim would be the same bug with a new cause."""
-        from orchestrator.cli import KNOWN_ENGINES
+        that make no claim would be the same bug with a new cause. "Every one"
+        is every DEFAULT-selected engine: the opt-in ones
+        (`runtime.default_selected: false`) are the declared exception, and
+        the next two tests pin that they are announced and still runnable."""
+        from orchestrator.cli import DEFAULT_ENGINES, KNOWN_ENGINES
         seen = self._plan(monkeypatch, tmp_path, profile="smoke")
-        assert seen["run"] == list(KNOWN_ENGINES)
-        assert seen["estimate"] == list(KNOWN_ENGINES)
+        assert seen["run"] == list(DEFAULT_ENGINES)
+        assert seen["estimate"] == list(DEFAULT_ENGINES)
+        # Only the declared opt-in engines are missing -- nothing else.
+        from orchestrator import engines as engines_mod
+        assert [e for e in KNOWN_ENGINES if e not in DEFAULT_ENGINES] == [
+            e for e in KNOWN_ENGINES if not engines_mod.get(e).default_selected]
+
+    def test_a_bare_run_names_the_opt_in_engines_it_left_out(
+            self, monkeypatch, tmp_path, capsys):
+        self._plan(monkeypatch, tmp_path, profile="smoke")
+        out = capsys.readouterr().out
+        assert ("note: opt-in engine(s) not run unless named with --engines: "
+                "villagesql") in out
+
+    def test_an_opt_in_engine_runs_when_named(self, monkeypatch, tmp_path,
+                                              capsys):
+        seen = self._plan(monkeypatch, tmp_path, profile="smoke",
+                          engines="pgvector,villagesql")
+        assert seen["run"] == ["pgvector", "villagesql"]
+        assert seen["estimate"] == ["pgvector", "villagesql"]
+        assert "opt-in engine(s)" not in capsys.readouterr().out
+
+    def test_an_unbuildable_ops_build_is_refused_before_any_container(
+            self, monkeypatch, capsys, tmp_path):
+        """`ops.m_values` x the ops ef_construction gets the render's knob
+        rules too: M=6 at VillageSQL's 200 is refused here, by name, rather
+        than after a server start and a corpus load."""
+        from orchestrator import cli as cli_mod
+        smoke = load_profile("smoke")
+        smoke["ops"] = dict(smoke.get("ops") or {}, m_values=[6, 16])
+        monkeypatch.setattr(cli_mod, "load_profile", lambda name: smoke)
+        args = self._args(profile="smoke", engines="villagesql")
+        self._reroot(monkeypatch, tmp_path)
+        datasets_dir = cli_mod.paths_for(args.run_id)["datasets"]
+        os.makedirs(datasets_dir, exist_ok=True)
+        for dataset in smoke.get("datasets", []):
+            open(os.path.join(datasets_dir, f"{dataset}.hdf5"), "wb").close()
+        monkeypatch.setattr(cli_mod.docker_ctl, "docker_available",
+                            lambda: True)
+        reached = []
+        monkeypatch.setattr(cli_mod, "print_load_estimate",
+                            lambda *a, **k: reached.append("estimate"))
+        monkeypatch.setattr(cli_mod, "_check_free_disk",
+                            lambda *a, **k: reached.append("disk") or True)
+        assert cli_mod.cmd_run(args) == 2
+        err = capsys.readouterr().err
+        assert "refusing to start" in err
+        assert "M=6 at ef_construction=200" in err
+        # Refused with the other pre-flight problems, before the estimate,
+        # the disk check and any container.
+        assert reached == []
 
     def test_an_explicit_flag_narrows_a_profile_that_names_none(
             self, monkeypatch, tmp_path):

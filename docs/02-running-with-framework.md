@@ -121,7 +121,7 @@ only SSH'd into.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--profile` | `quick` | `smoke`, `quick`, `full`, or your own in `config/profiles/` |
-| `--engines` | the profile's `engines:` list, else every engine | e.g. `mariadb,alisql`; may only **narrow** a profile's own list |
+| `--engines` | the profile's `engines:` list, else every engine except the opt-in ones | e.g. `mariadb,alisql`; may only **narrow** a profile's own list; the only way to run an opt-in engine |
 | `--datasets` | from profile | Override the profile's dataset list |
 | `--resource-pass` | `both` | `normalized`, `tuned`, or `both` |
 | `--phases` | `both` | `ann` (recall/QPS), `ops` (build/concurrency/filtered/churn) |
@@ -142,6 +142,18 @@ engine at another's grid. A profile that declares no `engines:` key is making no
 such claim, and `--engines` is free there. Omitting the key is also the only way
 to say "every engine": `engines: []` is refused as a half-finished edit, because
 reading it as "no restriction" is how a one-engine profile measured seven.
+
+**Opt-in engines.** An engine whose `config/engines/<e>.yml` sets
+`runtime.default_selected: false` is left out of every run that names no
+engines, and `run` prints `note: opt-in engine(s) not run unless named with
+--engines: ...` so the shorter list is not mistaken for a bug. Naming it runs
+it: `--engines villagesql`, or `--engines mariadb,villagesql`. VillageSQL is
+the one opt-in engine today. At its pin no query reaches its HNSW index, and
+the ann module and the driver refuse to time the full scan the server runs
+instead. They find that out only after the corpus has loaded, so a default run
+would pay a whole load per ann build (15 in `frontier-explore`) and get no
+points from any of them. The engine's config says what flips the flag back.
+The web UI's estimate follows the same default.
 
 ### `select-builds` options — the two-stage frontier
 

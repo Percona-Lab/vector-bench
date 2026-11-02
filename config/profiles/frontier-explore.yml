@@ -74,12 +74,16 @@
 #                                 POINT: no query reaches the index, and the
 #                                 module refuses to time the full scan the
 #                                 server runs instead (config/engines/
-#                                 villagesql.yml), so the 15 builds are paid
-#                                 for and the phase then fails loudly.
-#                                 `--engines` without villagesql skips them;
-#                                 it stays in the grid so the first pin whose
-#                                 index is used is explored with everything
-#                                 else rather than added by hand.
+#                                 villagesql.yml), so the 15 builds would be
+#                                 paid for and the phase would then fail
+#                                 loudly. That is why it is OPT-IN
+#                                 (`runtime.default_selected: false`): a bare
+#                                 `run --profile frontier-explore` leaves it
+#                                 out and says so, and only
+#                                 `--engines ...,villagesql` measures it. It
+#                                 stays in the grid so that the first pin
+#                                 whose index is used is explored with
+#                                 everything else, not added by hand.
 #   mongodb (Percona Search)      quantization scalar and none = 2 builds. mongot
 #                                 exposes no graph degree to this framework, so
 #                                 M is pinned to one label (16) below rather

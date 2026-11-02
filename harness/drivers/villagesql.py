@@ -193,7 +193,11 @@ class VillageSQLDriver(MySQLFamilyDriver):
     def __init__(self, spec: ConnectionSpec,
                  dialect: Optional[MySQLDialect] = None):
         super().__init__(spec, dialect)
-        self._plan_checked: Optional[bool] = None
+        #: Plan verdict per query shape, keyed on "filtered?": the filtered
+        #: query has a WHERE the unfiltered check never saw, so one verdict
+        #: must not vouch for the other. Reset by `create_schema`, because a
+        #: new table (another M, another build mode) is a new plan.
+        self._plan_checked: Dict[bool, bool] = {}
         self._bytes_before_index = 0
         self._bytes_after_index = 0
 
@@ -249,6 +253,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
 
     def create_schema(self, index: IndexSpec) -> None:
         self._index = index
+        self._plan_checked = {}
         ddl = self._create_table_ddl(
             index, with_index=index.build_mode == "incremental")
         print(f"[{self.name}] {ddl}")
@@ -402,18 +407,22 @@ class VillageSQLDriver(MySQLFamilyDriver):
                   f"Plan: {plan[:400]}")
         return used
 
-    def _require_index(self, vector, k: int) -> None:
+    def _require_index(self, vector, k: int,
+                       tag_threshold: Optional[int] = None,
+                       column: str = FILTER_TAG) -> None:
         """Refuse to time a query the server would answer by a full scan.
 
-        Checked once per driver (each concurrency client is its own driver,
-        so each checks its own connection) with the vector about to be
-        queried. A refusal fails the workload loudly, which the report lists
+        Checked once per driver and query shape (each concurrency client is
+        its own driver, so each checks its own connection) with the vector
+        about to be queried. A refusal fails the workload loudly, which the report lists
         under failed phases -- the honest outcome -- where a warning would
         let an exact scan be published as an ANN recall/QPS point.
         """
-        if self._plan_checked is None:
-            self._plan_checked = self.explain_uses_vector_index(vector, k)
-        if not self._plan_checked:
+        filtered = tag_threshold is not None
+        if filtered not in self._plan_checked:
+            self._plan_checked[filtered] = self.explain_uses_vector_index(
+                vector, k, tag_threshold, column)
+        if not self._plan_checked[filtered]:
             raise BruteForceRefused(
                 "villagesql: the query plan is not a 'Custom index distance "
                 "scan on vi' -- the server would answer by sorting a full "
@@ -430,7 +439,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
     def query_filtered(self, vector, k: int, threshold: int,
                        column: str = FILTER_TAG) -> List[int]:
         # Declined (`declined_workloads`); kept correct for a lab script.
-        self._require_index(vector, k)
+        self._require_index(vector, k, threshold, column)
         self._cur.execute(self._select(k, True, column=column, vector=vector),
                           (int(threshold),))
         return [row[0] for row in self._cur.fetchall()]

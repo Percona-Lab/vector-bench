@@ -245,8 +245,9 @@ refuses ef_construction < 2·M, so M=48 at 64 is dropped, and vsql_vector
 refuses ef_construction > 32·M, so VillageSQL loses 200 and 400 at M=4 and 6
 and 400 at M=8 and 12. At its pin VillageSQL's ann phase then produces no
 point at all -- no query reaches its index, and the module refuses to time
-the full scan instead -- so its 15 builds buy build records only; leave it
-out with `--engines` until a pin whose index is used. `runs: 2`, because the
+the full scan instead -- so its 15 builds would buy build records only. It
+is therefore opt-in (`runtime.default_selected: false`): a bare run leaves it
+out and says so, and only `--engines ...,villagesql` measures it. `runs: 2`, because the
 selection is made on QPS too and a single cold draw can push a build off the
 frontier.
 
@@ -259,7 +260,7 @@ frontier.
 | `pgvector` | 20 | ~0.3 h |
 | `valkey`, `mongodb` | 21, 2 | minutes |
 | `myvector` | 21 | no measured rate |
-| `villagesql` | 15 | no measured rate |
+| `villagesql` (opt-in) | 15 | no measured rate |
 
 About **15 h of loads** plus the queries, which no rate prices (the recall
 sweep is named under the total as always); the bulk index builds of the

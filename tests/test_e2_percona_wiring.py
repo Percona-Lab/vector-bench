@@ -1801,7 +1801,7 @@ class TestTheProfiles:
     def test_smoke_no_longer_claims_six(self):
         text = open(os.path.join(VB_ROOT, "config", "profiles",
                                  "smoke.yml")).read()
-        _prose("the engine count is nine", text)
+        _prose("the engine count is eight", text)
 
     def test_smoke_names_no_engines_so_percona_joins_automatically(self):
         from orchestrator.config import load_profile

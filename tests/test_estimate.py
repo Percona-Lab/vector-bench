@@ -1908,7 +1908,10 @@ class TestTheDocumentedFiguresAreTheOnesTheCodeProduces:
             r"ingest[^~]*~(?P<worst>[\d,]+) h of run time\s*\nin the worst case",
             claude)
         assert sentence, "the standing cost sentence moved or was reworded"
-        e = est("full", engines=ALL, passes=("normalized", "tuned"))
+        # What the command measures when `--engines` is omitted: the
+        # default-selected engines, which leave out the opt-in VillageSQL.
+        e = est("full", engines=list(cli_mod.DEFAULT_ENGINES),
+                passes=("normalized", "tuned"))
         assert float(sentence.group("ingest").replace(",", "")) == pytest.approx(
             e["ingest_hours"], abs=0.5)
         assert float(sentence.group("worst").replace(",", "")) == pytest.approx(
@@ -1922,19 +1925,22 @@ class TestTheDocumentedFiguresAreTheOnesTheCodeProduces:
         # thing. The vocabularies live in `tests/test_e2_percona_wiring.py`
         # with their own accepts and rejects asserted beside them.
         from tests.test_e2_percona_wiring import _prose
-        _prose("the engine count is nine", claude)
+        _prose("the engine count is eight", claude)
         # The scope split is BACK, for MyVector: the worst case covers all
         # eight engines and the ingest figure the seven with a measured rate,
-        # and the sentence says so.
-        _prose("the ingest figure covers seven of the nine", claude)
-        assert e["engines_without_ingest_rate"] == ["myvector", "villagesql"]
+        # and the sentence says so. VillageSQL, the ninth, is opt-in and not
+        # in a bare run, so not in either figure.
+        _prose("the ingest figure covers seven of the eight", claude)
+        assert e["engines_without_ingest_rate"] == ["myvector"]
+        assert "villagesql" not in e["per_engine_hours"]
         assert "percona" in e["per_engine_hours"]
         # Non-vacuity, and the guard that replaces the deleted claim: the
         # document's figure must be the SEVEN-engine one. `abs=0.5` above is
         # loose enough that the published six-engine 726 h would satisfy it
         # if the rate table were reverted and the document were not, so the
         # two figures are asserted to be different quantities.
-        six = est("full", engines=[x for x in ALL if x != "percona"],
+        six = est("full", engines=[x for x in cli_mod.DEFAULT_ENGINES
+                                   if x != "percona"],
                   passes=("normalized", "tuned"))
         assert round(e["ingest_hours"] - six["ingest_hours"], 2) == 69.83
         assert float(sentence.group("ingest").replace(",", "")) != pytest.approx(
@@ -2190,7 +2196,10 @@ class TestTheWebUiAndTheCliCannotDisagree:
 
     def test_the_endpoint_returns_the_function_unchanged(self):
         payload = self._api({"profile": "main", "resource_pass": "normalized"})
-        assert payload == est("main")
+        # A request naming no engines previews what `cmd_run` would run:
+        # the default-selected ones, without the opt-in VillageSQL.
+        assert payload == est("main", engines=cli_mod.DEFAULT_ENGINES)
+        assert "villagesql" not in payload["query_per_engine_hours"]
 
     def test_a_profile_that_restricts_the_run_restricts_the_preview(self):
         """The disagreement this class is named for, in the one place it could

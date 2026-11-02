@@ -49,7 +49,7 @@ from orchestrator.config import (available_profiles, dedupe,  # noqa: E402
                                  profile_engines_problem, profile_max_clients,
                                  resolve_resources)
 from orchestrator.reference_build import (  # noqa: E402
-    reference_build_problem, resolve_reference_build)
+    ops_build_problems, reference_build_problem, resolve_reference_build)
 from orchestrator.manifest import (Manifest, SelectionChanged,  # noqa: E402
                                    new_run_id, utcnow)
 from orchestrator import profile_overlay, select_builds  # noqa: E402
@@ -76,6 +76,11 @@ EXTRA_ENGINES = engines_mod.engines_in_group("extra")
 # measured three -- both reporting success, because an engine nobody asked for
 # cannot fail.
 KNOWN_ENGINES = engines_mod.known_engines()
+# ... less the opt-in engines (`runtime.default_selected: false`), which run
+# only when `--engines` names them. KNOWN_ENGINES stays the whole registry:
+# it is what an explicit name is checked against.
+DEFAULT_ENGINES = engines_mod.default_engines()
+OPT_IN_ENGINES = engines_mod.opt_in_engines()
 
 
 # Docker's own rule for container and volume names. The run id becomes both, so
@@ -487,8 +492,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     # everything, which is its own hard-won default (see KNOWN_ENGINES above).
     declared = profile_engines(profile)
     engines = [e.strip() for e in
-               (args.engines or ",".join(declared or KNOWN_ENGINES)).split(",")
+               (args.engines or ",".join(declared or DEFAULT_ENGINES)).split(",")
                if e.strip()]
+    # Said, not silently applied: a reader of the banner who expected the
+    # whole registry learns why an engine is missing and how to add it.
+    if not args.engines and not declared and OPT_IN_ENGINES:
+        print(f"note: opt-in engine(s) not run unless named with --engines: "
+              f"{', '.join(OPT_IN_ENGINES)} (runtime.default_selected: false "
+              f"in config/engines/<e>.yml)")
     # `--engines percona,percona` would otherwise start the engine twice and
     # write both units into one run directory under one checkpoint key, so the
     # second overwrites the first and the report shows one. Not a new hazard --
@@ -615,6 +626,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                                               resource_pass)
             if problem:
                 problems.append(f"{resource_pass}: {problem}")
+            if "ops" in phases:
+                problems += [f"{resource_pass}: {p}"
+                             for p in ops_build_problems(engine, profile)]
             else:
                 reference_builds[engine][resource_pass] = \
                     resolve_reference_build(engine, profile, resources,

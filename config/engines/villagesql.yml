@@ -156,6 +156,19 @@ capabilities:
 
 runtime:
   order: 90
+  # OPT-IN: a run that names no engines leaves VillageSQL out and prints so;
+  # `--engines villagesql` (alone or in a list) runs it. At this pin no query
+  # reaches the HNSW index (see the header), and the ann module and the
+  # driver check the plan only after fit() has loaded the corpus (moving the
+  # check onto a probe batch is not done: an EXPLAIN over an empty or tiny
+  # table is not verified to plan like the loaded one), so every default run
+  # would pay a full load per
+  # build (15 in frontier-explore, 3 per pass in main and full, at an
+  # unmeasured but >1 h rate on the large corpora) to end in "no points".
+  # Flip this to true, and drop the line, once a pin's EXPLAIN shows
+  # "Custom index distance scan on vi": the server needs an index declaring
+  # HAS_ROW_REF, or vsql_vector's HNSW needs to declare it.
+  default_selected: false
   driver: VillageSQLDriver
   ann_constructor: VillageSQL
   port: 3306

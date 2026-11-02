@@ -265,28 +265,33 @@ These are the reasons the code looks over-defensive. Do not relax them.
   the server, so `capabilities.bulk_vector_index_build: false` makes `incremental` its build
   mode. vsql_vector refuses `ef_construction` outside `[M, 32 x M]`, so 200 is unbuildable at
   M=6: the combination is dropped from the render by name (`ann_knobs.excluded_builds`), never
-  clamped under a label it was not built with, and `m-sweep` gives it M 8..32. See
-  `docs/04-engine-notes.md`.
+  clamped under a label it was not built with, and `m-sweep` gives it M 8..32. It is
+  **opt-in** (`runtime.default_selected: false`, read through the registry as
+  `cli.DEFAULT_ENGINES`): a run that names no engines leaves it out and prints so, because the
+  plan check runs only after the corpus is loaded and every default run would pay those loads
+  for no points. See `docs/04-engine-notes.md`.
 
 ## Cost awareness
 
 Ingest dominates everything. MHNSW and VIDX build their graph on every INSERT (~150 and ~55
 rows/s on 1M rows), and **every M value reloads the whole corpus**. `--profile full
---resource-pass both` is ~796 h of ingest before a single query runs, and ~1,828 h of run time
-in the worst case once querying is counted — all nine engines, which is what that command
-measures when `--engines` is omitted. **The two figures do not cover the same engines.** The
-run-time figure covers all nine; the ingest figure covers the seven with a measured rate.
-MyVector, the eighth, and VillageSQL, the ninth, have none: the estimator names both in
-`engines_without_ingest_rate` and prints that the ingest total is a floor. MyVector's query terms
-(concurrency windows, churn) are in the 1,828 h — its filtered-search term is not, because its
-driver declines that workload; VillageSQL's concurrency windows are, and its filtered and churn
-terms are not, because its driver declines both.
+--resource-pass both` is ~796 h of ingest before a single query runs, and ~1,824 h of run time
+in the worst case once querying is counted — all eight default engines, which is what that
+command measures when `--engines` is omitted. VillageSQL, the ninth, is **opt-in**
+(`runtime.default_selected: false`): a run that names no engines leaves it out and says so,
+because at its pin every ann build would load a corpus only to refuse every query. Named with
+`--engines` it adds ~4 h (its concurrency windows; it declines filtered search and churn) and
+no ingest figure. **The two figures do not cover the same engines.** The
+run-time figure covers all eight; the ingest figure covers the seven with a measured rate.
+MyVector, the eighth, has none: the estimator names it in `engines_without_ingest_rate` and
+prints that the ingest total is a floor, and its query terms (concurrency windows, churn) are
+in the 1,824 h — its filtered-search term is not, because its driver declines that workload.
 That figure was ~1,163 h until ops measurement version 9 raised the default churn budget from
 1800 s to 7200 s per step and added one discarded warm-up window per concurrency client count:
 the worst case charges the whole cap to every churn step of every unit, so the cap, not any
 engine, moved it. It was ~1,820 h until the estimate counted mongot's index-size settle
 (`SETTLE_CAP_S`, 600 s after every mongodb build), which version 9 added to the run and not
-to the estimate, and ~1,824 h until VillageSQL's concurrency windows were added.
+to the estimate.
 The ingest half
 used to cover six: Percona's rate was measured and unmodelled, the estimator named it in
 `engines_without_ingest_rate` rather than folding it in, and the published 726 h was a floor

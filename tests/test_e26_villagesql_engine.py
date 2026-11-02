@@ -498,9 +498,34 @@ class TestTheBulkBuildDeclaration:
 # §6 what master's engine contract asks of it: knob bounds, reference build
 # ---------------------------------------------------------------------------
 
-#: vsql-vector at EXTENSION_PIN, as `scripts/prepare-sources.sh` fetches it.
-#: Generated and gitignored, so the source half runs only where it exists.
-EXTENSION_TREE = os.path.join(VB_ROOT, "sources", "vsql-vector-git")
+#: vsql-vector as `scripts/prepare-sources.sh` fetches it: a bare-object
+#: repository (`git fetch --depth 1 origin <sha>`, then `git archive` into the
+#: build context) with NO working tree, so the pinned files are read from the
+#: commit object, never from a checkout. Generated and gitignored; the
+#: source half skips only when the repository or the pinned commit is absent.
+EXTENSION_REPO = os.path.join(VB_ROOT, "sources", "vsql-vector-git")
+
+
+def _pinned_source(relpath: str) -> str:
+    import subprocess
+    if not os.path.isdir(EXTENSION_REPO):
+        pytest.skip(f"vsql-vector not fetched into {EXTENSION_REPO}")
+    try:
+        out = subprocess.run(
+            ["git", "-C", EXTENSION_REPO, "show",
+             f"{EXTENSION_PIN}:{relpath}"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        pytest.skip(f"git unavailable: {exc}")
+    if out.returncode != 0:
+        if "bad object" in out.stderr or "invalid object" in out.stderr \
+                or "unknown revision" in out.stderr:
+            pytest.skip(f"{EXTENSION_PIN[:12]} not in {EXTENSION_REPO}")
+        # The commit is there and the path is not: a re-pin moved the file,
+        # which is exactly what this test is for -- fail, do not skip.
+        raise AssertionError(f"git show {EXTENSION_PIN[:12]}:{relpath} "
+                             f"failed: {out.stderr.strip()}")
+    return out.stdout
 
 
 class TestKnobBoundsAndReferenceBuild:
@@ -522,14 +547,29 @@ class TestKnobBoundsAndReferenceBuild:
         ("src/index/hnsw/storage.h", r"DEFAULT_EF_CONSTRUCTION = (\d+);", 200),
         ("src/index/hnsw/storage.cc", r"if \(M < (\d+)\)", 2),
     ])
-    def test_the_bounds_match_the_pinned_source_when_it_is_fetched(
-            self, relpath, pattern, expected):
+    def test_the_bounds_match_the_pinned_source(self, relpath, pattern,
+                                                expected):
         import re
-        path = os.path.join(EXTENSION_TREE, relpath)
-        if not os.path.exists(path):
-            pytest.skip(f"vsql-vector not fetched into {EXTENSION_TREE}")
-        match = re.search(pattern, open(path).read())
+        match = re.search(pattern, _pinned_source(relpath))
         assert match and int(match.group(1)) == expected
+
+    def test_the_combination_rules_are_the_ones_the_source_applies(self):
+        """`Options::validate`, statement by statement: M above MAX_M, an
+        ef_construction below M, and one above M x MAX_EF_CONSTRUCTION_FACTOR
+        are each refused. A re-pin that dropped or moved any of them would
+        leave `excluded_builds` dropping builds the extension now accepts, or
+        rendering ones it refuses."""
+        import re
+        source = _pinned_source("src/index/hnsw/storage.cc")
+        body = re.search(r"bool Options::validate\(.*?\n}\n", source, re.S)
+        assert body, "Options::validate moved or was renamed"
+        body = body.group(0)
+        assert re.search(r"if \(M > MAX_M\)", body)
+        assert re.search(r"if \(ef_construction < M\)", body)
+        assert re.search(r"max_ef_construction\s*=\s*M\s*\*\s*"
+                         r"MAX_EF_CONSTRUCTION_FACTOR;", body)
+        assert re.search(r"if \(ef_construction > max_ef_construction\)",
+                         body)
 
     def test_out_of_range_combinations_are_dropped_by_name(self):
         from orchestrator import ann_knobs
@@ -582,3 +622,81 @@ class TestKnobBoundsAndReferenceBuild:
     def test_select_builds_can_write_its_ef_construction_axis(self):
         from orchestrator.profile_overlay import OVERLAY_EXTRAS
         assert "villagesql_ef_construction" in OVERLAY_EXTRAS
+
+
+# ---------------------------------------------------------------------------
+# §7 opt-in, the ops pre-flight, and the plan-check cache
+# ---------------------------------------------------------------------------
+
+class TestOptIn:
+    def test_it_is_registered_but_not_default_selected(self):
+        from orchestrator import cli, engines as engines_mod
+        assert _config()["runtime"]["default_selected"] is False
+        assert engines_mod.get("villagesql").default_selected is False
+        assert "villagesql" in cli.KNOWN_ENGINES
+        assert "villagesql" not in cli.DEFAULT_ENGINES
+        assert cli.OPT_IN_ENGINES == ("villagesql",)
+        # Nothing else is opt-in: the default list is the registry minus it.
+        assert list(cli.DEFAULT_ENGINES) == [
+            e for e in cli.KNOWN_ENGINES if e != "villagesql"]
+
+    @pytest.mark.parametrize("value", ["false", 0, "no"])
+    def test_a_non_boolean_flag_is_refused(self, value):
+        """"false" is truthy; read as true it would put the engine back into
+        every default run."""
+        from orchestrator import engines as engines_mod
+        with pytest.raises(ValueError, match="default_selected"):
+            engines_mod._default_selected("x", {"default_selected": value})
+
+    def test_absent_means_selected(self):
+        from orchestrator import engines as engines_mod
+        assert engines_mod._default_selected("x", {}) is True
+
+
+class TestOpsPreflight:
+    def test_an_unbuildable_ops_combination_is_named(self):
+        from orchestrator.reference_build import ops_build_problems
+        problems = ops_build_problems(
+            "villagesql", {"ops": {"m_values": [6, 16]}})
+        assert len(problems) == 1
+        assert "M=6 at ef_construction=200" in problems[0]
+        assert "32 * M" in problems[0]
+
+    def test_an_m_outside_the_range_is_named(self):
+        from orchestrator.reference_build import ops_build_problems
+        problems = ops_build_problems("villagesql",
+                                      {"ops": {"m_values": [129]}})
+        assert any("M=129 is outside" in p for p in problems)
+
+    def test_every_shipped_profile_passes(self):
+        from orchestrator import cli
+        from orchestrator.config import available_profiles, load_profile
+        from orchestrator.reference_build import ops_build_problems
+        for name in available_profiles():
+            for engine in cli.KNOWN_ENGINES:
+                assert ops_build_problems(engine, load_profile(name)) == [], (
+                    name, engine)
+
+    def test_not_applied_when_ops_is_off_or_frontier_chooses(self):
+        from orchestrator.reference_build import ops_build_problems
+        assert ops_build_problems("villagesql", {"ops": {
+            "enabled": False, "m_values": [6]}}) == []
+        assert ops_build_problems("villagesql", {"ops": {
+            "build_selection": "frontier", "m_values": [6]}}) == []
+
+
+class TestThePlanCheckCache:
+    def test_it_is_keyed_on_the_query_shape(self):
+        """An unfiltered plan check must not vouch for the filtered query."""
+        d = driver(plan=INDEX_PLAN)
+        d._require_index(numpy.ones(4), 10)
+        assert d._plan_checked == {False: True}
+        d._cur = ScriptedCursor()       # the brute-force plan
+        with pytest.raises(vs.BruteForceRefused):
+            d._require_index(numpy.ones(4), 10, tag_threshold=5)
+
+    def test_a_new_schema_forgets_it(self):
+        d = driver(plan=INDEX_PLAN)
+        d._require_index(numpy.ones(4), 10)
+        d.create_schema(d._index)
+        assert d._plan_checked == {}
