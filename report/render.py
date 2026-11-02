@@ -1558,7 +1558,45 @@ def _reference_build_notes(per_engine: Dict[str, Any]) -> str:
                 f"recall {entry['reference_max_recall']:.3f}; a \"—\" here "
                 f"means that build has no point at or above the floor, "
                 f"whatever another build reached.\n")
-    return "\n" + "".join(lines) if lines else ""
+    return (_chosen_build_notes(per_engine)
+            + ("\n" + "".join(lines) if lines else ""))
+
+
+#: How `report/builds.py` prefixes a source the ops pass chose per dataset
+#: under `ops.build_selection: frontier`.
+_CHOSEN_PREFIX = "manifest: "
+_CHOSEN_WORDS = {
+    "frontier": "chosen from this run's frontier as the build fastest at "
+                "recall {target}",
+    "below_target": "chosen from this run's frontier, but NO swept build "
+                    "reached recall {target}; this is the one with the "
+                    "highest recall",
+    "fallback_reference": "the declared reference build, measured because "
+                          "the ann phase left no frontier to choose from "
+                          "(see the run's warnings)",
+}
+
+
+def _chosen_build_notes(per_engine: Dict[str, Any]) -> str:
+    """One line per engine whose ops build was chosen rather than declared.
+
+    `ops.build_selection: frontier` picks the ops build off the ann phase,
+    so the reference build differs per engine and dataset and may be a
+    fallback; a reader has to be told which, not left to assume the
+    declared build.
+    """
+    lines = []
+    for engine, entry in sorted(per_engine.items()):
+        source = str(entry.get("reference_source") or "")
+        if not source.startswith(_CHOSEN_PREFIX):
+            continue
+        how = source[len(_CHOSEN_PREFIX):]
+        kind, _, target = how.partition("@")
+        words = _CHOSEN_WORDS.get(kind, how).format(target=target or "?")
+        build = entry.get("reference_build_label") or "not recorded"
+        lines.append(f"- **{_label(engine)}**: `{build}` -- {words} "
+                     f"(`{how}`).\n")
+    return ("\n" + "".join(lines)) if lines else ""
 
 
 # The ops harness stamps a storage engine on every unit and defaults to

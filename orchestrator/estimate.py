@@ -464,6 +464,48 @@ def _ops_rows(ops: Dict[str, Any], dataset: str) -> int:
     return rows
 
 
+#: The M the ingest rates above were measured at -- the mid-grid default
+#: every rate table here was read off. A frontier-selected ops build is
+#: charged relative to it; see `frontier_ops_bound`.
+_RATE_REFERENCE_M = 16
+
+
+def _frontier(profile: Dict[str, Any]) -> bool:
+    # Imported here: the selection module pulls in the manifest and docker
+    # plumbing, which nothing else in this module needs.
+    from .ops_build_selection import MODE_FRONTIER, build_selection_mode
+    return build_selection_mode(profile) == MODE_FRONTIER
+
+
+def frontier_ops_bound(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The ops build to charge when `ops.build_selection: frontier`, or None.
+
+    Under `frontier` the ops build is not known until the ann phase of each
+    (engine, dataset, pass) has run, so there is no build to estimate -- and
+    printing the M=16 figure as though it were the plan would be the same
+    unlabelled substitution the key exists to remove. What IS known is the
+    grid it will be chosen from, so the ops ingest is charged at the largest
+    M any engine sweeps, ONE build per unit (the selection picks exactly one
+    M, so `ops.m_values` no longer multiplies it).
+
+    The scaling is linear in M from the rate tables' own M=16, which is an
+    assumption, stated: an HNSW insert does work proportional to the
+    neighbour lists it links into, and nothing in this repo has measured the
+    curve. ef_construction is not modelled, because no ingest rate here was
+    measured at more than one value of it. An upper bound in the direction
+    that matters for M; silent about efC, and the printed line says both.
+    """
+    if not _frontier(profile):
+        return None
+    ann = profile.get("ann", {}) or {}
+    grid = [int(m) for m in ann.get("m_values", [16])]
+    for values in (ann.get("m_values_by_engine") or {}).values():
+        grid += [int(m) for m in values or []]
+    largest = max(grid or [_RATE_REFERENCE_M])
+    return {"m": largest,
+            "ingest_factor": round(max(1.0, largest / _RATE_REFERENCE_M), 3)}
+
+
 def _ops_units(profile: Dict[str, Any], engine: str) -> int:
     """How many times the ops phase runs for one (engine, dataset, pass).
 
@@ -480,7 +522,9 @@ def _ops_units(profile: Dict[str, Any], engine: str) -> int:
     """
     ops = profile.get("ops", {}) or {}
     ann = profile.get("ann", {}) or {}
-    m_values = max(1, len(ops.get("m_values", [16])))
+    # One M under `frontier`: the selection builds the chosen build only.
+    m_values = (1 if _frontier(profile)
+                else max(1, len(ops.get("m_values", [16]))))
     # Mirrors `cli.py`'s `_OPS_BUILD_MODE_KEYS`, and must: this is how many
     # times the ops workloads actually run, so an engine whose second build
     # mode the runner executes and this does not count is an estimate short by
@@ -1268,7 +1312,10 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
     what is named as unknown instead of being guessed at.
     """
     m_count = max(1, len(profile.get("ann", {}).get("m_values", [16])))
-    ops_m = max(1, len(profile.get("ops", {}).get("m_values", [16])))
+    ops_bound = frontier_ops_bound(profile)
+    ops_m = (1 if ops_bound
+             else max(1, len(profile.get("ops", {}).get("m_values", [16]))))
+    ops_factor = ops_bound["ingest_factor"] if ops_bound else 1.0
     per_engine: Dict[str, float] = {}
     unknown: List[str] = [d for d in datasets if d not in _DATASET_ROWS]
     # An engine this repo has no ingest rate for, on any dataset the plan
@@ -1307,7 +1354,7 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
             if "ann" in phases:
                 engine_h += (rows / effective) * m_count / 3600
             if "ops" in phases:
-                engine_h += (rows / effective) * ops_m / 3600
+                engine_h += (rows / effective) * ops_m * ops_factor / 3600
         per_engine[engine] = round(engine_h * len(passes), 2)
 
     total_h = round(sum(per_engine.values()), 2)
@@ -1320,6 +1367,9 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
         "per_engine_hours": per_engine,
         "m_values": m_count,
         "ops_m_values": ops_m,
+        # None in `reference` mode. Otherwise the ops build is chosen after
+        # the ann phase and this is what the ops ingest was charged at.
+        "ops_build_bound": ops_bound,
         "passes": len(passes),
         "phases": list(phases),
         "datasets_without_estimate": unknown,
@@ -1406,6 +1456,13 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
               f"smoke run supplies the figure; until then the ingest\n    "
               f"cost of this plan is higher than the number above, by an "
               f"amount nothing here knows.")
+    bound = estimate.get("ops_build_bound")
+    if bound:
+        print(f"  ops build: unknown until each ann phase has run "
+              f"(ops.build_selection: frontier); the ops ingest above is "
+              f"charged\n    at the largest swept build, M={bound['m']} "
+              f"(x{bound['ingest_factor']:g} the M=16 rate, assumed linear in "
+              f"M; ef_construction not modelled).")
     if estimate["long_run"] and axis_hint:
         print(f"  ! This is a long run. Each M value costs a full reload of every "
               f"dataset,\n    and MHNSW/VIDX build incrementally at a few hundred "

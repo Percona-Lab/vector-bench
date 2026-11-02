@@ -348,6 +348,21 @@ The knobs worth changing first:
 - `ops.client_counts` — how far the concurrency sweep goes. Push past your core
   count to find the saturation point.
 - `ops.subset_rows` — load only part of the training set, for faster iteration.
+- `ops.build_selection` — `reference` (default) or `frontier`. Which index the
+  ops pass (build cost, concurrency, filtered, churn) measures. `reference`
+  builds each engine's declared `runtime.reference_build` at every
+  `ops.m_values` entry. `frontier` waits for the ann phase of each engine and
+  dataset and builds the one swept build that is fastest at the ops calibration
+  target (`ops.target_recall`, 0.95 by default), so the ops numbers describe
+  the index the frontier headline comes from; `ops.m_values` is then used only
+  where the chosen build names no M (Percona Search). It needs the ann phase:
+  `run` refuses `frontier` with `ann.enabled: false`, and a unit whose ann
+  phase did not run in this run directory (`--phases ops`, a failed ann phase)
+  measures the reference build and says `fallback_reference` in a warning, the
+  manifest and every record. A resumed run reuses the build chosen before the
+  interruption. The cost estimate cannot know the build ahead of time and
+  charges the ops ingest at the largest M in the grid instead. See
+  [05-methodology.md](05-methodology.md) §2.1.
 - `memory.server_limit_gb` in `config/resources/normalized.yml` — the single
   most consequential value, because an engine whose graph does not fit in cache
   behaves completely differently from one whose graph does.

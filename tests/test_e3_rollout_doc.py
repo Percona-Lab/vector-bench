@@ -482,7 +482,7 @@ CITED_SYMBOLS = {
     # one row because they are one piece of writing, and `symbol_body`
     # includes the `#:` block above a declaration for exactly this case.
     ("harness/metrics/records.py", "OPS_MEASUREMENT_VERSION"):
-        ("OPS_MEASUREMENT_VERSION = 9",
+        ("OPS_MEASUREMENT_VERSION = 10",
          "239 ops record files and 2,134 ops records",
          "CHANGES WHAT IT MEASURES",
          "is a diagnostic, not a guard"),

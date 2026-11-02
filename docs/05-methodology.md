@@ -398,6 +398,53 @@ of the tie is shown rather than a pick presented as a ranking. The fastest
 build at a floor is very often the largest graph swept, and this view keeps the
 headline from reading as an argument for it.
 
+#### Which build the ops pass measures: `ops.build_selection`
+
+Equal M is not equal work. M names the graph degree in every engine here, but
+what one unit of it costs and buys differs by implementation, so "every engine
+at M=16" hands each a different budget under one label. The comparison that
+means something is each engine's Pareto frontier over its whole swept grid, and
+once the headline is that frontier the ops sections — build cost, concurrency,
+filtered, churn — have to describe the same index, or the report puts a
+frontier figure from one build beside throughput measured on another.
+
+`ops.build_selection` decides which build the ops pass measures:
+
+- **`reference`** (the default, and what every profile did before the key
+  existed): the declared reference build above, built at every `ops.m_values`
+  entry.
+- **`frontier`** (`tuned-complete`): after the ann phase of each
+  (engine, dataset, pass), and from **that phase's own result files** — the
+  ones it wrote or reused, as recorded in the manifest, so a stale file from
+  another grid cannot be chosen — the ops pass picks the build whose frontier
+  point at the ops calibration target (`ops.target_recall`, 0.95 by default,
+  the same value §2.0's calibration then chases) has the highest QPS. Points
+  that fell back to a table scan are excluded. Ties go to the higher recall at
+  that point, then the cheaper build (smaller M, then smaller
+  `ef_construction`), then the build's name, so the choice is the same on
+  every re-read. The ops pass then builds exactly that M, `ef_construction`
+  and quantization; storage engines and build modes are still the declared
+  ones, because §4 already names the storage engine that won each cell.
+
+Nothing substitutes silently. If no build reaches the target, the build with
+the highest recall is measured and the status is **`below_target`**; if the ann
+phase did not run in this run directory, failed, or left no usable point, the
+declared reference build is measured and the status is
+**`fallback_reference`**. Both print a warning and land in the manifest's
+`warnings`. The choice is stored in the manifest
+(`ops_build_selection["<pass>/<engine>/<dataset>"]`) when it is made, and a
+resumed run reuses it rather than choosing again — a re-measured ann curve can
+move by more than the gap between two builds, and units already checkpointed
+under the first choice must not sit beside units measured on another index.
+
+The manifest's `engines.<name>.presentation.reference_builds_by_dataset`
+carries the chosen build and its source (`frontier@0.95`, `below_target@0.95`,
+`fallback_reference`) to the report, which labels the headline with it, and
+every ops record carries the same facts in `extra.ops_build_selection`. Ops
+measurement version 10 marks the change: a version 9 and a version 10 figure
+for one engine may describe different indexes, and the report refuses to chart
+them together.
+
 ### 2.2 Index build cost (ops harness)
 
 Measured per `(engine, dataset, M)`:
