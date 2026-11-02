@@ -49,7 +49,11 @@ from orchestrator.config import (available_profiles, dedupe,  # noqa: E402
                                  resolve_resources)
 from orchestrator.reference_build import (  # noqa: E402
     reference_build_problem, resolve_reference_build)
-from orchestrator.manifest import Manifest, new_run_id, utcnow  # noqa: E402
+from orchestrator.manifest import (Manifest, SelectionChanged,  # noqa: E402
+                                   new_run_id, utcnow)
+from orchestrator import profile_overlay, select_builds  # noqa: E402
+from orchestrator.estimate_grid import (ann_grid_prints,  # noqa: E402
+                                        print_ann_grid)
 # The cost estimate lives in its own module; these are re-exported because
 # `webui/control.py` and `tests/test_config.py` import them from here and the
 # split must not be visible to either. Import them from orchestrator.estimate
@@ -209,8 +213,86 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return _script("generate-dataset.sh", args.dataset)
 
 
-def cmd_render(args: argparse.Namespace) -> int:
+def _load_profile_with_overlay(args: argparse.Namespace):
+    """(profile, build selection or None), or raise ValueError/OSError.
+
+    `--overlay` is a stage-2 build selection (`select-builds`); see
+    `orchestrator/profile_overlay.py` for what it may change and why.
+    """
     profile = load_profile(args.profile)
+    if not getattr(args, "overlay", None):
+        return profile, None
+    return profile_overlay.apply_overlay(
+        profile, profile_overlay.load_overlay(args.overlay))
+
+
+def _print_excluded_builds(profile: Dict[str, Any], engines: List[str],
+                           passes: List[str]) -> None:
+    """Name every build the grid asks for that its engine cannot build.
+
+    `render_config` drops them (orchestrator/ann_knobs.py) because a profile
+    cannot spell a cartesian product with a hole in it; this is where that
+    drop stops being silent.
+    """
+    for resource_pass in passes:
+        resources = merge_resource_overrides(
+            load_resources(resource_pass), profile)
+        # `name`, not `engine`: tests/test_e17_report_scope.py locates
+        # cmd_run's own per-engine loop by its spelling.
+        for name in engines:
+            for m, efc, reason in ann_pass.excluded_ann_builds(
+                    name, profile, resources, resource_pass):
+                print(f"note: {resource_pass}/{name}: M={m} "
+                      f"ef_construction={efc} is not built -- {reason}")
+
+
+def cmd_select_builds(args: argparse.Namespace) -> int:
+    """Stage 2 of the two-stage frontier; see orchestrator/build_selection.py."""
+    try:
+        document = select_builds.select(args.source, args.profile,
+                                        args.dataset)
+        problems = select_builds.check(document)
+    except (OSError, ValueError) as exc:
+        print(f"select-builds: {exc}", file=sys.stderr)
+        return 2
+    if problems:
+        print("select-builds: refusing to write an overlay `run` would not "
+              "measure as recorded:", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 2
+    select_builds.write(document, args.out)
+    for line in select_builds.summary(document):
+        print(line)
+    print(f"wrote {args.out}\n  ./run-benchmark.sh run --profile "
+          f"{args.profile} --resource-pass tuned --overlay {args.out}")
+    return 0
+
+
+def _render_profile(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
+    """`cmd_render`'s profile, overlay applied, or None after saying why not.
+
+    Separate so the overlay's refusals do not put a `try` around the render
+    itself -- `cmd_render` deliberately lets a render error fail the command
+    (tests/test_e2_percona_wiring.py, TestEveryShippedProfileRenders).
+    """
+    try:
+        profile, _selection = _load_profile_with_overlay(args)
+    except (OSError, ValueError) as exc:
+        print(f"--overlay: {exc}", file=sys.stderr)
+        return None
+    if getattr(args, "overlay", None) and args.resource_pass != "tuned":
+        print("--overlay selects tuned-pass builds, which the normalized pass "
+              "ignores by design; render it with --resource-pass tuned",
+              file=sys.stderr)
+        return None
+    return profile
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    profile = _render_profile(args)
+    if profile is None:
+        return 2
     resources = merge_resource_overrides(
         load_resources(args.resource_pass), profile)
     work = paths_for("render")["work_annb"]
@@ -222,6 +304,9 @@ def cmd_render(args: argparse.Namespace) -> int:
         body = ann_pass.render_config(engine, profile, resources, args.resource_pass)
         path = ann_pass.write_config(work, engine, body)
         print(f"rendered {path}")
+        for m, efc, reason in ann_pass.excluded_ann_builds(
+                engine, profile, resources, args.resource_pass):
+            print(f"  not built: M={m} ef_construction={efc} -- {reason}")
     return 0
 
 
@@ -376,7 +461,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("cannot talk to the Docker daemon", file=sys.stderr)
         return 1
 
-    profile = load_profile(args.profile)
+    try:
+        profile, selection = _load_profile_with_overlay(args)
+    except (OSError, ValueError) as exc:
+        print(f"--overlay: {exc}", file=sys.stderr)
+        return 2
     # Before anything reads the key: a key that is PRESENT and unusable --
     # `engines: []`, `engines:` with no value, a bare string -- must not be
     # read as "no restriction", because the fall-back two statements below is
@@ -424,6 +513,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"note: profile '{profile.get('name')}' runs only "
               f"{', '.join(declared)}; override with --engines")
     phases = (["ann", "ops"] if args.phases == "both" else [args.phases])
+    # The overlay's extras are read in the tuned pass only; on a normalized
+    # pass it would apply to half the run and silently not to the other half.
+    if getattr(args, "overlay", None) and passes != ["tuned"]:
+        print("--overlay selects tuned-pass builds (resources.extras, which "
+              "the normalized pass ignores by design); run it with "
+              "--resource-pass tuned", file=sys.stderr)
+        return 2
 
     unknown = set(engines) - set(KNOWN_ENGINES)
     if unknown:
@@ -537,12 +633,29 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 2
 
+    _print_excluded_builds(profile, engines, passes)
+    # The published estimate, then the per-build block that corrects it when
+    # the rendered grid differs (orchestrator/estimate_grid.py).
+    grid_prints = ann_grid_prints(profile, engines, datasets, passes, phases)
     print_load_estimate(profile, engines, datasets, passes, phases,
-                        client_cpus=client_cpus)
+                        client_cpus=client_cpus, axis_hint=not grid_prints)
+    if grid_prints:
+        print_ann_grid(profile, engines, datasets, passes, phases,
+                       estimate_load_hours(profile, engines, datasets,
+                                           passes, phases))
 
     if _check_free_disk(paths, engines, datasets, passes) and not args.force:
         print("  Re-run with --force to start anyway.", file=sys.stderr)
         return 4
+
+    # After every other refusal, so a refused run leaves no selection behind,
+    # and before the first unit, so nothing is measured under a selection the
+    # directory does not record -- or under a different one on a resume.
+    try:
+        manifest.set_build_selection(selection)
+    except SelectionChanged as exc:
+        print(f"refusing to start: {exc}", file=sys.stderr)
+        return 5
 
     # Always load the file so completed sub-units are recorded against it;
     # only *honour* them when --resume was asked for.
@@ -1924,6 +2037,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--engines", default=None)
     r.add_argument("--resource-pass", default="normalized",
                    choices=("normalized", "tuned"))
+    r.add_argument("--overlay", default=None,
+                   help="a select-builds overlay to render with")
     r.set_defaults(func=cmd_render)
 
     run = sub.add_parser("run", help="execute a benchmark run")
@@ -1947,7 +2062,23 @@ def build_parser() -> argparse.ArgumentParser:
                      help="re-run ann-benchmarks points that already have results")
     run.add_argument("--fail-fast", action="store_true")
     run.add_argument("--no-report", action="store_true")
+    run.add_argument("--overlay", default=None,
+                     help="a build selection written by select-builds, "
+                          "applied to --profile (tuned pass only)")
     run.set_defaults(func=cmd_run)
+
+    sb = sub.add_parser(
+        "select-builds",
+        help="stage 2 of the two-stage frontier: choose full-size builds "
+             "from a frontier-explore run")
+    sb.add_argument("--from", dest="source", required=True,
+                    help="the stage-1 run directory (results/<run id>)")
+    sb.add_argument("--out", required=True, help="overlay file to write")
+    sb.add_argument("--profile", default="tuned-complete",
+                    help="the profile the overlay will be applied to")
+    sb.add_argument("--dataset", default=None,
+                    help="the stage-1 corpus, when its records hold several")
+    sb.set_defaults(func=cmd_select_builds)
 
     rep = sub.add_parser("report", help="generate the report for an existing run")
     rep.add_argument("--run-dir", required=True)

@@ -204,6 +204,129 @@ committing rather than after. It is the same calculation, not a second one: both
 call `estimate_load_hours()` in `orchestrator/estimate.py`, so they cannot
 disagree about the same plan. See [08-web-ui.md](08-web-ui.md).
 
+### The ann grid, counted build by build
+
+The ingest line above charges every engine one corpus reload per entry of
+`ann.m_values`. ann-benchmarks reloads for every *build* -- every
+(M, ef_construction, quantization) the rendered config asks for -- so an
+engine with a second axis costs more than that line says: under
+`tuned-complete` pgvector and Valkey build three indexes each, not one, and
+the tuned pass's `m_values_by_engine` gives the MySQL-family engines two. The
+published figures in this document and README are left on the old basis so
+they stay comparable with each other; `run` now prints a second block beneath
+them, from `orchestrator/estimate_grid.py`, that counts what the render asks
+for and prices each load by its M where the load builds the graph
+(MariaDB, AliSQL, Percona Server: `(M/16)^1.1` of the M=16 rate, from MariaDB's
+glove-100 rates at M=8 and M=32). When it appears it also says by how much
+the run time above is low and what to plan against instead, names the axis
+that multiplies each engine's builds (the headline's "Reduce ann.m_values"
+advice is withheld then, because the multiplier may be ef_construction or
+quantization), and lists what neither figure prices: the bulk index builds of
+the engines that build after the load, the recall/QPS sweep, and any engine
+with no measured ingest rate.
+
+## 2a. Exploring the whole parameter space: the two-stage frontier
+
+A reviewer of `full-20260825` asked for the frontier over M = 4, 6, 8, 12, 16,
+32, 48 on every engine, with ef_construction and quantization swept where the
+engine has them. At 990,000 rows that grid is not affordable: counted by the
+block above it is **~267 h of ann loads** -- 7 MariaDB / 12.3 / AliSQL builds
+at 31, 45 and 53 h, and 21 Percona Server builds at ~129 h -- before a single
+query, and before tuned-complete's ops phase. So it is done in two stages.
+
+**Stage 1 -- explore at 90,000 rows** (`config/profiles/frontier-explore.yml`).
+Every engine with a graph-degree knob sweeps the reviewer's seven M values;
+pgvector, Valkey, Percona Server and MyVector also sweep ef_construction
+64/200/400; Percona Search sweeps quantization scalar/none at one M label
+(mongot exposes no graph degree here -- the profile header says why
+`maxEdges` is not used). One build is left out by name: pgvector refuses
+ef_construction < 2·M, so M=48 at 64 is dropped and printed before the run
+(`orchestrator/ann_knobs.py`), never clamped. `runs: 2`, because the
+selection is made on QPS too and a single cold draw can push a build off the
+frontier.
+
+| Engine | Builds | Ann loads, estimated |
+| --- | ---: | ---: |
+| `alisql` | 7 | ~6.0 h |
+| `percona` | 21 | ~3.6 h |
+| `mariadb123` | 7 | ~3.0 h |
+| `mariadb` | 7 | ~2.2 h |
+| `pgvector` | 20 | ~0.3 h |
+| `valkey`, `mongodb` | 21, 2 | minutes |
+| `myvector` | 21 | no measured rate |
+
+About **15 h of loads** plus the queries, which no rate prices (the recall
+sweep is named under the total as always); the bulk index builds of the
+post-load engines are in neither figure.
+
+```bash
+./scripts/generate-dataset.sh dbpedia-openai-100k-angular
+./run-benchmark.sh run --profile frontier-explore
+```
+
+**Selection** (`select-builds`, `orchestrator/build_selection.py`). Reads the
+stage-1 run's `report/records.jsonl` -- run `report --run-dir` first if it
+was skipped -- and per engine, over every point that used the vector index:
+
+* the **winner** at each floor 0.90 / 0.95 / 0.99: the build owning the
+  frontier point with the smallest recall at or above it;
+* every build owning a frontier point **near** a floor, defined as
+  |recall − floor| ≤ 0.015 -- the most recall at fixed M moved between 90,000
+  and 990,000 rows (M=16, 0.014), so a build that close can be on the other
+  side of the floor at full size;
+* for a floor nothing reaches, the build with the highest recall, recorded as
+  an unreached floor;
+* the **neighbouring M** below and above each of those, at the same
+  ef_construction and quantization, so stage 2 can confirm the choice
+  transfers. A kept M=4 or M=48 has one neighbour and an edge note: the
+  optimum may lie outside the explored grid. Where the next M exists but the
+  engine cannot build it at that ef_construction (pgvector M=48 at 64), the
+  note says so instead. A neighbour stage 1 has no point for -- a failed
+  build, or one that fell back to a scan -- is **dropped**, with that reason:
+  there is nothing to confirm a transfer against, and a build that failed at
+  90,000 rows is hours lost at 990,000;
+* the target profile's **reference build**, always (`run` refuses a grid
+  without it).
+
+Everything else is pruned, with its reason. **The overlay names the kept
+builds exactly** (`ann_builds_by_engine`), so there is no closure: per-axis
+lists alone would be multiplied out by `render_config`, and on Percona Server
+three chosen builds -- M=12 at 64, 16 at 200, 32 at 400 -- would come back as
+nine, ~60 h of loads at 990,000 rows instead of ~20 h.
+
+```bash
+./run-benchmark.sh select-builds --from results/<stage-1 run id> \
+    --out state/frontier-stage2.yml
+```
+
+It refuses to write an overlay whose rendered grid is not exactly the kept
+set, or one `run` would refuse, and refuses a stage 1 that swept more than one
+build mode or MariaDB storage engine (the selection cannot tell them apart).
+
+**Stage 2 -- re-measure at 990,000 rows.** The overlay is applied to
+`tuned-complete` (`orchestrator/profile_overlay.py`): it may set only the
+build-axis keys of `resources.extras`, each checked at load against the
+engine's legal range and enumeration; it merges the way a profile's
+`resources:` block always has; it must carry its `build_selection` block,
+whose `overlay_sha256` covers both the grid and the provenance, so neither can
+be edited without the other; and it is refused on the normalized pass, which
+ignores those keys by design.
+
+```bash
+./run-benchmark.sh run --profile tuned-complete --resource-pass tuned \
+    --overlay state/frontier-stage2.yml
+```
+
+What it costs depends on what stage 1 keeps, and the run prints it. For
+scale: three M values per engine at one ef_construction (say 12/16/32) is
+**~82 h** of ann loads, against ~22 h for tuned-complete's own grid and
+~267 h for the whole space -- most of it MariaDB 12.3 and AliSQL at M=32.
+The stage-2 manifest records `build_selection`: the stage-1 run id and path,
+the grid explored, every kept and pruned build with its reasons, and every
+stage-1 (build, ef_search, recall, QPS) of the kept builds, so a later report
+can flag any pair whose recall moved by more than 0.02 between the stages.
+A resume must pass the same overlay; a different one, or none, is refused.
+
 ---
 
 ## 3. Choosing a scope

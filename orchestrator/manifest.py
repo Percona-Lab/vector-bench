@@ -275,6 +275,28 @@ class ResolutionChanged(Exception):
         return out
 
 
+class SelectionChanged(Exception):
+    """A resume would apply a different build selection from the one the run
+    directory recorded. `recorded` or `now` is None when that side had none."""
+
+    def __init__(self, recorded: Optional[Dict[str, Any]],
+                 now: Optional[Dict[str, Any]]):
+        self.recorded = recorded
+        self.now = now
+        super().__init__(
+            f"this run directory was measured under {_spell_selection(recorded)}"
+            f", and this invocation applies {_spell_selection(now)}. Resuming "
+            f"would put two grids under one manifest; start a fresh --run-id, "
+            f"or pass the overlay the run started with.")
+
+
+def _spell_selection(block: Optional[Dict[str, Any]]) -> str:
+    if not block:
+        return "no build selection"
+    stage1 = (block.get("stage1") or {}).get("run_id")
+    return f"the build selection made from stage-1 run {stage1!r}"
+
+
 def _without_timestamp(entry: Dict[str, Any]) -> Any:
     """The entry as it would read back from disk, minus `recorded_at`.
 
@@ -605,6 +627,43 @@ class Manifest:
             engine: {**(block.get(engine) or {}),
                      resource_pass: {**entry, "recorded_at": utcnow()}},
         }
+        self.save()
+        return "recorded"
+
+    def set_build_selection(self, selection: Optional[Dict[str, Any]]) -> str:
+        """Record which stage-1 run chose this run's builds, once.
+
+        `build_selection` is written by `select-builds` into the overlay that
+        `run --overlay` applies, and recorded here verbatim: the stage-1 run
+        id and path, the full grid that run explored, every build kept with
+        its reasons, every build pruned with its reason, and the stage-1
+        recall at each kept (build, ef_search) for the transfer check a later
+        report makes. See `orchestrator/build_selection.py`.
+
+        `record_engine_resolution`'s rule, for the same reason: the grid a
+        run measures is part of what its directory means, and a resume that
+        applies a different selection -- or none -- would put two grids under
+        one manifest. Returns "recorded", "unchanged" or "none"; raises
+        `SelectionChanged` when the directory already holds a different one,
+        or when units were measured here before any selection was recorded.
+        Whether that refuses the run is the caller's decision.
+        """
+        recorded = self.data.get("build_selection")
+        if recorded is None and selection is None:
+            return "none"
+        if recorded is not None:
+            if _without_timestamp(recorded) != _without_timestamp(
+                    selection or {}) or selection is None:
+                raise SelectionChanged(recorded, selection)
+            return "unchanged"
+        if any(isinstance(p, dict) for p in self.data.get("phases") or []) \
+                or self.data.get("engines_resolved"):
+            # Units were measured -- or a run was resolved and may have died
+            # mid-unit, leaving ann results in the shared tree with no phase
+            # entry -- without a selection; recording one now would claim it
+            # chose builds it never saw.
+            raise SelectionChanged(None, selection)
+        self.data["build_selection"] = {**selection, "recorded_at": utcnow()}
         self.save()
         return "recorded"
 
