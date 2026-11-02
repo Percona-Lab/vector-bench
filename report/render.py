@@ -1381,6 +1381,9 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
     # pass's heading correctly and every later one bare, which the §4 heading
     # test caught and inspection did not.
     many_passes = len(described_passes(summary)) > 1
+    # Lazily: `frontier_render` imports this module's cell helpers at its
+    # own import time, and this module is the one `generate` imports first.
+    from report import frontier_render
     for dataset, by_pass in sorted(per_dataset.items()):
         for resource_pass, per_engine in sorted(
                 by_pass.items(), key=lambda kv: str(kv[0])):
@@ -1425,6 +1428,11 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
                     if (value != "—" and at is not None and lowest is not None
                             and lowest > floor / 100.0):
                         value += " †"
+                    # F12: the headline is the fastest build swept, which
+                    # may not be the index §5 onward measured. Said beside
+                    # the number, because that is where it gets copied from.
+                    if value != "—":
+                        value += frontier_render.headline_mark(entry, floor)
                     return _with_build(value, entry.get(
                         f"qps_at_recall_{floor}_build_label"))
 
@@ -1446,9 +1454,9 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
             ))
             parts.append(
                 "\n_QPS at a recall floor is the comparison an operator makes: how fast "
-                "is the engine at an accuracy I can accept. A dash means the engine's "
-                "reference build did not reach that recall; another build may have, "
-                "and the sweep table below says which._\n"
+                "is the engine at an accuracy I can accept, over every build this run "
+                "swept. The build that produced each figure is printed under it. A "
+                "dash means no build swept reached that recall._\n"
                 "\n_Each cell also carries the recall the figure was measured at. "
                 "A frontier reports the fastest configuration at or above the "
                 "floor, and that configuration is frequently well above it, so two "
@@ -1461,17 +1469,17 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
                 "number shown is its throughput at the higher recall printed beside "
                 "the dagger. Those cells are not comparable with engines that do have "
                 "a point near the floor — they are taken at a materially harder task. "
-                "Lowering the graph degree M is what would produce points there; this "
-                "run pins M=16 for every engine._\n"
+                "A lower graph degree M or build effort is what would produce points "
+                "there; the swept-space table below says what this run varied._\n"
             )
+            parts.append(frontier_render.mismatch_notes(per_engine))
+            parts.append(frontier_render.swept_space_table(per_engine))
+            parts.append(frontier_render.smallest_table(per_engine))
+            parts.append(frontier_render.build_cost_table(per_engine))
+            parts.append(frontier_render.ops_build_table(per_engine,
+                                                         FLOOR_MARK))
             parts.append(_reference_build_notes(per_engine))
-            parts.append(_sweep_table(per_engine))
     return "".join(parts) or "_No recall/QPS data in this run._\n"
-
-
-#: The heading of §4's second table. A constant because the tests split the
-#: section on it: the headline and the sweep must never be read as one table.
-SWEEP_TABLE_HEADING = "**Best of the sweep, every build**"
 
 
 def _with_build(value: str, label: Optional[str]) -> str:
@@ -1487,6 +1495,14 @@ def _with_build(value: str, label: Optional[str]) -> str:
     return f"{value}<br>`{label}`"
 
 
+def _frontier_intro(summary: Dict[str, Any]) -> str:
+    """§4's opening sentence. It said "Pareto frontier" for every engine,
+    including those measured at one build with only ef_search varied, which
+    is a curve; `frontier_render.section_intro` words it per run."""
+    from report import frontier_render
+    return frontier_render.section_intro(summary)
+
+
 def _recall_span(low: Optional[float], high: Optional[float]) -> str:
     if high is None:
         return "—"
@@ -1494,82 +1510,45 @@ def _recall_span(low: Optional[float], high: Optional[float]) -> str:
 
 
 def _reference_build_notes(per_engine: Dict[str, Any]) -> str:
-    """What the headline was taken from, and why a row holds dashes.
+    """Why a row of the ops-build table holds dashes.
 
     One sentence per engine whose reference build left a cell empty, giving
     the build's own ceiling: "its reference build peaks at recall 0.892" is
     what the 25 Aug post needed beside Percona Search, and printed 138 from
-    another index instead.
+    another index instead. The headline now does take the fastest build --
+    named, and marked when it is not the ops build -- so these notes explain
+    the secondary table rather than the headline.
     """
     lines = []
     for engine, entry in sorted(per_engine.items()):
         build = entry.get("reference_build_label") or "not recorded"
-        if not any(entry.get(f"qps_at_recall_{f}") is None
+        if not any(entry.get(f"reference_qps_at_recall_{f}") is None
                    for f in (90, 95, 99)):
             continue
         source = entry.get("reference_source") or ""
         if entry.get("reference_build") is None and source.startswith(
                 "ambiguous"):
             lines.append(
-                f"- **{_label(engine)}**: the reference build is ambiguous "
-                f"-- {source.split(': ', 1)[-1]} -- so no headline figure is "
-                f"printed rather than one pooled across them. The sweep "
-                f"table below names each build's figures.\n")
+                f"- **{_label(engine)}**: the ops build is ambiguous "
+                f"-- {source.split(': ', 1)[-1]} -- so this table prints no "
+                f"figure rather than one pooled across them.\n")
         elif entry.get("reference_build") is None:
             lines.append(
-                f"- **{_label(engine)}**: no reference build is recorded for "
-                f"this run and the grid swept "
-                f"{entry.get('sweep_builds', 0)} builds, so no headline "
-                f"figure is printed rather than the fastest of them. The "
-                f"sweep table below has each build's figures, named.\n")
+                f"- **{_label(engine)}**: no ops build is recorded for this "
+                f"run and the grid swept {entry.get('sweep_builds', 0)} "
+                f"builds, so this table prints no figure rather than guess "
+                f"which of them the ops pass measured.\n")
         elif entry.get("reference_max_recall") is None:
             lines.append(
                 f"- **{_label(engine)}**: no recall point was measured at its "
-                f"reference build (`{build}`), so every floor reads \"—\". "
-                f"The sweep table below has the builds that were measured.\n")
+                f"ops build (`{build}`), so every floor here reads \"—\".\n")
         else:
             lines.append(
-                f"- **{_label(engine)}**: its reference build (`{build}`) "
-                f"peaks at recall {entry['reference_max_recall']:.3f}; a "
-                f"\"—\" means that build has no point at or above the floor, "
+                f"- **{_label(engine)}**: its ops build (`{build}`) peaks at "
+                f"recall {entry['reference_max_recall']:.3f}; a \"—\" here "
+                f"means that build has no point at or above the floor, "
                 f"whatever another build reached.\n")
-    head = ("\n_Every headline figure is the engine's **reference build** -- "
-            "the index the ops pass builds, so the number describes the same "
-            "index as §5-§9 -- and names it under the number._\n")
-    return head + ("\n" + "".join(lines) if lines else "")
-
-
-def _sweep_table(per_engine: Dict[str, Any]) -> str:
-    """The fastest figure at each floor over EVERY build the grid swept.
-
-    Real measurements, kept because a reader tuning an engine wants them, and
-    never in the headline, because they are not the index the rest of the
-    report measured. Each cell names its build.
-    """
-    rows = []
-    for engine, entry in sorted(per_engine.items()):
-        def cell(floor: int) -> str:
-            value = _fmt(entry.get(f"best_qps_at_recall_{floor}"), 0)
-            at = entry.get(f"best_qps_at_recall_{floor}_recall")
-            if value != "—" and at is not None:
-                value += f" @{at:.3f}"
-            return _with_build(value, entry.get(
-                f"best_qps_at_recall_{floor}_build_label"))
-
-        rows.append([_label(engine), cell(90), cell(95), cell(99),
-                     _recall_span(entry.get("sweep_min_recall"),
-                                  entry.get("sweep_max_recall")),
-                     str(entry.get("sweep_builds", 0)),
-                     str(entry.get("sweep_points", 0))])
-    return (f"\n{SWEEP_TABLE_HEADING}\n\n"
-            "_The same floors over every build the grid swept, including "
-            "builds the ops pass never measured. Not a headline: a cell here "
-            "may come from a different index than every other section's "
-            "figures for the engine, and says which._\n"
-            + _md_table(["Engine", "Best QPS @ recall≥0.90",
-                         "Best QPS @ recall≥0.95", "Best QPS @ recall≥0.99",
-                         "Sweep recall range", "Builds", "Sweep points"],
-                        rows))
+    return "\n" + "".join(lines) if lines else ""
 
 
 # The ops harness stamps a storage engine on every unit and defaults to
@@ -3812,9 +3791,7 @@ def render_markdown(manifest: Dict[str, Any], summary: Dict[str, Any],
         "\n---\n\n## 3. Known asymmetries\n\n",
         _known_asymmetries(summary),
         "\n---\n\n## 4. Recall vs throughput\n\n",
-        "The headline comparison. Each engine's Pareto frontier is the best "
-        "throughput it achieved at each recall level across the whole parameter "
-        "sweep; the faint scatter behind it is every measured point.\n",
+        _frontier_intro(summary),
         _provenance.section4_note(summary),
         _headline_tables(summary),
     ]
@@ -3989,7 +3966,7 @@ def render_markdown(manifest: Dict[str, Any], summary: Dict[str, Any],
             "the target.\n\n"
             "**Use it as a cross-check against §4.** Carry an engine's recall "
             "at some `ef_search` off this chart and find the same engine at the "
-            "same `ef_search` on the recall/throughput frontier. The two are "
+            "same `ef_search` and build on the §4 recall/throughput chart. The two are "
             "measured by different code in different containers over different "
             "query counts — ann-benchmarks computes its own recall, this sweep "
             "computes ours — so they are not plotted together and are not "

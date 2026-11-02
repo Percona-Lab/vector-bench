@@ -18,9 +18,11 @@ What these tests hold:
 * F6: each engine declares a reference build (`runtime.reference_build`),
   resolved on the host against the profile and pass, refused when the ann grid
   does not contain it, and carried to the report through the manifest's
-  `engines.<name>.presentation`. The headline floor table uses only those
-  points and names the build under every number; a second "best of the sweep"
-  table may use every build and names the one each cell came from.
+  `engines.<name>.presentation`. The "at the build the ops pass measured"
+  table uses only those points and names the build under every number. (It
+  was the headline until F12 made the whole-sweep frontier the headline --
+  `tests/test_e28_frontier_headline.py` -- which also names each cell's
+  build; the assertions here now read the `reference_` fields.)
 * F1: the calibration point (chosen ef, achieved recall, status) is printed
   beside every concurrency and churn throughput figure, and an engine that did
   not reach the recall target is not ranked beside those that did.
@@ -42,7 +44,7 @@ import pytest
 VB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, VB_ROOT)
 
-from report import generate, loaders, render  # noqa: E402
+from report import frontier_render, generate, loaders, render  # noqa: E402
 
 DATASET = "dbpedia-openai-1000k-angular"
 
@@ -146,7 +148,12 @@ def _entry(summary, engine, resource_pass="tuned"):
 
 
 # ---------------------------------------------------------------------------
-# F6.2 / F6.5: the headline uses the reference build only
+# F6.2 / F6.5: the ops-build view uses the reference build only.
+#
+# This was the headline until F12 put the whole-sweep frontier there
+# (tests/test_e28_frontier_headline.py). The reference figures moved to the
+# `reference_` fields and the secondary table, and every assertion below is
+# the same claim about them that it was about the headline.
 # ---------------------------------------------------------------------------
 
 class TestTheHeadlineUsesTheReferenceBuild:
@@ -161,7 +168,7 @@ class TestTheHeadlineUsesTheReferenceBuild:
         unreached -- never 138 / 124 / 88 from the unquantized build."""
         entry = _entry(self._summary(), "mongodb")
         for floor in (90, 95, 99):
-            assert entry[f"qps_at_recall_{floor}"] is None, floor
+            assert entry[f"reference_qps_at_recall_{floor}"] is None, floor
         assert entry["reference_max_recall"] == pytest.approx(0.892)
 
     def test_the_best_of_the_sweep_keeps_the_published_figures(self):
@@ -174,8 +181,8 @@ class TestTheHeadlineUsesTheReferenceBuild:
 
     def test_pgvector_headline_comes_from_ef_construction_200(self):
         entry = _entry(self._summary(), "pgvector")
-        assert entry["qps_at_recall_95"] == 520.0
-        assert entry["qps_at_recall_95_build_label"] == "M=16 efC=200"
+        assert entry["reference_qps_at_recall_95"] == 520.0
+        assert entry["reference_qps_at_recall_95_build_label"] == "M=16 efC=200"
         assert entry["best_qps_at_recall_95"] == 610.0
         assert entry["best_qps_at_recall_95_build_label"] == "M=16 efC=400"
 
@@ -185,13 +192,13 @@ class TestTheHeadlineUsesTheReferenceBuild:
         entry = _entry(self._summary(records, _manifest(REFERENCE)),
                        "pgvector")
         winner = next(r for r in records if r["qps"] == 520.0)
-        assert entry["qps_at_recall_95_build"] == loaders.build_signature(winner)
+        assert entry["reference_qps_at_recall_95_build"] == loaders.build_signature(winner)
         assert "qps_at_recall_95_storage" in entry
 
     def test_points_and_range_describe_the_reference_build(self):
         entry = _entry(self._summary(), "mongodb")
-        assert entry["points"] == 4
-        assert entry["max_recall"] == pytest.approx(0.892)
+        assert entry["reference_points"] == 4
+        assert entry["reference_max_recall"] == pytest.approx(0.892)
         assert entry["sweep_points"] == 7
         assert entry["sweep_max_recall"] == pytest.approx(0.997)
 
@@ -200,7 +207,7 @@ class TestTheHeadlineUsesTheReferenceBuild:
         carries it only in `extra.parameters` and the source file name."""
         entry = _entry(self._summary(_mongodb_records(top_level_quant=False)),
                        "mongodb")
-        assert entry["qps_at_recall_90"] is None
+        assert entry["reference_qps_at_recall_90"] is None
         assert entry["reference_max_recall"] == pytest.approx(0.892)
 
 
@@ -231,18 +238,18 @@ class TestAnArchivedManifestFallsBackToTheOpsBuild:
 
     def test_mongodb_falls_back_to_the_scalar_index(self):
         entry = _entry(self._summary(), "mongodb")
-        assert entry["qps_at_recall_90"] is None
+        assert entry["reference_qps_at_recall_90"] is None
         assert entry["reference_source"] == "ops index_build record"
 
     def test_pgvector_falls_back_to_ef_construction_200(self):
-        assert _entry(self._summary(), "pgvector")["qps_at_recall_95"] == 520.0
+        assert _entry(self._summary(), "pgvector")["reference_qps_at_recall_95"] == 520.0
 
     def test_valkey_at_the_server_default_matches_no_ann_build(self):
         """The ops pass passed no EF_CONSTRUCTION, and the record cannot say
         what the server defaulted to. A number from 64, 200 or 400 would be a
         guess presented as the reference."""
         entry = _entry(self._summary(), "valkey")
-        assert entry["qps_at_recall_90"] is None
+        assert entry["reference_qps_at_recall_90"] is None
         assert entry["best_qps_at_recall_90"] == 850.0
 
 
@@ -254,14 +261,14 @@ class TestOneBuildNeedsNoDeclaration:
         records = [_recall("mariadb", 0.95, 400.0, ef_search=10),
                    _recall("mariadb", 0.99, 200.0, ef_search=40)]
         entry = _entry(generate.summarize(records, {}), "mariadb")
-        assert entry["qps_at_recall_90"] == 400.0
+        assert entry["reference_qps_at_recall_90"] == 400.0
         assert entry["reference_source"] == "only build measured"
 
     def test_two_builds_and_no_declaration_are_not_guessed_between(self):
         records = [_recall("mariadb", 0.95, 400.0, ef_search=10, m=8),
                    _recall("mariadb", 0.97, 300.0, ef_search=10, m=16)]
         entry = _entry(generate.summarize(records, {}), "mariadb")
-        assert entry["qps_at_recall_90"] is None
+        assert entry["reference_qps_at_recall_90"] is None
         assert entry["reference_build"] is None
         assert entry["best_qps_at_recall_90"] == 400.0
 
@@ -283,27 +290,27 @@ class TestTheRenderedTables:
                     if l.startswith(f"| {label} "))
         return [c.strip() for c in line.strip("|").split("|")]
 
-    def test_the_headline_row_is_dashes_for_percona_search(self):
-        row = self._row(self._page(), render._label("mongodb"))
+    def test_the_ops_build_row_is_dashes_for_percona_search(self):
+        row = self._row(self._page(), render._label("mongodb"),
+                        after=frontier_render.OPS_TABLE_HEADING)
         assert row[1:4] == ["—", "—", "—"]
 
     def test_the_footnote_gives_the_reference_builds_max_recall(self):
         table = self._page()
-        headline = table.split(render.SWEEP_TABLE_HEADING)[0]
-        assert "0.892" in headline.split("| ---")[-1]
-        assert "quantization=scalar" in headline
+        ops_view = table.split(frontier_render.OPS_TABLE_HEADING)[1]
+        assert "0.892" in ops_view.split("| ---")[-1]
+        assert "quantization=scalar" in ops_view
 
-    def test_each_headline_number_names_its_build(self):
-        row = self._row(self._page(), render._label("pgvector"))
+    def test_each_ops_build_number_names_its_build(self):
+        row = self._row(self._page(), render._label("pgvector"),
+                        after=frontier_render.OPS_TABLE_HEADING)
         assert "520 @0.951" in row[2] and "M=16 efC=200" in row[2]
 
-    def test_the_sweep_table_names_the_build_each_cell_came_from(self):
+    def test_the_headline_names_the_build_each_cell_came_from(self):
         table = self._page()
-        row = self._row(table, render._label("mongodb"),
-                        after=render.SWEEP_TABLE_HEADING)
+        row = self._row(table, render._label("mongodb"))
         assert "138" in row[1] and "quantization=none" in row[1]
-        row = self._row(table, render._label("pgvector"),
-                        after=render.SWEEP_TABLE_HEADING)
+        row = self._row(table, render._label("pgvector"))
         assert "610" in row[2] and "M=16 efC=400" in row[2]
 
     def test_the_build_line_survives_into_html(self):
@@ -595,7 +602,7 @@ class TestAFallbackThatPoolsBuildsIsAmbiguous:
         records = _mongodb_records() + [self._ops_build("mongodb")]
         entry = _entry(generate.summarize(records, {}), "mongodb")
         for floor in (90, 95, 99):
-            assert entry[f"qps_at_recall_{floor}"] is None
+            assert entry[f"reference_qps_at_recall_{floor}"] is None
         assert entry["reference_build"] is None
         assert entry["reference_source"].startswith("ambiguous")
         assert entry["best_qps_at_recall_90"] == 138.0
@@ -606,14 +613,14 @@ class TestAFallbackThatPoolsBuildsIsAmbiguous:
         ops = self._ops_build("mariadb")
         ops["m"] = None
         entry = _entry(generate.summarize(records + [ops], {}), "mariadb")
-        assert entry["qps_at_recall_90"] is None
+        assert entry["reference_qps_at_recall_90"] is None
         assert entry["reference_source"].startswith("ambiguous")
 
     def test_the_footnote_says_the_build_is_ambiguous(self):
         records = _mongodb_records() + [self._ops_build("mongodb")]
         table = render._headline_tables(generate.summarize(records, {}))
-        headline = table.split(render.SWEEP_TABLE_HEADING)[0]
-        assert "ambiguous" in headline
+        ops_view = table.split(frontier_render.OPS_TABLE_HEADING)[1]
+        assert "ambiguous" in ops_view
 
     def test_storage_engines_alone_do_not_make_it_ambiguous(self):
         """InnoDB and MyISAM at one M are one reference build measured in two
@@ -625,7 +632,7 @@ class TestAFallbackThatPoolsBuildsIsAmbiguous:
             "_M_16_", "_M_16_engine_MyISAM_")
         records = [a, b, self._ops_build("mariadb")]
         entry = _entry(generate.summarize(records, {}), "mariadb")
-        assert entry["qps_at_recall_90"] == 400.0
+        assert entry["reference_qps_at_recall_90"] == 400.0
 
     def test_the_ops_build_mode_narrows_a_pgvector_fallback(self):
         """#77 review: `_build_shape` counted build_mode and `matches()`
@@ -642,13 +649,13 @@ class TestAFallbackThatPoolsBuildsIsAmbiguous:
         ops = self._ops_build("pgvector", ef_construction_tunable=True)
         ops["ef_construction"] = 200
         entry = _entry(generate.summarize([post, inc, ops], {}), "pgvector")
-        assert entry["qps_at_recall_90"] == 400.0, entry
+        assert entry["reference_qps_at_recall_90"] == 400.0, entry
         assert not str(entry["reference_source"]).startswith("ambiguous")
 
         both = dict(ops, build_mode="incremental")
         entry = _entry(generate.summarize([post, inc, ops, both], {}),
                        "pgvector")
-        assert entry["qps_at_recall_90"] is None
+        assert entry["reference_qps_at_recall_90"] is None
         assert entry["reference_source"].startswith("ambiguous")
 
     def test_an_ann_point_without_a_build_mode_still_matches(self):

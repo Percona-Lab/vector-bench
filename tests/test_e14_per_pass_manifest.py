@@ -2044,9 +2044,16 @@ class TestThePassReachesTheDrawnFigure:
         drawn = self._lines(
             {("percona", "normalized"): self._points("normalized"),
              ("percona", "tuned"): self._points("tuned")})
+        # Each pass's fixture is one build, so the legend also says the line
+        # is a curve at that build (F12, `charts.pareto_line_label`); the
+        # pass suffix is what this test holds.
         assert sorted(label for label, _style in drawn) == [
-            f"{charts.style_for('percona')['label']} / normalized",
-            f"{charts.style_for('percona')['label']} / tuned"], drawn
+            charts.pareto_line_label(
+                f"{charts.style_for('percona')['label']} / normalized",
+                self._points("normalized")),
+            charts.pareto_line_label(
+                f"{charts.style_for('percona')['label']} / tuned",
+                self._points("tuned"))], drawn
 
     @needs_matplotlib
     def test_the_two_frontiers_are_drawn_with_different_strokes(self):
@@ -2068,7 +2075,7 @@ class TestThePassReachesTheDrawnFigure:
         drawn = self._lines({("percona", None): self._points(None),
                              ("percona", "tuned"): self._points("tuned")})
         assert len({style for _label, style in drawn}) == 2, drawn
-        assert any(label.endswith("/ unknown") for label, _s in drawn), drawn
+        assert any("/ unknown" in label for label, _s in drawn), drawn
 
     def test_the_any_pass_sentinel_is_not_none(self, tmp_path):
         """`None` is a real pass key -- records predating the field group under

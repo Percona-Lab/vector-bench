@@ -865,6 +865,23 @@ def pareto_series_style(key: Any, ordered_passes: Sequence[Any]
     return style, label
 
 
+def pareto_line_label(label: str, points: List[Dict[str, Any]]) -> str:
+    """The legend entry, saying "curve at <build>" when only one was swept.
+
+    A line through one build's ef_search points is that build's recall-
+    throughput curve, not a Pareto frontier: nothing else was tried. The
+    legend is where a reader of the chart alone learns which one they are
+    looking at. Over ALL the engine's points, not the zoomed subset, so the
+    zoomed companion does not call a multi-build frontier a curve because
+    only one build survived its recall cut.
+    """
+    from .builds import build_label, build_signature
+    signatures = {build_signature(p) for p in points}
+    if len(signatures) == 1 and points:
+        return f"{label} — curve at {build_label(points[0])}"
+    return label
+
+
 def pareto(records_by_engine: Dict[Any, List[Dict[str, Any]]], dataset: str,
            k: int, out_dir: str, stem: str,
            scatter: bool = True,
@@ -936,6 +953,7 @@ def pareto(records_by_engine: Dict[Any, List[Dict[str, Any]]], dataset: str,
     plotted = False
     for key, points in sorted(records_by_engine.items(), key=lambda kv: str(kv[0])):
         style, label = pareto_series_style(key, ordered_passes)
+        label = pareto_line_label(label, points)
         usable = [p for p in points
                   if p.get("recall_at_k") is not None and p.get("qps")]
         if recall_floor is not None:
@@ -1964,6 +1982,26 @@ def memory_timeline(series: Dict[str, List[Dict[str, Any]]], out_dir: str,
     ax.legend(frameon=False, fontsize=8, ncol=2)
     return _save(fig, out_dir, stem)
 
+def floor_bar_labels(entry: Dict[str, Any], floor: int
+                     ) -> Tuple[str, Optional[str]]:
+    """The text above one floor bar, and the build printed along it.
+
+    The bars are the headline frontier, which may come from a different
+    build at each floor; a bar without its build is the 25 Aug table again.
+    The mismatch mark is the table's (`frontier_render.OPS_MISMATCH_MARK`),
+    imported rather than spelled, so the footnote under the table explains
+    the glyph on the chart. Split out so it is testable without matplotlib.
+    """
+    from .frontier_render import OPS_MISMATCH_MARK
+    value = entry.get(f"qps_at_recall_{floor}")
+    if not value:
+        return "not reached", None
+    top = f"{value:,.0f}"
+    if entry.get(f"qps_at_recall_{floor}_is_ops_build") is False:
+        top += f" {OPS_MISMATCH_MARK}"
+    return top, entry.get(f"qps_at_recall_{floor}_build_label")
+
+
 def qps_at_recall(summary: Dict[str, Any], dataset: str, out_dir: str,
                   stem: str, floors: Sequence[float] = (0.90, 0.95, 0.99),
                   resource_pass: Any = _ANY_PASS
@@ -2010,15 +2048,23 @@ def qps_at_recall(summary: Dict[str, Any], dataset: str, out_dir: str,
             plotted = True
         bars = ax.bar(offs, heights, width * 0.92, color=style["color"],
                       label=style["label"], edgecolor="none")
-        for b, v in zip(bars, vals):
+        for b, v, f in zip(bars, vals, floors):
             # An engine that never reaches a floor gets an explicit marker, not
             # a zero bar that reads as "measured and very slow".
+            top, build = floor_bar_labels(per_engine[engine], int(f * 100))
             ax.text(b.get_x() + b.get_width() / 2,
                     b.get_height() if v else 0,
-                    f"{v:,.0f}" if v else "not reached",
+                    top,
                     ha="center", va="bottom", fontsize=7.5,
                     color=style["color"] if v else "#999999",
                     rotation=0 if v else 90)
+            if build:
+                # Inside the bar, along it: the bars are a fixed fraction
+                # of a nine-inch figure and a build label above eight of
+                # them would collide with its neighbours.
+                ax.text(b.get_x() + b.get_width() / 2, 0, f" {build}",
+                        ha="center", va="bottom", fontsize=6,
+                        color="white", rotation=90, clip_on=True)
 
     if not plotted:
         plt.close(fig)

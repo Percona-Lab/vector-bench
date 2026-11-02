@@ -288,30 +288,83 @@ The standard approximate-nearest-neighbour quality/speed tradeoff.
   10 slower than 20 on every MySQL-family curve. On a warmed index the report
   labels a first-step throughput inversion **unexplained**, not "warm-up".
   Introduced as `ANN_MEASUREMENT_VERSION` 3, which moved every results tree.
-- Sweep: for each `M` (graph degree), query at several `ef_search` values. Each
-  `(M, ef_search)` pair is one point. The upper-left envelope of those points is
-  the **Pareto frontier** — that is what gets plotted and compared.
+- Sweep: each point is one build (graph degree `M`, and wherever the engine
+  exposes them `ef_construction`, quantization, storage engine and build mode)
+  queried at one `ef_search`. The upper-left envelope of every point an engine
+  produced in one dataset and resource pass is its **Pareto frontier** — that
+  is what gets plotted and compared.
 
 Higher and further right is better. An engine is faster than another *only* if
 its frontier is above the other's at the same recall.
 
+**A frontier is only as wide as the space it searched.** Where a profile swept
+one build for an engine and varied only `ef_search`, the line is that build's
+recall–throughput curve, not a Pareto frontier, and the report says so: the
+§4 opening sentence, the swept-space table ("curve at `M=16` — build space not
+explored") and the chart legend ("— curve at M=16") all switch wording for
+that engine. The swept-space table lists, per engine, every build axis that
+varied with its values, the axes that were fixed, and the `ef_search` range.
+
 `k = 10` by default (`--count`). Recall at k=100 is also recorded.
 
-**The headline QPS-at-recall table uses one build per engine: its reference
-build.** Each engine declares it in `config/engines/<e>.yml`
+**The headline QPS-at-recall table is the frontier over every build swept.**
+Engines are compared at a recall, not at a setting: `M=16` names different work
+in MHNSW, VIDX, pgvector and hnswlib, so a table at matched parameter names
+compares the names. Each floor figure is the fastest point at or above the
+floor across every build swept in that dataset and resource pass (two passes
+are never pooled into one frontier), and the build that produced it is printed
+under the number. The floor chart draws the same figures with the build along
+each bar.
+
+**Every headline figure says whether it is the build the ops pass measured.**
+Each engine declares its reference build in `config/engines/<e>.yml`
 (`runtime.reference_build`) as the index the ops pass builds — M=16 for the
 MySQL family, `ef_construction` as the ops pass sets it for pgvector, Valkey,
 Percona Server and MyVector, and the pass's quantization for Percona Search.
 `orchestrator/reference_build.py` resolves it per profile and pass, `run`
 refuses one the ann grid does not contain, and the manifest carries it to the
-report in `engines.<name>.presentation.reference_builds`. A floor the
-reference build never reaches reads "—", with that build's highest recall in a
-footnote; it is never filled from another build. A second table beside it,
-"best of the sweep", keeps the fastest figure over every build and names the
-build under each number. The run of 2026-08-25 is why: its published table
-gave Percona Search 138 / 124 / 88 QPS at 0.90 / 0.95 / 0.99 from the
-unquantized sweep, while every other Percona Search figure came from the
-scalar index, which peaks at recall 0.892.
+report in `engines.<name>.presentation.reference_builds`. A headline figure
+from any other build carries a **◇** and a note naming the ops build, because
+§2.2–§2.5 (build cost, concurrency, filtered, churn) describe the ops build,
+not the one that won the floor. Where the ops build is not recorded, or a
+fallback for an archived run matches more than one build, the report says it
+cannot tell rather than marking a guess.
+
+A secondary table, "at the build the ops pass measured", keeps the same floors
+restricted to that reference build. It is the one view in which §4 and the ops
+sections describe the same index. A floor the reference build never reaches
+reads "—" there, with that build's highest recall in a note. The run of
+2026-08-25 is why every figure names its build: its published table gave
+Percona Search 138 / 124 / 88 QPS at 0.90 / 0.95 / 0.99 from the unquantized
+sweep with nothing saying so, while every other Percona Search figure came from
+the scalar index, which peaks at recall 0.892. The headline now shows those
+figures again, labelled `quantization=none` and marked ◇.
+
+**Build cost on the frontier.** For every build that contributes a frontier
+point the report prints its load + build time and its index size. The time is
+ann-benchmarks' `build_time`, the wall clock of `fit()`, which loads the corpus
+and builds the index (for MHNSW and VIDX those are one operation), so it is a
+time to a queryable index rather than an index build time. The size is the
+server-side figure each overlay module measures and writes as `index_bytes`:
+the index's files under the datadir for the MySQL family, `pg_relation_size`
+for pgvector, mongot's index for Percona Search, the hnswlib index files for
+MyVector, and resident `used_memory` growth for Valkey (labelled "resident").
+ann-benchmarks' own `index_size` attribute is never used: upstream computes it
+from the benchmark client's RSS, which for a client/server engine is the size
+of the Python process, not the index. Where the ann file has no size (or a
+size of 0, which is what the MySQL-family module writes when its file glob
+matched nothing) the ops pass's `index_build` record for the same build is used
+if exactly one matches, marked "(ops)"; otherwise the cell says "not measured".
+
+**Smallest build that reaches each floor.** Beside the fastest build, the
+report names, per floor, the smallest build whose points reach it and that
+build's best QPS there. "Smallest" is by measured index size when every build
+reaching the floor has one, and otherwise by lowest `M` then lowest
+`ef_construction`; when no size was measured and several builds share the
+lowest `M` and `ef_construction` (Percona Search's quantizations, for one), the
+cell says "(tie)" rather than pick. The fastest build at a floor is very often
+the largest graph swept, and this view keeps the headline from reading as an
+argument for it.
 
 ### 2.2 Index build cost (ops harness)
 

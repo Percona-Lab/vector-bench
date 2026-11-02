@@ -125,8 +125,9 @@ then dies on `argument --engine: invalid choice`:
 **A variant of a family the harness already drives is config only** — a second MariaDB, a
 Percona Server, another Postgres build. Write `config/engines/<e>.yml` (the `runtime:` block
 carries driver, ann_constructor, port, mounts, credentials, probe, chart colour, label and the
-`reference_build` the report's headline figures are taken from — the index the ops pass builds;
-`run` refuses one the ann grid does not contain),
+`reference_build` — the index the ops pass builds, which §4's secondary "at the build the ops
+pass measured" table is taken from and which a headline frontier figure from any other build is
+marked against; `run` refuses one the ann grid does not contain),
 build the image, done. The Engines tab in the web UI does exactly this.
 
 **A new architecture needs code:**
