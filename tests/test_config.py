@@ -5292,6 +5292,101 @@ class TestAProfileThatNamesItsEnginesGetsThem:
         # the disk check and any container.
         assert reached == []
 
+    def _run_with(self, monkeypatch, tmp_path, profile, **kw):
+        """`cmd_run` on `profile` (a dict), datasets present, stopped at the
+        disk check; returns (exit code, the reference_builds dict cmd_run
+        filled, whether the estimate was reached)."""
+        from orchestrator import cli as cli_mod
+        monkeypatch.setattr(cli_mod, "load_profile", lambda name: profile)
+        args = self._args(profile=profile["name"], **kw)
+        self._reroot(monkeypatch, tmp_path)
+        datasets_dir = cli_mod.paths_for(args.run_id)["datasets"]
+        os.makedirs(datasets_dir, exist_ok=True)
+        for dataset in profile.get("datasets", []):
+            open(os.path.join(datasets_dir, f"{dataset}.hdf5"), "wb").close()
+        monkeypatch.setattr(cli_mod.docker_ctl, "docker_available",
+                            lambda: True)
+        seen = {"builds": None, "estimate": False}
+        real = cli_mod._build_preflight
+
+        def spy(engine, prof, resources, resource_pass, phases, builds):
+            seen["builds"] = builds
+            return real(engine, prof, resources, resource_pass, phases,
+                        builds)
+
+        monkeypatch.setattr(cli_mod, "_build_preflight", spy)
+        monkeypatch.setattr(cli_mod, "print_load_estimate",
+                            lambda *a, **k: seen.__setitem__("estimate", True))
+        monkeypatch.setattr(cli_mod, "_check_free_disk",
+                            lambda *a, **k: True)
+        return cli_mod.cmd_run(args), seen
+
+    @pytest.mark.parametrize("phases", ["both", "ann", "ops"])
+    def test_every_engine_and_pass_gets_its_reference_build(
+            self, monkeypatch, tmp_path, phases):
+        """The manifest's presentation.reference_builds is what tells the
+        report which build each headline figure came from. An `else:` that
+        bound to the ops pre-flight instead of the reference-build check
+        left it empty for every engine under the default `--phases both`."""
+        from orchestrator.cli import DEFAULT_ENGINES
+        code, seen = self._run_with(monkeypatch, tmp_path,
+                                    load_profile("smoke"),
+                                    resource_pass="both", phases=phases)
+        from orchestrator.config import load_resources, merge_resource_overrides
+        from orchestrator.reference_build import resolve_reference_build
+        assert code == 4                      # stopped at the disk check
+        builds = seen["builds"]
+        smoke = load_profile("smoke")
+        assert set(builds) == set(DEFAULT_ENGINES)
+        for engine in DEFAULT_ENGINES:
+            assert set(builds[engine]) == {"normalized", "tuned"}, engine
+            for rp in ("normalized", "tuned"):
+                resources = merge_resource_overrides(load_resources(rp), smoke)
+                assert builds[engine][rp] == resolve_reference_build(
+                    engine, smoke, resources, rp), (engine, rp)
+                assert builds[engine][rp], (engine, rp)
+
+    def test_a_reference_build_problem_under_ann_only_is_a_clean_refusal(
+            self, monkeypatch, tmp_path, capsys):
+        """Not a traceback from resolving the build it just refused."""
+        smoke = load_profile("smoke")
+        smoke["ann"] = dict(smoke["ann"], m_values=[8])
+        code, seen = self._run_with(monkeypatch, tmp_path, smoke,
+                                    engines="mariadb", phases="ann")
+        err = capsys.readouterr().err
+        assert code == 2
+        assert "refusing to start" in err
+        assert "mariadb: its reference build (m=16" in err
+        assert "Traceback" not in err
+        assert seen["estimate"] is False
+        assert seen["builds"] == {"mariadb": {}}
+
+    @pytest.mark.parametrize("engines,warned", [(None, True),
+                                                ("mariadb,villagesql", False)])
+    def test_a_resume_that_would_drop_an_engine_says_so(
+            self, monkeypatch, tmp_path, capsys, engines, warned):
+        """An opt-in engine named on the original run is not in the default
+        list a bare `--resume` re-derives; its remaining units would never
+        run, so the resume says which engines it leaves behind."""
+        from orchestrator import cli as cli_mod
+        smoke = load_profile("smoke")
+        run_id = "probe-20260101-000000"
+        self._reroot(monkeypatch, tmp_path)
+        run_dir = cli_mod.paths_for(run_id)["run_dir"]
+        os.makedirs(run_dir, exist_ok=True)
+        from orchestrator.manifest import Manifest
+        prior = Manifest(run_dir, run_id)
+        prior.data["engines"] = {"mariadb": {}, "villagesql": {}}
+        prior.save()
+        kw = {"resume": True}
+        if engines:
+            kw["engines"] = engines
+        self._run_with(monkeypatch, tmp_path, smoke, **kw)
+        err = capsys.readouterr().err
+        assert ("which this resume will not run" in err) is warned
+        if warned:
+            assert "villagesql" in err and "--engines" in err
+
     def test_an_explicit_flag_narrows_a_profile_that_names_none(
             self, monkeypatch, tmp_path):
         seen = self._plan(monkeypatch, tmp_path, profile="smoke",
@@ -8940,7 +9035,12 @@ class TestEachEngineDeclaresAReferenceBuild:
         travel the way labels and colours do."""
         source = open(os.path.join(VB_ROOT, "orchestrator", "cli.py")).read()
         body = source.split("def cmd_run")[1].split("\ndef ")[0]
-        assert "reference_build_problem" in body
+        # The check and resolution moved into `_build_preflight`; that every
+        # engine and pass is actually filled is asserted by behaviour in
+        # `test_every_engine_and_pass_gets_its_reference_build`.
+        helper = source.split("def _build_preflight")[1].split("\ndef ")[0]
+        assert "_build_preflight(" in body
+        assert "reference_build_problem" in helper
         assert '"reference_builds"' in body
 
 

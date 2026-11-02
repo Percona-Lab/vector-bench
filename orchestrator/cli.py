@@ -572,6 +572,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     manifest = Manifest(paths["run_dir"], run_id)
     manifest.set_host(info)
     manifest.set_harness(paths["sources"])
+    # A resume without --engines re-derives the default list, which leaves
+    # out opt-in engines the original run was given by name: their remaining
+    # units would silently never run. Warned, not refused -- dropping an
+    # engine on resume can be deliberate.
+    if args.resume and not args.engines:
+        dropped = [e for e in (manifest.data.get("engines") or {})
+                   if e not in engines]
+        if dropped:
+            print(f"warning: this run directory also holds "
+                  f"{', '.join(dropped)}, which this resume will not run; "
+                  f"pass --engines {','.join(list(engines) + dropped)} to "
+                  f"resume them too", file=sys.stderr)
 
     print(f"=== vector-bench run {run_id} ===")
     print(f"profile   : {profile.get('name')} — {profile.get('description', '')}")
@@ -622,17 +634,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         resources = merge_resource_overrides(
             load_resources(resource_pass), profile)
         for engine in engines:
-            problem = reference_build_problem(engine, profile, resources,
-                                              resource_pass)
-            if problem:
-                problems.append(f"{resource_pass}: {problem}")
-            if "ops" in phases:
-                problems += [f"{resource_pass}: {p}"
-                             for p in ops_build_problems(engine, profile)]
-            else:
-                reference_builds[engine][resource_pass] = \
-                    resolve_reference_build(engine, profile, resources,
-                                            resource_pass)
+            problems += _build_preflight(engine, profile, resources,
+                                         resource_pass, phases,
+                                         reference_builds)
         # `client_cpus: auto` fails here rather than mid-run when the
         # topology cannot spare it after the server set. The cpuset is
         # engine-invariant, so the first engine stands for all.
@@ -1360,6 +1364,36 @@ def _memory_refusal(engine: str, engine_cfg: Dict[str, Any], dataset: str,
         int(getattr(resolved, "buffer_bytes", 0) or 0),
         int(getattr(resolved, "server_memory_bytes", 0) or 0),
         m_values=m_values)
+
+
+def _build_preflight(engine: str, profile: Dict[str, Any],
+                     resources: Dict[str, Any], resource_pass: str,
+                     phases: List[str],
+                     reference_builds: Dict[str, Dict[str, Any]]) -> List[str]:
+    """The pre-run refusals for one (engine, pass), and its reference build.
+
+    Fills `reference_builds[engine][resource_pass]` when the reference build
+    resolves -- the manifest's presentation needs it for EVERY engine and
+    pass, whatever the phases -- and returns the problems to refuse on: the
+    reference-build problem, if any, plus the ops grid's unbuildable
+    combinations when the run has an ops phase. A helper, and tested as one,
+    because the inline version once let an `if "ops" in phases:` slip
+    between `if problem:` and its `else:`, which left every engine's
+    reference build unrecorded under the default `--phases both` and
+    resolved a refused one under `--phases ann`.
+    """
+    problems: List[str] = []
+    problem = reference_build_problem(engine, profile, resources,
+                                      resource_pass)
+    if problem:
+        problems.append(f"{resource_pass}: {problem}")
+    else:
+        reference_builds[engine][resource_pass] = resolve_reference_build(
+            engine, profile, resources, resource_pass)
+    if "ops" in phases:
+        problems += [f"{resource_pass}: {p}"
+                     for p in ops_build_problems(engine, profile)]
+    return problems
 
 
 def _ops_primary_curve(engine: str, profile: Dict[str, Any],
