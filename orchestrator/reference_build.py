@@ -121,6 +121,28 @@ def reference_build_problem(engine: str, profile: Dict[str, Any],
                 f"(ann.* or resources.extras.*) or change the ops build.")
 
     ops = profile.get("ops", {}) or {}
+    # Imported here: `ops_build_selection` resolves its fallback through
+    # `resolve_reference_build` above, so a module-level import would cycle.
+    from .ops_build_selection import MODE_FRONTIER, build_selection_mode
+    try:
+        mode = build_selection_mode(profile)
+    except ValueError as exc:
+        return f"{engine}: {exc}"
+    if mode == MODE_FRONTIER and ops.get("enabled", True) is not False:
+        # The ops pass builds what the ann phase's frontier picks, so the
+        # `ops.m_values` check below no longer describes what it builds and
+        # is not applied. The grid check above still is: the reference build
+        # is the declared fallback when the ann phase leaves nothing to
+        # choose from, and a fallback with no recall point is the same blank
+        # headline row. What remains impossible is a frontier with no ann
+        # phase to take it from.
+        if (profile.get("ann") or {}).get("enabled", True) is False:
+            return (f"{engine}: ops.build_selection is frontier, which picks "
+                    f"the ops build from the ann phase's results, and this "
+                    f"profile disables the ann phase -- every unit would "
+                    f"fall back to the reference build. Enable ann or set "
+                    f"ops.build_selection: reference.")
+        return None
     if "m" in build and ops.get("enabled", True) is not False:
         m_values = [int(m) for m in (ops.get("m_values") or [16])]
         if int(build["m"]) not in m_values:

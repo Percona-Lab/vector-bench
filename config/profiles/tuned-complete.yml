@@ -84,6 +84,17 @@ ann:
 ops:
   enabled: true
   workloads: [build, concurrency, filtered, churn]
+  # Measure the build the headline is taken from. The report's headline is
+  # each engine's Pareto frontier over everything the ann phase swept, and a
+  # fixed M=16 ops build would put concurrency and churn from one index beside
+  # a frontier figure from another. `frontier` picks, per engine and dataset,
+  # the swept build fastest at the calibration target (0.95), after the ann
+  # phase and from its results; it falls back to the engine's declared
+  # reference build -- loudly -- when the ann phase left nothing to choose
+  # from. `m_values` below then applies only where the chosen build names no
+  # M (Percona Search, whose M is a label). See
+  # orchestrator/ops_build_selection.py.
+  build_selection: frontier
   m_values: [16]
   ef_search: 100
   subset_rows: null

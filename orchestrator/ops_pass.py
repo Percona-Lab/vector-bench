@@ -13,6 +13,7 @@ other rather than against the ann-benchmarks in-process numbers.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -1095,6 +1096,21 @@ DEFAULT_EF_CALIBRATION = (10, 16, 24, 32, 48, 64, 100, 160, 256, 400, 640,
                           1000)
 
 
+def ops_target_recall(profile: Dict[str, Any]) -> float:
+    """The recall the ops pass calibrates ef_search to reach.
+
+    One reader for two consumers that must agree: `harness_args`, which hands
+    it to `harness/workloads/calibrate.py` as `--target-recall`, and
+    `ops_build_selection`, which picks the frontier build that serves this
+    recall fastest. If they read the profile separately, a profile that set
+    `ops.target_recall: 0.99` would pick the build fastest at 0.95 and then
+    calibrate it to 0.99 -- a build chosen for a quality the ops pass never
+    measures at.
+    """
+    ops = profile.get("ops", {}) or {}
+    return float(ops.get("target_recall", DEFAULT_TARGET_RECALL))
+
+
 def _concurrency_queries(ops: Dict[str, Any]) -> int:
     """How many queries the concurrency clients may draw from.
 
@@ -1305,7 +1321,9 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
                  build_mode: str = "post",
                  storage_engine: str = "InnoDB",
                  iterative_scan: Optional[Union[str, Sequence[str]]] = None,
-                 bulk_vector_index_build: bool = True
+                 bulk_vector_index_build: bool = True,
+                 build: Optional[Dict[str, Any]] = None,
+                 build_selection: Optional[Dict[str, Any]] = None
                  ) -> List[str]:
     """Translate a profile into ops-harness command-line arguments.
 
@@ -1324,8 +1342,20 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
     mode still reaches it with that mode alone. This end was wired a round
     before its caller was, which is why turning the caller on needed no change
     here.
+
+    `build` is the build `ops.build_selection: frontier` chose off the ann
+    phase (`ops_build_selection.ops_build`): its `ef_construction` and
+    `quantization` replace the profile-derived values below when set, so the
+    ops pass builds the index the frontier figure came from rather than the
+    declared reference build. `build_selection` is the disclosure of how it
+    was chosen, carried to every ops record as `extra.ops_build_selection`.
+    Both are None in `reference` mode, which leaves this command line exactly
+    what it was.
     """
     ops = profile.get("ops", {}) or {}
+    build = build or {}
+    quantization = (build.get("quantization")
+                    or _quantization(profile, resources, resource_pass))
 
     args = [
         "--m", str(m),
@@ -1336,7 +1366,7 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
         # the numbers rather than leaving a reader to infer it from the
         # harness's own default at the time.
         "--ef-mode", str(ops.get("ef_mode", DEFAULT_EF_MODE)),
-        "--target-recall", str(ops.get("target_recall", DEFAULT_TARGET_RECALL)),
+        "--target-recall", str(ops_target_recall(profile)),
         "--ef-grid", ",".join(
             str(int(ef)) for ef in
             (ops.get("ef_calibration") or DEFAULT_EF_CALIBRATION)),
@@ -1369,7 +1399,7 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
         # Read from the same extras render_config uses for the recall path, so
         # both measurement paths in one run build the same index. Only Percona
         # Search has the knob; the flag is omitted for everything else.
-        *(["--quantization", _quantization(profile, resources, resource_pass)]
+        *(["--quantization", quantization]
           if engine == "mongodb" else []),
         "--load-threads", str(ops.get("load_threads", 1)),
         "--max-queries", str(ops.get("max_queries", 1000)),
@@ -1391,9 +1421,16 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
     ]
     if ops.get("subset_rows"):
         args += ["--subset-rows", str(ops["subset_rows"])]
-    ef_construction = ops_ef_construction(engine, profile)
+    ef_construction = build.get("ef_construction")
+    if ef_construction is None:
+        ef_construction = ops_ef_construction(engine, profile)
     if ef_construction is not None:
-        args += ["--ef-construction", str(ef_construction)]
+        args += ["--ef-construction", str(int(ef_construction))]
+    if build_selection:
+        # One JSON argument rather than a flag per field: the harness only
+        # stamps it, never interprets it, so it travels as the host wrote it.
+        args += ["--ops-build-selection",
+                 json.dumps(build_selection, sort_keys=True, default=str)]
     if engine == "pgvector":
         modes = _iterative_scan_modes(iterative_scan)
         if modes:

@@ -398,6 +398,88 @@ of the tie is shown rather than a pick presented as a ranking. The fastest
 build at a floor is very often the largest graph swept, and this view keeps the
 headline from reading as an argument for it.
 
+#### Which build the ops pass measures: `ops.build_selection`
+
+Equal M is not equal work. M names the graph degree in every engine here, but
+what one unit of it costs and buys differs by implementation, so "every engine
+at M=16" hands each a different budget under one label. The comparison that
+means something is each engine's Pareto frontier over its whole swept grid, and
+once the headline is that frontier the ops sections — build cost, concurrency,
+filtered, churn — have to describe the same index, or the report puts a
+frontier figure from one build beside throughput measured on another.
+
+`ops.build_selection` decides which build the ops pass measures:
+
+- **`reference`** (the default, and what every profile did before the key
+  existed): the declared reference build above, built at every `ops.m_values`
+  entry.
+- **`frontier`** (`tuned-complete`): after the ann phase of each
+  (engine, dataset, pass), and from **that phase's own result files** — the
+  ones it wrote or reused, as recorded in the manifest, so a stale file from
+  another grid cannot be chosen — the ops pass picks the
+  (M, `ef_construction`, quantization) whose frontier point at the ops
+  calibration target (`ops.target_recall`, 0.95 by default, the same value
+  §2.0's calibration then chases) has the highest QPS. Only points of the ops
+  pass's **primary** storage engine and build mode compete — the head of the
+  lists it measures (InnoDB for MariaDB unless the profile reorders them; the
+  first of `pgvector_build_modes`) — because the chosen M is then built for
+  every declared storage engine and build mode, and a MyISAM or incremental
+  curve must not choose the M InnoDB or `post` is measured at (an axis the
+  grid did not sweep is not filtered; see below). Points that fell back to a
+  table scan are excluded. Ties go to the smaller index, then the smaller M,
+  then the smaller `ef_construction`, then the build's name, so the choice is
+  the same on every re-read. The ops
+  pass then builds exactly that M, `ef_construction` and quantization, in
+  every declared storage engine and build mode; the record says which curve
+  the ranking was done on (`selected_on`).
+
+Nothing substitutes silently. If no build reaches the target, the build with
+the highest recall is measured and the status is **`below_target`**; if the ann
+phase did not run in this run directory, failed, or left no usable point —
+or the selection container could not read it (no bench image, a non-zero
+exit, unparsable output, a timeout, a docker CLI that would not start; the
+container is removed) — the declared reference build is measured and the
+status is **`fallback_reference`**. Both print a warning and land in the
+manifest's `warnings`.
+
+The choice is stored in the manifest
+(`ops_build_selection["<pass>/<engine>/<dataset>"]`) when it is made, with
+the identity of the ann attempt it came from (attempt number, start time, a
+digest of its file list). A resumed run reuses a `selected` or `below_target`
+choice only while that attempt is still the latest completed ann attempt of
+the unit; after an ann re-run (`--force`, a changed grid, a retried failure)
+it chooses again. A `fallback_reference` is never reused once a completed ann
+attempt exists. Two cases are refused rather than measured: a choice, stored
+or fresh, naming a build outside the grid the profile renders now, and a
+re-selection that would change the build after ops units of that engine and
+dataset were already measured on the old one — their records stay in the run
+directory, and the rest would be measured on another index under one name.
+
+The manifest's `engines.<name>.presentation.reference_builds_by_dataset`
+carries the chosen build and its source (`frontier@0.95`, `below_target@0.95`,
+`fallback_reference`) to the report. It becomes the ops build the headline's ◇
+is judged against and the build of the "at the build the ops pass measured"
+table, and a line under that table says how each engine's build was chosen.
+The choice breaks an exact QPS tie with the headline's own key (index size,
+then M, then `ef_construction`, then the build's name), so where both see the
+same points they name the same build, and the headline's 0.95 figure is
+normally the ops build and carries no ◇. Under `frontier` a ◇ can still appear
+at 0.95 in exactly these cases: the fastest point at 0.95 is on a storage
+engine or build mode other than the ops pass's primary one (only possible
+where the grid swept that axis); `ops.target_recall` is not 0.95, so the build
+was chosen at another recall; the status is `below_target` or
+`fallback_reference`; or the ann points the report reads are not the ones the
+selection read (a report over a wider ann tree than the phase's own files).
+A storage engine or build mode is filtered at all only where the ann grid
+swept more than one value of it — every ann module stamps both axes, and
+Percona Search's `async`/`wiredTiger` are not the ops pass's words. Every ops
+record carries the same facts in
+`extra.ops_build_selection`. With a `select-builds` overlay the grid the
+choice must lie in is the overlay's restricted one. Ops
+measurement version 10 marks the change: a version 9 and a version 10 figure
+for one engine may describe different indexes, and the report refuses to chart
+them together.
+
 ### 2.2 Index build cost (ops harness)
 
 Measured per `(engine, dataset, M)`:

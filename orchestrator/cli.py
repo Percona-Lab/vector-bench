@@ -31,7 +31,7 @@ import threading
 import sys
 import traceback
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 VB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, VB_ROOT)
@@ -41,6 +41,7 @@ from harness.metrics import sysinfo as sysinfo_mod  # noqa: E402
 from orchestrator import ann_pass, ann_provenance, docker_ctl, ops_pass  # noqa: E402
 from orchestrator.engine_plan import resolve_engines as _resolve_engines  # noqa: E402
 from orchestrator import engines as engines_mod  # noqa: E402
+from orchestrator import ops_build_selection  # noqa: E402
 from orchestrator.config import (available_profiles, dedupe,  # noqa: E402
                                  engines_outside_profile, load_engine,
                                  load_profile, load_resources,
@@ -737,7 +738,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # per-pass value here would leave the manifest holding the
                 # last pass's and the report reading it for both.
                 presentation={**engines_mod.presentation(engine),
-                              "reference_builds": reference_builds[engine]},
+                              "reference_builds": reference_builds[engine],
+                              # Frontier choices an earlier pass or an earlier
+                              # invocation of this run made: `set_engine`
+                              # replaces the entry, so they are folded back in.
+                              **ops_build_selection.presentation_entries(
+                                  manifest.data, engine)},
             )
             for warning in resolved.warnings:
                 print(f"  ! {warning}")
@@ -785,7 +791,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                     try:
                         rc = _run_unit(phase, engine, dataset, profile, engine_cfg,
                                        resources, resolved, resource_pass, paths,
-                                       run_id, args, checkpoints=checkpoints)
+                                       run_id, args, checkpoints=checkpoints,
+                                       ops_selection=_ops_selection(
+                                           manifest, phase, engine, dataset,
+                                           profile, engine_cfg, resources,
+                                           resolved, resource_pass, paths))
                     except Exception as exc:  # noqa: BLE001
                         rc = 1
                         # The traceback matters: these failures are usually in
@@ -1338,11 +1348,64 @@ def _memory_refusal(engine: str, engine_cfg: Dict[str, Any], dataset: str,
         m_values=m_values)
 
 
+def _ops_primary_curve(engine: str, profile: Dict[str, Any],
+                       engine_cfg: Dict[str, Any], resources: Dict[str, Any],
+                       resource_pass: str
+                       ) -> Tuple[Optional[str], Optional[str]]:
+    """(storage engine, build mode) the frontier is ranked on for this engine.
+
+    The heads of the lists the ops pass measures, because the chosen M is
+    then built for every one of them. Storage is a MariaDB axis only;
+    anywhere else the ann records' storage_engine is the engine's own (heap,
+    memory, wiredTiger). The selection applies each one only where the ann
+    grid swept that axis (`report/ops_build_choice.py`), because every ann
+    module stamps both -- Percona Search's points all say `async`, which is
+    not the ops pass's `post`.
+    """
+    storage = (_ops_storage_engines(engine, profile, resources,
+                                    resource_pass)[0]
+               if engine in ann_pass.MARIADB_ENGINES else None)
+    return storage, _ops_build_modes(engine, profile, engine_cfg)[0]
+
+
+def _ops_selection(manifest: Manifest, phase: str, engine: str, dataset: str,
+                   profile: Dict[str, Any], engine_cfg: Dict[str, Any],
+                   resources: Dict[str, Any], resolved: Any,
+                   resource_pass: str, paths: Dict[str, str]
+                   ) -> Optional[Dict[str, Any]]:
+    """The frontier-chosen ops build for this unit, or None in reference mode.
+
+    Called after this (engine, dataset, pass)'s ann phase has run, because
+    `phases` is always ann before ops; see `ops_build_selection`.
+    """
+    if (phase != "ops"
+            or not (profile.get("ops") or {}).get("enabled", True)
+            or ops_build_selection.build_selection_mode(profile)
+            != ops_build_selection.MODE_FRONTIER):
+        return None
+    storage, mode = _ops_primary_curve(engine, profile, engine_cfg,
+                                       resources, resource_pass)
+    # What is on disk, not what --resume chose to honour: units measured
+    # under an earlier choice are there either way.
+    prefix = f"{resource_pass}/{engine}/{dataset}/ops/"
+    measured = any(key.startswith(prefix)
+                   for key in _load_checkpoints(paths["checkpoints"]))
+    return ops_build_selection.ensure_selection(
+        manifest, engine=engine, dataset=dataset,
+        resource_pass=resource_pass, profile=profile, resources=resources,
+        ops_units_done=measured,
+        chooser=ops_build_selection.default_chooser(
+            engine=engine, dataset=dataset, resource_pass=resource_pass,
+            resolved=resolved, paths=paths, engine_cfg=engine_cfg,
+            vb_root=VB_ROOT, storage_engine=storage, build_mode=mode))
+
+
 def _run_unit(phase: str, engine: str, dataset: str, profile: Dict[str, Any],
               engine_cfg: Dict[str, Any], resources: Dict[str, Any],
               resolved: Any, resource_pass: str, paths: Dict[str, str],
               run_id: str, args: argparse.Namespace,
-              checkpoints: Optional[set] = None) -> int:
+              checkpoints: Optional[set] = None,
+              ops_selection: Optional[Dict[str, Any]] = None) -> int:
     if phase == "ann":
         if not profile.get("ann", {}).get("enabled", True):
             print("[ann] disabled in profile; skipping")
@@ -1360,7 +1423,10 @@ def _run_unit(phase: str, engine: str, dataset: str, profile: Dict[str, Any],
             print("[ops] disabled in profile; skipping")
             return 0
 
-        m_values = list(ops_cfg.get("m_values", [16]))
+        # The frontier's choice when `ops.build_selection: frontier` made one
+        # (see `ops_build_selection`), `ops.m_values` otherwise.
+        m_values = ops_build_selection.ops_m_values(
+            ops_selection, list(ops_cfg.get("m_values", [16])))
         # Which build modes the OPS phase runs for this engine. Keyed per
         # engine because "both modes" is only meaningful for an engine that
         # has both: MariaDB and AliSQL maintain the graph inside every INSERT
@@ -1439,6 +1505,9 @@ def _run_unit(phase: str, engine: str, dataset: str, profile: Dict[str, Any],
                         iterative_scan=_ops_iterative_scan(
                             engine, profile, resources, resource_pass),
                         bulk_vector_index_build=bulk_build,
+                        build=ops_build_selection.ops_build(ops_selection),
+                        build_selection=ops_build_selection.disclosure(
+                            ops_selection),
                     )
                     with ops_pass.OpsRun(
                             engine, engine_cfg, resolved, resource_pass,

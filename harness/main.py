@@ -186,6 +186,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--quantization", default=None,
                    choices=(None, "none", "scalar", "binary"))
     p.add_argument("--load-threads", type=int, default=1)
+    # How the orchestrator chose the build this run measures, when the profile
+    # asked it to choose (`ops.build_selection: frontier`): JSON written on the
+    # host, stamped verbatim on every record as `extra.ops_build_selection`.
+    # The build itself is already on every record (m, ef_construction,
+    # quantization); this says WHY it is that build and whether it reached the
+    # target -- a `fallback_reference` or `below_target` build measured
+    # without that note would read as the frontier's choice.
+    p.add_argument("--ops-build-selection", default=None, type=_json_object)
 
     p.add_argument("--workloads", default=",".join(ALL_WORKLOADS),
                    help=f"comma-separated subset of: {','.join(ALL_WORKLOADS)}")
@@ -280,6 +288,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--output", required=True, help="JSONL file to append records to")
     p.add_argument("--cache-dir", default="/results/.cache")
     return p.parse_args(argv)
+
+
+def _json_object(text: str) -> Dict[str, Any]:
+    """An argparse type: a JSON object, refused loudly if it is anything else."""
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise argparse.ArgumentTypeError("expected a JSON object")
+    return value
 
 
 def _floats(csv: str) -> List[float]:
@@ -382,6 +401,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # target and the status are not known until the sweep has run, and are
     # declared afterwards. See `Recorder.declare_run_extra`.
     recorder = Recorder(args.output, run_extra={"ef_mode": args.ef_mode})
+    if args.ops_build_selection:
+        recorder.declare_run_extra(ops_build_selection=args.ops_build_selection)
     if args.server_wait_instruments:
         # On every record, not only on the ones that read waits: the
         # instruments are a server setting, and a build or filtered figure

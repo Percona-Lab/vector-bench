@@ -127,7 +127,9 @@ Percona Server, another Postgres build. Write `config/engines/<e>.yml` (the `run
 carries driver, ann_constructor, port, mounts, credentials, probe, chart colour, label and the
 `reference_build` — the index the ops pass builds, which §4's secondary "at the build the ops
 pass measured" table is taken from and which a headline frontier figure from any other build is
-marked against; `run` refuses one the ann grid does not contain),
+marked against; under `ops.build_selection: frontier` it is only the fallback, and the ops pass
+builds the swept build the ann phase's frontier is fastest with instead
+(`orchestrator/ops_build_selection.py`); `run` refuses one the ann grid does not contain),
 build the image, done. The Engines tab in the web UI does exactly this.
 
 **A new architecture needs code:**

@@ -586,7 +586,39 @@ SCHEMA_VERSION = 1
 # verdict, recall and size the way they were written, and labels the recall
 # `id_overlap`. What a v9 run cannot be is a continuation of a v8 one, which
 # `refuse_mixed_measurement_versions` now enforces for 8 against 9.
-OPS_MEASUREMENT_VERSION = 9
+#
+# VERSION 10 -- THE OPS PASS CAN MEASURE THE FRONTIER'S BUILD. A reviewer of
+# the published benchmark wrote that comparing engines at one M is
+# meaningless, because an identically named parameter is a different amount
+# of work in a different algorithm, and the headline moved to each engine's
+# Pareto frontier over its whole swept grid. With `ops.build_selection:
+# frontier` the orchestrator now picks the ops build per (engine, dataset,
+# pass) off that ann phase's frontier -- the build fastest at the ops
+# calibration target -- instead of building the declared reference build
+# (`orchestrator/ops_build_selection.py`, `report/ops_build_choice.py`).
+# What moves:
+#
+#     build cost, concurrency, filtered, churn, ef_calibration: measured on
+#                      the chosen M / ef_construction / quantization, which
+#                      under a frontier profile is in general NOT the M=16
+#                      every v9 tuned-complete record describes. A v9 and a
+#                      v10 concurrency figure for one engine can be two
+#                      different indexes under one engine name.
+#     every record     `extra.ops_build_selection` -- mode, status
+#                      (`selected`, `below_target`, `fallback_reference`),
+#                      source (`frontier@0.95`), target_recall, the chosen
+#                      build and the ann point it was chosen from -- when the
+#                      profile asked for a selection. Absent in `reference`
+#                      mode, whose build is unchanged.
+#
+# WHY A BUMP WHEN `reference` MODE MEASURES WHAT v9 DID: the version names
+# the harness that wrote a record, not the flags it was given -- the
+# argument version 4 makes for `--ef-mode fixed`. A run that straddled the
+# change could hold v9 records of M=16 and v10 records of the frontier's
+# build for one engine and dataset, and only the version keeps the report
+# from charting them as one series (`refuse_mixed_measurement_versions`
+# refuses 9 against 10, as it refuses 8 against 9).
+OPS_MEASUREMENT_VERSION = 10
 
 #: Key under `Record.extra` that `Recorder.write` stamps the version into.
 #: Lives in `extra` rather than as a column because SCHEMA_VERSION stays 1.

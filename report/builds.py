@@ -169,12 +169,26 @@ def matches(record: Dict[str, Any], build: Dict[str, Any]) -> bool:
 
 
 def _from_manifest(manifest: Dict[str, Any], engine: str,
-                   resource_pass: Any) -> Optional[Dict[str, Any]]:
+                   resource_pass: Any, dataset: Any = None
+                   ) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The manifest's build for this cell, and the source to print with it.
+
+    A per-dataset entry first: `ops.build_selection: frontier` chooses the
+    ops build per (engine, dataset, pass) from the ann phase's frontier, and
+    records it under `presentation.reference_builds_by_dataset` with where it
+    came from -- `frontier@0.95`, `below_target@0.95` or
+    `fallback_reference` -- which the source carries so the page says which.
+    Then the per-pass declared build, as before.
+    """
     info = ((manifest or {}).get("engines") or {}).get(engine) or {}
-    builds = ((info.get("presentation") or {}).get("reference_builds")
-              or {})
-    build = builds.get(resource_pass)
-    return dict(build) if build else None
+    presentation = info.get("presentation") or {}
+    chosen = ((presentation.get("reference_builds_by_dataset") or {})
+              .get(resource_pass) or {}).get(dataset)
+    if isinstance(chosen, dict) and chosen.get("build"):
+        return (dict(chosen["build"]),
+                f"{SOURCE_MANIFEST}: {chosen.get('source') or 'chosen'}")
+    build = (presentation.get("reference_builds") or {}).get(resource_pass)
+    return (dict(build) if build else None), SOURCE_MANIFEST
 
 
 def _from_ops(records: List[Dict[str, Any]], engine: str, dataset: str,
@@ -238,9 +252,9 @@ def reference_build(points: List[Dict[str, Any]], records: List[Dict[str, Any]],
     which the ops pass also measures both of, and §4 has always named the
     storage engine that won a cell.
     """
-    build = _from_manifest(manifest, engine, resource_pass)
+    build, source = _from_manifest(manifest, engine, resource_pass, dataset)
     if build:
-        return build, SOURCE_MANIFEST
+        return build, source
     build, source = _from_ops(records, engine, dataset, resource_pass), \
         SOURCE_OPS
     if build is None:
