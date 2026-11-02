@@ -429,6 +429,7 @@ def summarize(records: List[Dict[str, Any]],
               memory: Optional[Dict[str, List[Dict[str, Any]]]] = None
               ) -> Dict[str, Any]:
     """Headline figures the narrative sections are written from."""
+    from report import builds as builds_mod
     from report.loaders import pareto_frontier
 
     recall_records = [r for r in records if r.get("phase") == "recall_qps"]
@@ -772,6 +773,9 @@ def summarize(records: List[Dict[str, Any]],
                     if r["dataset"] == dataset and r["engine"] == engine
                     and pass_or_unknown(
                         r.get("resource_pass")) == resource_pass]
+                # Ordered so an exact tie names the smaller build, whatever
+                # order the result files were walked in.
+                points = builds_mod.smaller_builds_last(points)
                 frontier = pareto_frontier(points)
                 if not frontier:
                     continue
@@ -1004,23 +1008,29 @@ def _floor_entry(points: List[Dict[str, Any]],
                  records: List[Dict[str, Any]], manifest: Dict[str, Any],
                  engine: str, dataset: str, resource_pass: Any,
                  gaps: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """§4's figures for one engine: the reference build's, and the sweep's.
+    """§4's figures for one engine: the swept frontier's, and the ops build's.
 
     QPS at a recall floor is the comparison an operator actually makes: "how
-    fast is it, at accuracy I can accept?" -- and it is only that comparison
-    when the figure describes the index the rest of the report measured. On
-    `full-20260825` it did not: one frontier over every build swept gave
-    Percona Search 138 / 124 / 88 from the unquantized index, beside load,
-    build and concurrency figures from the scalar one, which peaks at 0.892.
+    fast is it, at accuracy I can accept?" -- over every configuration they
+    could choose, because identically named parameters are not identical
+    work across engines (`report/frontier.py` has the reviewer's argument).
     So the unprefixed `qps_at_recall_N` fields -- the headline, the floor
-    chart, `recall_floor_gaps` -- are taken from the reference build alone
-    (`report/builds.py` says where it comes from) and are None where that
-    build never reached the floor, whatever another build did. The `best_`
-    fields keep the whole sweep's frontier for the second table, and every
-    figure in both carries the build it came from (`_build`, the
-    `build_signature`; `_build_label`, the words printed under it).
+    chart, `recall_floor_gaps` -- are the frontier over EVERY build swept in
+    this (dataset, pass), and each names the build it came from (`_build`,
+    the `build_signature`; `_build_label`, the words printed under it) and
+    whether that is the build the ops pass measured (`_is_ops_build`).
+
+    The `reference_` fields are the same floors at the reference build --
+    the index the ops pass builds (`report/builds.py` says where it comes
+    from) -- for the secondary table. Before this change those were the
+    unprefixed fields and the sweep's were `best_`; `best_` is kept as an
+    alias of the headline so a reader of an older summary layout finds the
+    same numbers under the name it knew. `full-20260825`'s lesson is kept by
+    the labels and the marker, not by narrowing the headline: its table
+    printed 138 / 124 / 88 for Percona Search from the unquantized index
+    with nothing saying so.
     """
-    from report import builds
+    from report import builds, frontier as frontier_mod
     from report.loaders import pareto_frontier
 
     build, source = builds.reference_build(points, records, manifest, engine,
@@ -1028,14 +1038,28 @@ def _floor_entry(points: List[Dict[str, Any]],
     reference = ([p for p in points if builds.matches(p, build)]
                  if build is not None else [])
     reference_frontier = pareto_frontier(reference)
+    ops_builds = [r for r in records
+                  if r.get("phase") == "index_build"
+                  and r.get("engine") == engine
+                  and r.get("dataset") == dataset
+                  and pass_or_unknown(r.get("resource_pass")) == resource_pass]
+    space = frontier_mod.swept_space(points)
+    # The ops build as far as a point can be compared with it: None when it
+    # is unknown, names an unrecorded server default, or matches no swept
+    # point -- "cannot be said", never "different" (`usable_reference`).
+    comparable = frontier_mod.usable_reference(build, points)
 
     entry: Dict[str, Any] = {
         "reference_build": build,
         "reference_build_label": builds.spell_build(build),
         "reference_source": source,
-        "points": len(reference),
+        "reference_points": len(reference),
+        "points": len(points),
         "sweep_points": len(points),
-        "sweep_builds": len({builds.build_signature(p) for p in points}),
+        "sweep_builds": space["builds"],
+        # What was actually swept, so a frontier from one build is
+        # called a curve and a reader can see which axes were explored.
+        "swept_space": space,
         # Which storage engine reached each floor, not only how fast. The
         # frontier spans every configuration swept, so on the tuned pass
         # "MariaDB 12.3: 1,176 QPS" was a MyISAM result -- printing it
@@ -1043,28 +1067,34 @@ def _floor_entry(points: List[Dict[str, Any]],
         "storage_engines": sorted({p.get("storage_engine") for p in points
                                    if p.get("storage_engine")}),
     }
-    entry.update(builds.floor_figures(reference_frontier, ""))
+    entry.update(builds.floor_figures(frontier, ""))
+    frontier_mod.ops_build_flags(entry, frontier, comparable)
     entry.update(builds.floor_figures(frontier, "best_"))
-    # The reference build's ceiling, which is what the "—" footnote prints:
-    # "its reference build peaks at 0.892" is the sentence the 25 Aug post
-    # needed and did not have.
+    entry.update(builds.floor_figures(reference_frontier, "reference_"))
+    entry.update(frontier_mod.smallest_figures(points, ops_builds,
+                                               comparable))
+    entry["frontier_builds"] = frontier_mod.frontier_builds(
+        points, frontier, ops_builds, comparable)
+    # The reference build's ceiling, which is what the secondary table's "—"
+    # footnote prints: "its reference build peaks at 0.892" is the sentence
+    # the 25 Aug post needed and did not have.
     entry["reference_max_recall"] = (
         max((p.get("recall_at_k") or 0) for p in reference)
         if reference else None)
-    entry["max_recall"] = entry["reference_max_recall"]
+    entry["reference_min_recall"] = (
+        min((p.get("recall_at_k") or 0) for p in reference)
+        if reference else None)
     # The floor columns compare engines at an accuracy the operator accepts,
     # which is only a comparison if both engines have measurements near it.
     # ef_search cannot go below k and MHNSW exposes no ef_construction, so
     # with M pinned there is no MariaDB configuration returning recall below
     # about 0.975: its 0.90 and 0.95 figures are one measurement printed
     # twice. Recording the lowest recall reached is what lets the report say
-    # so -- of the reference build, because that is what the cells describe.
-    entry["min_recall"] = (min((p.get("recall_at_k") or 0) for p in reference)
-                           if reference else None)
-    entry["sweep_min_recall"] = min((p.get("recall_at_k") or 0)
-                                    for p in points)
-    entry["sweep_max_recall"] = max((p.get("recall_at_k") or 0)
-                                    for p in frontier)
+    # so -- over every build, because that is what the headline cells span.
+    entry["min_recall"] = min((p.get("recall_at_k") or 0) for p in points)
+    entry["max_recall"] = max((p.get("recall_at_k") or 0) for p in frontier)
+    entry["sweep_min_recall"] = entry["min_recall"]
+    entry["sweep_max_recall"] = entry["max_recall"]
     for floor in builds.FLOORS:
         key = f"qps_at_recall_{int(floor * 100)}"
         if entry[key] is None:

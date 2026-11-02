@@ -250,6 +250,18 @@ def reference_build(points: List[Dict[str, Any]], records: List[Dict[str, Any]],
         build = {axis: value for axis, value in shapes.pop()
                  if value is not None}
         source = SOURCE_SINGLE
+    # The ops harness stamps `build_mode: post` (and `storage_engine:
+    # InnoDB`) on every unit, including engines with no such knob: the
+    # archived mongot `index_build` record of `full-20260825` says `post`
+    # while its ann points say `async`, so a fallback naming the mode matched
+    # 0 of the 8 scalar points and the report said "no recall point was
+    # measured at its ops build" over eight that were. The mode is kept only
+    # where the ann grid actually swept more than one, which is the only case
+    # it is needed to tell builds apart (pgvector's post and incremental).
+    swept_modes = {p.get("build_mode") for p in points} - {None}
+    if "build_mode" in build and len(swept_modes) <= 1:
+        build = {axis: value for axis, value in build.items()
+                 if axis != "build_mode"}
     # A FALLBACK must name exactly one build. An archived Percona Search
     # `index_build` record with no quantization falls back to {m: 16}, which
     # matches the scalar AND the unquantized sweep -- the 25 Aug defect again,
@@ -275,6 +287,41 @@ def _build_shape(record: Dict[str, Any]) -> Tuple[Any, ...]:
             record.get("build_mode"))
 
 
+def _fastest_then_smallest(point: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Sort key: fastest first; on an exact QPS tie, the smaller build.
+
+    `max` returned whichever tied point came first in the frontier's order,
+    which is the order the result files were walked in -- so two identical
+    runs could print different builds under the same number. Smaller wins
+    the tie (index size, then M, then ef_construction) because a reader
+    offered equal throughput wants the cheaper index; the signature makes
+    the last resort deterministic.
+    """
+    inf = float("inf")
+    params = build_params(point)
+    size = point.get("index_bytes")
+    return (-(point.get("qps") or 0),
+            size if isinstance(size, (int, float)) and size > 0 else inf,
+            params["m"] if params["m"] is not None else inf,
+            params["ef_construction"]
+            if params["ef_construction"] is not None else inf,
+            str(build_signature(point)))
+
+
+def smaller_builds_last(points: List[Dict[str, Any]]
+                        ) -> List[Dict[str, Any]]:
+    """`points` ordered so `pareto_frontier` keeps the smaller of two ties.
+
+    `pareto_frontier` keeps ONE of two points with identical recall and QPS
+    -- the one later in its input, through a stable sort walked backwards --
+    so which build a tied floor figure named depended on the order the
+    result files were walked in. Putting smaller builds last makes the
+    smaller one win, deterministically.
+    """
+    return sorted(points, key=lambda p: _fastest_then_smallest(p)[1:],
+                  reverse=True)
+
+
 def floor_figures(frontier: List[Dict[str, Any]], prefix: str
                   ) -> Dict[str, Any]:
     """The fastest frontier point at or above each floor, with its build."""
@@ -283,7 +330,8 @@ def floor_figures(frontier: List[Dict[str, Any]], prefix: str
         key = f"{prefix}qps_at_recall_{int(floor * 100)}"
         qualifying = [p for p in frontier
                       if (p.get("recall_at_k") or 0) >= floor]
-        best = max(qualifying, key=lambda p: p["qps"]) if qualifying else None
+        best = (min(qualifying, key=_fastest_then_smallest)
+                if qualifying else None)
         out[key] = best["qps"] if best else None
         out[f"{key}_storage"] = best.get("storage_engine") if best else None
         out[f"{key}_recall"] = best.get("recall_at_k") if best else None

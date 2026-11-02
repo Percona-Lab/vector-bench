@@ -4973,10 +4973,10 @@ class TestAFloorFigureSaysWhereItWasActuallyTaken:
         assert "218 †" not in table
 
     def test_the_marker_is_explained_under_the_table(self):
-        # Under the HEADLINE table: §4 now ends with the best-of-sweep table,
+        # Under the HEADLINE table: §4 now ends with the ops-build table,
         # so the last `| ---` on the page is that one's.
-        from report.render import SWEEP_TABLE_HEADING
-        table = self._table(self._entry()).split(SWEEP_TABLE_HEADING)[0]
+        from report.frontier_render import OPS_TABLE_HEADING
+        table = self._table(self._entry()).split(OPS_TABLE_HEADING)[0]
         assert "†" in table.split("| ---")[-1]
         assert "not comparable" in table
 
@@ -4992,22 +4992,28 @@ class TestAFloorFigureSaysWhereItWasActuallyTaken:
     def test_a_floor_figure_is_never_taken_from_another_build(self):
         """The 25 Aug run: Percona Search's scalar index -- the one every other
         section measured -- peaks at recall 0.892, and the post printed 138 /
-        124 / 88 from the unquantized sweep. The headline says "—" with the
-        reference build's ceiling under it; the sweep table keeps 138 and
-        names the build it came from."""
+        124 / 88 from the unquantized sweep with nothing saying so.
+
+        Now the headline IS the whole-sweep frontier, so 138 is there
+        again -- but never unattributed: it names `quantization=none` and
+        carries the ops-mismatch mark. The ops-build table says "—" with the
+        scalar build's ceiling under it."""
+        from report.frontier_render import (OPS_MISMATCH_MARK,
+                                            OPS_TABLE_HEADING)
         from report.generate import summarize
-        from report.render import SWEEP_TABLE_HEADING, _headline_tables
+        from report.render import _headline_tables
         from tests.test_e26_report_build_labels import (REFERENCE, _manifest,
                                                          _mongodb_records)
         table = _headline_tables(summarize(_mongodb_records(),
                                            _manifest(REFERENCE)))
-        headline, sweep = table.split(SWEEP_TABLE_HEADING)
+        headline, ops_view = table.split(OPS_TABLE_HEADING)
         row = next(l for l in headline.splitlines() if l.startswith("| Percona"))
+        assert "138" in row and "quantization=none" in row
+        assert OPS_MISMATCH_MARK in row
+        row = next(l for l in ops_view.splitlines() if l.startswith("| Percona"))
         assert [c.strip() for c in row.strip("|").split("|")][1:4] == \
             ["—", "—", "—"]
-        assert "0.892" in headline
-        row = next(l for l in sweep.splitlines() if l.startswith("| Percona"))
-        assert "138" in row and "quantization=none" in row
+        assert "0.892" in ops_view
 
 
 class TestARunMeasuresEveryEngineByDefault:

@@ -308,13 +308,14 @@ runtime:
     linestyle: "-."
     label: "PostgreSQL (pgvector)"
   label: "PostgreSQL (pgvector)"
-  # The build every summary figure for this engine is taken from: the index
-  # the ops pass builds, so the headline QPS-at-recall table describes the same
-  # index as the load, build, concurrency, filtered and churn sections beside
-  # it. `full-20260825` published Percona Search's floor figures from the
-  # unquantized sweep beside ops figures from the scalar index (which peaks at
-  # recall 0.892), and pgvector's and Valkey's from efC=400 beside ops figures
-  # at 200 and the server default. A value of `ops` is resolved per profile and
+  # The index the ops pass builds. §4's secondary table ("at the build the
+  # ops pass measured") is taken from it, and a headline floor figure from any
+  # other build is marked, because the load, build, concurrency, filtered and
+  # churn sections describe this index. `full-20260825` published Percona
+  # Search's floor figures from the unquantized sweep beside ops figures from
+  # the scalar index (which peaks at recall 0.892), and
+  # pgvector's and Valkey's from efC=400 beside ops figures at 200 and the
+  # server default. A value of `ops` is resolved per profile and
   # pass from what `orchestrator/ops_pass.py` passes the harness
   # (`orchestrator/reference_build.py`), and `cmd_run` refuses a build the ann grid
   # does not contain rather than reporting "—" for a whole engine afterwards.
