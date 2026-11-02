@@ -2411,6 +2411,35 @@ class TestTheMeasurementVersionIsAtomicWithTheChange:
         # be worse than the defect it fixes.
         assert "not flagged" in block
 
+    def test_version_nine_is_one_bump_for_every_item(self):
+        """Ops version 9: F2, F7, F8, F9, F10, F4 and F11 under ONE number.
+
+        Honest: the constant is at least 9, 8 and 9 are refused as one
+        measurement, and the version-9 block names every item it covers --
+        by vocabulary, bounded by its own heading and the constant, so the
+        next bump's block cannot satisfy it. Mutant (the constant rebound to
+        8 while the code measures the v9 way): the record a v9 window writes
+        carries an 8, which is what `test_the_constant_moved_and_the_record_
+        carries_it` above already shows a rebinding reaches.
+        """
+        assert records.OPS_MEASUREMENT_VERSION >= 9
+        assert not records.ops_versions_measure_the_same_thing([8, 9])
+        assert 9 not in records.OPS_MEASUREMENT_EQUIVALENT_VERSIONS
+        source = open(records.__file__).read()
+        block = source.split("# VERSION 9 --")[1].split(
+            "\nOPS_MEASUREMENT_VERSION = ")[0]
+        for token in ("outstanding_concurrency", "tail_dominated",
+                      "baseline_not_credible", "warmup_window_qps",
+                      "recall_kind", "recall_id_overlap", "id_overlap",
+                      "reinsert_writers", "reinsert_rows_per_s_indexed",
+                      "index_sync_before_baseline_s",
+                      "index_sync_after_delete_s", "7200",
+                      "index_vector_format", "size_read_at",
+                      "quantization", "wiredTigerCacheSizeGB",
+                      "ANN_MEASUREMENT_VERSION is NOT bumped",
+                      "full-20260825"):
+            assert token in block, token
+
     def test_the_stale_version_five_claim_was_corrected(self):
         """The version-5 block measured "not one record anywhere carries a 5".
 

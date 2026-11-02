@@ -125,7 +125,12 @@ then dies on `argument --engine: invalid choice`:
 
 **A variant of a family the harness already drives is config only** — a second MariaDB, a
 Percona Server, another Postgres build. Write `config/engines/<e>.yml` (the `runtime:` block
-carries driver, ann_constructor, port, mounts, credentials, probe, chart colour and label),
+carries driver, ann_constructor, port, mounts, credentials, probe, chart colour, label and the
+`reference_build` — the index the ops pass builds, which §4's secondary "at the build the ops
+pass measured" table is taken from and which a headline frontier figure from any other build is
+marked against; under `ops.build_selection: frontier` it is only the fallback, and the ops pass
+builds the swept build the ann phase's frontier is fastest with instead
+(`orchestrator/ops_build_selection.py`); `run` refuses one the ann grid does not contain),
 build the image, done. The Engines tab in the web UI does exactly this.
 
 **A new architecture needs code:**
@@ -201,7 +206,11 @@ These are the reasons the code looks over-defensive. Do not relax them.
   the correct answer set, and reusing unfiltered neighbours scores every engine against the
   wrong targets.
 - **Recall is ann-benchmarks' distance-threshold definition**, not an id intersection
-  (`report/loaders.py:knn_recall`), so numbers stay comparable to published results.
+  (`report/loaders.py:knn_recall`), so numbers stay comparable to published results. The
+  ops path uses the same rule since ops measurement version 9 (`harness/datasets.py`
+  `recall_threshold`); before it, ops recall was an id overlap under the same name. Every ops
+  record says which in `extra.recall_kind`, and `report/crosscheck.py` compares only matching
+  kinds.
 - **MariaDB and AliSQL ship a 16 MiB graph cache by default** (`mhnsw_max_cache_size`,
   `vidx_hnsw_cache_size`). The framework sets both from the resource pass; leaving the default
   judges a vendor on a value it plainly intended you to change.
@@ -214,8 +223,17 @@ These are the reasons the code looks over-defensive. Do not relax them.
   engine would be unable to finish the load where two merely slowed down. It is set to `0`
   (unlimited) so the container's memory limit bounds it like every other engine, and
   `Innodb_hnsw_memory_used` is recorded **on the `index_build` record only** — not on
-  `ingest`, `concurrency`, `filtered`, `churn` or `ef_calibration`, so the audit trail covers
-  one of the six ops phases and the other five are uncollected — and it is a figure that
+  `ingest`, `concurrency`, `filtered`, `churn` or `ef_calibration`, so the audit trail for
+  that gauge covers one of the six ops phases. Server-side *wait* evidence is a separate
+  collector and reaches further: `concurrency` records and the churn `during_writes` record
+  carry `extra.server_waits` (the engine's own wait counters, read on a side connection
+  before and after each window — see `harness/workloads/server_waits.py`), so the phases
+  with no server status of any kind are `ingest`, `filtered` and `ef_calibration`.
+  **pgvector is the exception**: it has no cumulative wait counters, so its profile exists
+  only with `ops.server_wait_sampler: true`, which samples `pg_stat_activity` *during* the
+  window and so perturbs pgvector's window and no other engine's; off by default, stated on
+  every record when on — and
+  the gauge is a figure that
   **omits the node map
   (~30–50 B/node) and so is a floor on graph memory, not a measurement of it**. See
   `docs/09-adding-percona-server.md` §3.
@@ -251,15 +269,21 @@ These are the reasons the code looks over-defensive. Do not relax them.
 
 Ingest dominates everything. MHNSW and VIDX build their graph on every INSERT (~150 and ~55
 rows/s on 1M rows), and **every M value reloads the whole corpus**. `--profile full
---resource-pass both` is ~796 h of ingest before a single query runs, and ~1,166 h of run time
+--resource-pass both` is ~796 h of ingest before a single query runs, and ~1,828 h of run time
 in the worst case once querying is counted — all nine engines, which is what that command
 measures when `--engines` is omitted. **The two figures do not cover the same engines.** The
 run-time figure covers all nine; the ingest figure covers the seven with a measured rate.
 MyVector, the eighth, and VillageSQL, the ninth, have none: the estimator names both in
 `engines_without_ingest_rate` and prints that the ingest total is a floor. MyVector's query terms
-(concurrency windows, churn) are in the 1,166 h — its filtered-search term is not, because its
+(concurrency windows, churn) are in the 1,828 h — its filtered-search term is not, because its
 driver declines that workload; VillageSQL's concurrency windows are, and its filtered and churn
 terms are not, because its driver declines both.
+That figure was ~1,163 h until ops measurement version 9 raised the default churn budget from
+1800 s to 7200 s per step and added one discarded warm-up window per concurrency client count:
+the worst case charges the whole cap to every churn step of every unit, so the cap, not any
+engine, moved it. It was ~1,820 h until the estimate counted mongot's index-size settle
+(`SETTLE_CAP_S`, 600 s after every mongodb build), which version 9 added to the run and not
+to the estimate, and ~1,824 h until VillageSQL's concurrency windows were added.
 The ingest half
 used to cover six: Percona's rate was measured and unmodelled, the estimator named it in
 `engines_without_ingest_rate` rather than folding it in, and the published 726 h was a floor

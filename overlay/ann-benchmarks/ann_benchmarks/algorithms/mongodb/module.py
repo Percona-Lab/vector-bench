@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional
 import numpy
 
 from ..base.module import BaseANN
+from ...vb_warmup import IndexWarmupMixin
 
 try:  # pragma: no cover - exercised only inside the bench image
     import pymongo
@@ -112,7 +113,7 @@ def hdf5_safe(values):
     return {k: v for k, v in values.items() if v is not None}
 
 
-class PerconaSearch(BaseANN):
+class PerconaSearch(IndexWarmupMixin, BaseANN):
     def __init__(self, metric: str, method_param: Dict[str, Any]):
         if pymongo is None:
             raise RuntimeError(
@@ -221,6 +222,7 @@ class PerconaSearch(BaseANN):
     # ------------------------------------------------------------------
 
     def fit(self, X: numpy.ndarray) -> None:
+        self._keep_warmup_sample(X)
         try:
             self._fit(X)
         except Exception:
@@ -379,6 +381,7 @@ class PerconaSearch(BaseANN):
         self._num_candidates = int(num_candidates)
         if self._query_verified is None:
             self._query_verified = self._verify_query()
+        self._warm_index_once()   # once per built index; see vb_warmup.py
         self._warm_cache()
 
     def _pipeline(self, vector, k: int) -> List[Dict[str, Any]]:
@@ -537,6 +540,7 @@ class PerconaSearch(BaseANN):
             # report and claiming one would be false.
             "march": "none",
             "jvm_version": self._jvm_version(),
+            **self._warmup_attrs(),
         })
 
     def _server_version(self) -> str:

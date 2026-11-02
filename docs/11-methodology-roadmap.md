@@ -808,8 +808,9 @@ repository, not because it was unreadable.
 A minimum over N draws from a noisy positive variable is a biased estimator of
 the quantity, and — **reasoned**, as a fact about estimators rather than a
 measurement here — it is *more* optimistic the larger N is. N is the `runs` key:
-3 in `config/profiles/full.yml`, 2 in `config/profiles/main.yml` and
-`config/profiles/quick.yml`, 1 in the rest. So the degree of optimism differs
+3 in `config/profiles/full.yml`, 2 in `config/profiles/main.yml`,
+`config/profiles/tuned-complete.yml` and `config/profiles/quick.yml`, 1 in
+the rest — and every profile marked `publishable: true` must carry at least 2. So the degree of optimism differs
 per profile while the records look identical. Within one run it is fair
 engine-to-engine, because every engine gets the same N. **Across profiles it is
 not comparable**, and nothing in a record or a chart says so. The flag is

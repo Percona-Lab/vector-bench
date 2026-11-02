@@ -2044,9 +2044,16 @@ class TestThePassReachesTheDrawnFigure:
         drawn = self._lines(
             {("percona", "normalized"): self._points("normalized"),
              ("percona", "tuned"): self._points("tuned")})
+        # Each pass's fixture is one build, so the legend also says the line
+        # is a curve at that build (`charts.pareto_line_label`); the
+        # pass suffix is what this test holds.
         assert sorted(label for label, _style in drawn) == [
-            f"{charts.style_for('percona')['label']} / normalized",
-            f"{charts.style_for('percona')['label']} / tuned"], drawn
+            charts.pareto_line_label(
+                f"{charts.style_for('percona')['label']} / normalized",
+                self._points("normalized")),
+            charts.pareto_line_label(
+                f"{charts.style_for('percona')['label']} / tuned",
+                self._points("tuned"))], drawn
 
     @needs_matplotlib
     def test_the_two_frontiers_are_drawn_with_different_strokes(self):
@@ -2068,7 +2075,7 @@ class TestThePassReachesTheDrawnFigure:
         drawn = self._lines({("percona", None): self._points(None),
                              ("percona", "tuned"): self._points("tuned")})
         assert len({style for _label, style in drawn}) == 2, drawn
-        assert any(label.endswith("/ unknown") for label, _s in drawn), drawn
+        assert any("/ unknown" in label for label, _s in drawn), drawn
 
     def test_the_any_pass_sentinel_is_not_none(self, tmp_path):
         """`None` is a real pass key -- records predating the field group under
@@ -3016,3 +3023,351 @@ class TestTheBundleReadmeSaysWhatWasMeasured:
         manifest["phases"] = [{"phase": "ann", "engine": "pgvector",
                                "dataset": 128, "status": "completed"}]
         assert self._line(manifest) == "  datasets        128"
+
+
+# ---------------------------------------------------------------------------
+# F4: what each engine was given, per (engine, pass)
+# ---------------------------------------------------------------------------
+
+#: Seven engines -- the six of `full-20260825` plus Percona -- so 7 x 2 passes
+#: gives the fourteen entries the defect needed and the manifest could not
+#: hold. MyVector is left out only so the figure is the one the incident
+#: names; nothing below depends on which seven.
+SEVEN = ("alisql", "mariadb", "mariadb123", "mongodb", "percona",
+         "pgvector", "valkey")
+DBPEDIA = "dbpedia-openai-1000k-angular"
+
+
+def _resolve_plan(run_dir, engines=SEVEN, passes=("normalized", "tuned"),
+                  checkpoints=()):
+    """`cli._resolve_engines` against a real Manifest and this host."""
+    from harness.metrics import sysinfo
+    from orchestrator import cli
+    manifest = Manifest(str(run_dir), "full-20260825")
+    plan = cli._resolve_engines(
+        manifest, list(passes), list(engines), {"name": "full"},
+        sysinfo.collect(), 0, set(checkpoints), [DBPEDIA], ["ann", "ops"])
+    return manifest, plan
+
+
+class TestEveryEngineRecordsWhatItWasGiven:
+    """`full-20260825` published "all six got the same budget". InnoDB had a
+    42.3 GB buffer pool, pgvector 72.5 GB of shared_buffers, Valkey 108.7 GB
+    of maxmemory, and the manifest could not say so: its one
+    `config.resolved_resources` was whichever engine ran last -- graph cache 0
+    and shm 8g in the snapshot written after mongodb, 30.2 GB and 13g in the
+    one written after an AliSQL rerun. `engines_resolved[<engine>][<pass>]`
+    is the record that was missing.
+    """
+
+    def test_seven_engines_by_two_passes_make_fourteen_entries(self,
+                                                               tmp_path):
+        manifest, plan = _resolve_plan(tmp_path)
+        assert plan.refusals == []
+        block = manifest.data["engines_resolved"]
+        assert sorted(block) == sorted(SEVEN)
+        assert sum(len(by_pass) for by_pass in block.values()) == 14
+        for engine in SEVEN:
+            assert sorted(block[engine]) == ["normalized", "tuned"]
+
+    def test_each_entry_carries_its_own_server_args(self, tmp_path):
+        """The args the container is started with, rendered from the very
+        objects `_run_unit` is handed -- not a second derivation of them."""
+        from orchestrator.config import server_args
+        manifest, plan = _resolve_plan(tmp_path)
+        block = manifest.data["engines_resolved"]
+        for (name, engine), resolved in plan.resolved.items():
+            entry = block[engine][name]
+            assert entry["server_args"] == server_args(
+                plan.engine_cfg[engine], name, resolved)
+            assert entry["resolved"] == resolved.as_dict()
+            assert entry["container"]["cpuset"] == resolved.server_cpuset
+            assert entry["container"]["shm_size"] == resolved.shm_size
+            assert set(entry["container"]["env"]) >= {
+                "VB_MAXMEMORY_BYTES", "VB_MONGOT_HEAP_GB"}
+            assert entry["recorded_at"]
+        # mariadb123 is MariaDB at another tag and takes MariaDB's flags
+        # verbatim; every other pair differs.
+        distinct = [e for e in SEVEN if e != "mariadb123"]
+        args = {tuple(block[e]["tuned"]["server_args"]) for e in distinct}
+        assert len(args) == len(distinct), "every family has its own flags"
+
+    def test_the_budgets_really_differ_by_engine(self, tmp_path):
+        """Non-vacuity: if every engine resolved identically the per-engine
+        record would be a copy of the run-level one, and the report table
+        built from it could not show what `full-20260825` hid."""
+        manifest, _plan = _resolve_plan(tmp_path)
+        tuned = {e: manifest.data["engines_resolved"][e]["tuned"]["resolved"]
+                 for e in SEVEN}
+        assert tuned["pgvector"]["buffer_bytes"] != \
+            tuned["mariadb"]["buffer_bytes"]
+        assert tuned["valkey"]["maxmemory_bytes"] > 0
+        assert tuned["mariadb"]["maxmemory_bytes"] == 0
+
+    def test_a_resume_does_not_rewrite_an_entry(self, tmp_path):
+        first, _ = _resolve_plan(tmp_path)
+        stamped = json.loads(json.dumps(first.data["engines_resolved"]))
+        again, plan = _resolve_plan(tmp_path)
+        assert plan.refusals == []
+        assert again.data["engines_resolved"] == stamped
+
+    def test_a_resume_whose_resolution_differs_is_refused(self, tmp_path):
+        """Both values in the message, so the operator sees which knob moved
+        rather than being told only that something did."""
+        first, _ = _resolve_plan(tmp_path)
+        recorded = first.data["engines_resolved"]["mariadb"]["tuned"]
+        recorded["resolved"]["buffer_bytes"] = 1234
+        first.save()
+        again, plan = _resolve_plan(tmp_path)
+        assert len(plan.refusals) == 1
+        message = plan.refusals[0]
+        assert "mariadb" in message and "tuned" in message
+        assert "1234" in message
+        now = plan.resolved[("tuned", "mariadb")].buffer_bytes
+        assert str(now) in message
+        # Refused, so the archive keeps what it was measured under.
+        assert again.data["engines_resolved"]["mariadb"]["tuned"][
+            "resolved"]["buffer_bytes"] == 1234
+
+    def test_nothing_left_to_measure_is_not_refused(self, tmp_path):
+        """A resume that only re-records -- every unit of that (pass, engine)
+        already checkpointed -- measures nothing under the new resolution, so
+        there is nothing to mislabel. Refusing it would block the
+        record-the-missing-pass recovery `_accumulate_passes` exists for."""
+        first, _ = _resolve_plan(tmp_path, engines=("mariadb",))
+        first.data["engines_resolved"]["mariadb"]["tuned"]["resolved"][
+            "buffer_bytes"] = 1234
+        first.save()
+        done = [f"{p}/mariadb/{DBPEDIA}/{ph}"
+                for p in ("normalized", "tuned") for ph in ("ann", "ops")]
+        again, plan = _resolve_plan(tmp_path, engines=("mariadb",),
+                                    checkpoints=done)
+        assert plan.refusals == []
+        assert again.data["engines_resolved"]["mariadb"]["tuned"][
+            "resolved"]["buffer_bytes"] == 1234
+
+    def test_an_archived_manifest_is_not_stamped(self, tmp_path):
+        """A (pass, engine) that already has phases and no entry was measured
+        by code that did not record one. Writing today's resolution there
+        would be the re-stamp `TestAnArchivedManifestIsNotReStamped` forbids
+        for the pass block: absent stays absent, and the report says the
+        per-engine budget cannot be shown."""
+        run_dir = tmp_path / "full-20260825"
+        run_dir.mkdir()
+        archived = _manifest(TUNED_ONLY, accumulate=False,
+                             run_id="full-20260825")
+        archived["phases"] = [{"phase": "ann", "engine": "mariadb",
+                               "dataset": DBPEDIA, "status": "completed",
+                               "resource_pass": "tuned"}]
+        with open(run_dir / "run-manifest.json", "w") as fh:
+            json.dump(archived, fh)
+        manifest, plan = _resolve_plan(run_dir, engines=("mariadb", "pgvector"),
+                                       passes=("tuned",))
+        assert plan.refusals == []
+        block = manifest.data.get("engines_resolved") or {}
+        assert "tuned" not in (block.get("mariadb") or {})
+        # The engine the archive never measured is a fresh unit and is
+        # recorded like any other.
+        assert "tuned" in block["pgvector"]
+
+    def test_the_fingerprint_stays_engine_invariant(self, tmp_path):
+        """The per-engine record must not leak into the tree key: an
+        engine-specific fingerprint fragments `results/annb/` and has twice
+        produced a recall chart with one engine in it."""
+        from orchestrator import ann_pass
+        _m, plan = _resolve_plan(tmp_path)
+        prints = {ann_pass.ann_fingerprint(plan.resolved[("tuned", e)])
+                  for e in SEVEN}
+        assert len(prints) == 1
+
+
+# ---------------------------------------------------------------------------
+# F5: every attempt of a phase is its own entry
+# ---------------------------------------------------------------------------
+
+MARIADB_M16_BODY = {"float": {"any": [{
+    "name": "mariadb", "base_args": ["@metric"],
+    "run_groups": {"innodb": {
+        "arg_groups": [{"M": [16], "engine": "InnoDB"}],
+        "args": {}, "query_args": [[10, 20]]}}}]}}
+
+
+class TestEveryAttemptIsItsOwnPhaseEntry:
+    """`full-20260825`'s phase list held only the 08-31 MySQL-family ann
+    phases, which produced M=6 files, while the M=16 files its recall table
+    used came from 08-26/27 phases that `add_phase` had overwritten."""
+
+    def test_two_attempts_make_two_entries(self, tmp_path):
+        m = Manifest(str(tmp_path), "r")
+        for status in ("failed", "completed"):
+            m.add_phase("ann", "mariadb", "d", status, "t0", "t1",
+                        {"resource_pass": "tuned"})
+        entries = [p for p in m.data["phases"] if p["engine"] == "mariadb"]
+        assert [e["attempt"] for e in entries] == [1, 2]
+        assert [e["status"] for e in entries] == ["failed", "completed"]
+
+    def test_attempts_are_counted_per_unit(self, tmp_path):
+        m = Manifest(str(tmp_path), "r")
+        m.add_phase("ann", "mariadb", "d", "completed", "t0", "t1",
+                    {"resource_pass": "tuned"})
+        m.add_phase("ann", "mariadb", "d", "completed", "t0", "t1",
+                    {"resource_pass": "normalized"})
+        m.add_phase("ops", "mariadb", "d", "completed", "t0", "t1",
+                    {"resource_pass": "tuned"})
+        assert [p["attempt"] for p in m.data["phases"]] == [1, 1, 1]
+
+    def test_a_second_attempt_lists_the_firsts_files_as_skipped(
+            self, tmp_path):
+        """ann-benchmarks skips any configuration whose file exists, so the
+        second attempt measured nothing and its entry must say whose numbers
+        it is standing on."""
+        from orchestrator import ann_provenance
+        tree = tmp_path / "annb" / "tuned" / "fp"
+        cell = tree / "d" / "10" / "mariadb"
+        before = ann_provenance.snapshot(str(tree), "mariadb", "d")
+        cell.mkdir(parents=True)
+        names = ["angular_M_16_engine_InnoDB_10.hdf5",
+                 "angular_M_16_engine_InnoDB_20.hdf5"]
+        for name in names:
+            (cell / name).write_bytes(b"x")
+        after = ann_provenance.snapshot(str(tree), "mariadb", "d")
+        first = ann_provenance.phase_files(before, after, MARIADB_M16_BODY)
+        second = ann_provenance.phase_files(after, after, MARIADB_M16_BODY)
+
+        m = Manifest(str(tmp_path / "run"), "r")
+        m.add_phase("ann", "mariadb", "d", "completed", "t0", "t1",
+                    {"resource_pass": "tuned", "files": first})
+        m.add_phase("ann", "mariadb", "d", "completed", "t2", "t3",
+                    {"resource_pass": "tuned", "files": second})
+        one, two = m.data["phases"]
+        assert sorted(f["path"] for f in one["files"]["written"]) == \
+            sorted(f"d/10/mariadb/{n}" for n in names)
+        assert two["files"]["written"] == []
+        assert sorted(f["path"] for f in two["files"]["skipped"]) == \
+            sorted(f["path"] for f in one["files"]["written"])
+        assert all(f["mtime"] for f in two["files"]["skipped"])
+        assert {f["M"] for f in one["files"]["written"]} == {16}
+
+    def test_a_file_outside_the_grid_is_not_claimed_as_skipped(
+            self, tmp_path):
+        """The 25 Aug shape: the 08-31 attempt asked for M=6, and the M=16
+        files from earlier attempts sat beside them untouched. ann-benchmarks
+        did not skip them -- it never looked at them -- so listing them as
+        this attempt's cache hits would vouch for exactly the files the
+        report has to refuse."""
+        from orchestrator import ann_provenance
+        tree = tmp_path / "t"
+        cell = tree / "d" / "10" / "mariadb"
+        cell.mkdir(parents=True)
+        (cell / "angular_M_16_engine_InnoDB_10.hdf5").write_bytes(b"x")
+        before = ann_provenance.snapshot(str(tree), "mariadb", "d")
+        (cell / "angular_M_6_engine_InnoDB_10.hdf5").write_bytes(b"x")
+        after = ann_provenance.snapshot(str(tree), "mariadb", "d")
+        body = {"float": {"any": [{
+            "name": "mariadb", "base_args": ["@metric"],
+            "run_groups": {"innodb": {
+                "arg_groups": [{"M": [6], "engine": "InnoDB"}],
+                "args": {}, "query_args": [[10]]}}}]}}
+        files = ann_provenance.phase_files(before, after, body)
+        assert [f["path"] for f in files["written"]] == [
+            "d/10/mariadb/angular_M_6_engine_InnoDB_10.hdf5"]
+        assert files["skipped"] == []
+
+    def test_an_unreadable_grid_claims_no_cache_hits(self, tmp_path):
+        """No grid, no way to tell a skipped configuration from a bystander,
+        so nothing is listed as skipped -- the report then refuses those
+        records rather than vouching for them."""
+        from orchestrator import ann_provenance
+        snap = {"d/10/mariadb/x.hdf5": 1.0}
+        assert ann_provenance.phase_files(snap, snap, None)["skipped"] == []
+
+
+class TestSectionOneSaysWhatEachEngineWasGiven:
+    """§1's single-valued rows are one engine's split. The table under them
+    is per engine, from `engines_resolved` -- or, for a manifest without it,
+    a statement that the per-engine budget cannot be shown."""
+
+    def _resolved_manifest(self, tmp_path):
+        manifest, plan = _resolve_plan(tmp_path, passes=("tuned",))
+        data = json.loads(json.dumps(manifest.data))
+        data["config"] = {"profile": {"name": "full", "description": "d"},
+                          "resource_pass": "tuned",
+                          "resolved_resources": TUNED_LIMITS}
+        data["engines"] = {e: {"build": {"march": "x86-64-v3"}}
+                           for e in SEVEN}
+        return data
+
+    def _rows(self, markdown):
+        from report.provenance_render import BUDGET_HEADER
+        return _table_rows(markdown, BUDGET_HEADER)
+
+    def test_every_engine_has_a_row_with_its_own_main_cache(self, tmp_path):
+        """Honest: InnoDB's buffer, pgvector's larger shared_buffers, Valkey's
+        maxmemory, and MongoDB's unset WiredTiger cache are four different
+        cells. Mutant -- print `config.resolved_resources` on every row --
+        one figure seven times, which is the claim `full-20260825` made."""
+        markdown = _render(self._resolved_manifest(tmp_path))
+        rows = {r[0]: r for r in self._rows(markdown)}
+        assert len(rows) == len(SEVEN)
+        main = {engine: rows[render._label(engine)][2] for engine in SEVEN}
+        assert len({main["mariadb"], main["pgvector"], main["valkey"],
+                    main["mongodb"]}) == 4, main
+        assert "maxmemory" in main["valkey"]
+        assert main["mongodb"] == "engine default (not set)"
+        assert {rows[render._label(e)][-1] for e in SEVEN} == {"x86-64-v3"}
+
+    def test_a_figure_with_no_flag_is_not_set_even_when_its_value_appears(
+            self, tmp_path):
+        """MyVector resolves its graph cache to the same byte count as its
+        buffer pool and has no graph-cache flag. Matching the value in the
+        rendered args printed a graph cache it never had -- seen on a live
+        `dev-provenance` run. The host now records which templates carry
+        which figure, and the cell reads `not set`."""
+        manifest, plan = _resolve_plan(tmp_path, engines=("myvector",),
+                                       passes=("normalized",))
+        entry = manifest.data["engines_resolved"]["myvector"]["normalized"]
+        assert "graph_cache_bytes" not in entry["applied"]
+        assert "buffer_bytes" in entry["applied"]
+        data = json.loads(json.dumps(manifest.data))
+        data["config"] = {"profile": {"name": "dev"},
+                          "resource_pass": "normalized",
+                          "resolved_resources": NORMALIZED_LIMITS}
+        resolved = entry["resolved"]
+        resolved["graph_cache_bytes"] = resolved["buffer_bytes"]
+        row = self._rows(_render(data))[0]
+        assert row[3] == "not set", row
+        assert row[2] != "engine default (not set)", row
+
+    def test_the_page_carries_the_same_table(self, tmp_path):
+        page = _page(self._resolved_manifest(tmp_path))
+        assert "What each engine was given" in page
+        assert "engine default (not set)" in page
+
+    def test_an_old_manifest_says_it_cannot_show_them(self):
+        """No `engines_resolved`: the table is replaced by the statement, and
+        the last-configured engine's figures are not offered as everyone's."""
+        markdown = _render(_manifest(TUNED_ONLY))
+        assert self._rows(markdown) == []
+        section = markdown.split("### What each engine was given", 1)[1]
+        assert "cannot show what each engine was given" in section.split(
+            "\n## ", 1)[0]
+
+    def test_memory_pressure_reads_the_series_engines_limit(self):
+        """`summarize` compared every engine's memory series against
+        `config.resolved_resources` -- the last engine configured. It reads
+        the series' own engine now, and says when it had to fall back."""
+        from report.provenance import series_memory_limit
+        manifest = _manifest(TUNED_ONLY)
+        manifest["engines_resolved"] = {"pgvector": {"tuned": {
+            "resolved": {"server_memory_bytes": 7}}}}
+        assert series_memory_limit(
+            manifest, "pgvector-glove-100-angular-tuned-ann") == (7, "engine")
+        assert series_memory_limit(
+            manifest, "valkey-glove-100-angular-tuned-ann") == (
+            TUNED_LIMITS["server_memory_bytes"], "run-level")
+
+    def test_the_old_manifest_statement_is_scoped_to_its_section(self):
+        markdown = _render(_manifest(TUNED_ONLY))
+        section = markdown.split("### What each engine was given", 1)[1]
+        assert "cannot show what each engine was given" in section.split(
+            "\n## ", 1)[0]

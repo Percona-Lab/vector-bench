@@ -155,6 +155,19 @@ server:
     - --innodb-flush-method=O_DIRECT
     - --transaction-isolation=READ-COMMITTED
     - --skip-log-bin
+  # Opt-in, ops path only: rendered after the pass's flags when a profile
+  # sets `ops.server_wait_instruments: true` (`config.ops_wait_instruments`),
+  # and recorded in `engines_resolved` and on every record when it is.
+  # performance_schema is ON by default on this server and these three
+  # families are OFF by default; with them off, the per-window wait profile
+  # still has file IO, table IO and table-lock waits, but no latch can show
+  # up in it. Turning them on puts a timer read on every latch acquisition,
+  # so measure the overhead in a smoke run before publishing with it on.
+  wait_instruments:
+    - --performance-schema=ON
+    - --performance-schema-instrument=wait/synch/mutex/%=ON
+    - --performance-schema-instrument=wait/synch/rwlock/%=ON
+    - --performance-schema-instrument=wait/synch/sxlock/%=ON
 
 storage_engines:
   normalized: [InnoDB]
@@ -220,3 +233,17 @@ runtime:
     linestyle: "--"
     label: "AliSQL (VIDX)"
   label: "AliSQL (VIDX)"
+  # The index the ops pass builds. §4's secondary table ("at the build the
+  # ops pass measured") is taken from it, and a headline floor figure from any
+  # other build is marked, because the load, build, concurrency, filtered and
+  # churn sections describe this index. `full-20260825` published Percona
+  # Search's floor figures from the unquantized sweep beside ops figures from
+  # the scalar index (which peaks at recall 0.892), and
+  # pgvector's and Valkey's from efC=400 beside ops figures at 200 and the
+  # server default. A value of `ops` is resolved per profile and
+  # pass from what `orchestrator/ops_pass.py` passes the harness
+  # (`orchestrator/reference_build.py`), and `cmd_run` refuses a build the ann grid
+  # does not contain rather than reporting "—" for a whole engine afterwards.
+  # Graph degree is VIDX's only build knob; the ops pass builds M=16.
+  reference_build:
+    m: 16

@@ -1935,8 +1935,12 @@ class TestTheChurnTermHandlesAnUncappedBudgetToo:
         exactly as before, which is what the 36-configuration comparison
         showed and what this pins in the suite.
         """
+        # Ops measurement version 9 moved the default from 1800 to 7200, so
+        # `absent` now reads exactly as `tuned-complete`'s explicit 7200 --
+        # and the old form, which hard-codes 1800, still reads 1.0 h for it:
+        # that difference is the bump, deliberately.
         default = self._term(self._estimate())
-        assert (default["typical_hours"], default["worst_hours"]) == (1.0, 1.0)
+        assert (default["typical_hours"], default["worst_hours"]) == (1.64, 4.0)
         assert default["bounded"] is True
 
         tuned = self._term(self._estimate(7200))
@@ -1944,11 +1948,11 @@ class TestTheChurnTermHandlesAnUncappedBudgetToo:
         assert tuned["bounded"] is True
         assert "7200s cap/step" in tuned["basis"]
 
-        # Both agree with the old form, so nothing shipped moved.
-        for budget, expected in ((_ABSENT, (1.0, 1.0)), (7200, (1.64, 4.0))):
-            old = self._term(self._estimate(budget,
-                                            terms=self._with_old_form()))
-            assert (old["typical_hours"], old["worst_hours"]) == expected
+        old = self._term(self._estimate(7200, terms=self._with_old_form()))
+        assert (old["typical_hours"], old["worst_hours"]) == (1.64, 4.0)
+        old_absent = self._term(self._estimate(terms=self._with_old_form()))
+        assert (old_absent["typical_hours"],
+                old_absent["worst_hours"]) == (1.0, 1.0)
 
 
 # ---------------------------------------------------------------------------

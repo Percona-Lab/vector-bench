@@ -27,6 +27,7 @@ for candidate in (VB_ROOT, "/opt", os.path.dirname(os.path.abspath(__file__))):
         sys.path.insert(0, candidate)
 
 from report import charts, loaders, scope  # noqa: E402
+from report import provenance as _provenance  # noqa: E402
 from report import measurement_versions as versions  # noqa: E402
 from report.render import (adopt_presentation as render_adopt_presentation,  # noqa: E402
                            render_html, render_markdown)
@@ -382,11 +383,53 @@ def _filter_columns_present(records: List[Dict[str, Any]],
     return ordered + sorted(present - set(ordered))
 
 
+#: The fewest warm-up queries that can have converged: `vb_warmup` compares
+#: two consecutive batches of `WARMUP_BATCH` (200), so a count under two
+#: batches ended early -- a query raised, or the sample was that small --
+#: and the first configuration may still have met a cold cache. Not imported
+#: from the overlay, which is not on this package's path in the report image.
+MIN_CONVERGED_WARMUP_QUERIES = 400
+
+
+def index_warmup_flags(recall_records: List[Dict[str, Any]]
+                       ) -> List[Dict[str, Any]]:
+    """One row per (engine, dataset, pass, build) whose ann index warm-up
+    did not converge or ran fewer than `MIN_CONVERGED_WARMUP_QUERIES`.
+
+    For the Validity section (#75's review): ANN_MEASUREMENT_VERSION 3 warms
+    the index until two batch means agree, and a sweep whose warm-up gave up
+    at the cap, or stopped before it could compare, has a first point that
+    may be the cold-cache artefact the warm-up exists to remove. Records that
+    predate the warm-up carry neither key and are not flagged here; the QPS
+    inversion table already labels their first steps.
+    """
+    from report.builds import build_label
+    seen: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for r in recall_records:
+        extra = r.get("extra") or {}
+        queries = extra.get("index_warmup_queries")
+        converged = extra.get("index_warmup_converged")
+        if queries is None and converged is None:
+            continue
+        short = queries is not None and queries < MIN_CONVERGED_WARMUP_QUERIES
+        if converged is not False and not short:
+            continue
+        key = (r.get("engine"), r.get("dataset"), r.get("resource_pass"),
+               build_label(r))
+        seen.setdefault(key, {
+            "engine": r.get("engine"), "dataset": r.get("dataset"),
+            "resource_pass": r.get("resource_pass"), "build": key[3],
+            "queries": queries, "converged": converged,
+            "seconds": extra.get("index_warmup_seconds")})
+    return [seen[k] for k in sorted(seen, key=str)]
+
+
 def summarize(records: List[Dict[str, Any]],
               manifest: Optional[Dict[str, Any]] = None,
               memory: Optional[Dict[str, List[Dict[str, Any]]]] = None
               ) -> Dict[str, Any]:
     """Headline figures the narrative sections are written from."""
+    from report import builds as builds_mod
     from report.loaders import pareto_frontier
 
     recall_records = [r for r in records if r.get("phase") == "recall_qps"]
@@ -585,9 +628,16 @@ def summarize(records: List[Dict[str, Any]],
             (build_signature(r), r.get("resource_pass")), []).append(r)
     for key, group in sorted(by_series.items(), key=lambda kv: str(kv[0])):
         ordered = sorted(group, key=lambda r: r["ef_search"])
+        # An index the overlay warmed before its first configuration (see
+        # overlay/.../vb_warmup.py, ANN_MEASUREMENT_VERSION 3) has no cold
+        # first point left to blame, so a first-step inversion on it is not
+        # the warm-up artifact and must not be labelled as one.
+        warmed = any((r.get("extra") or {}).get("index_warmup_queries")
+                     for r in group)
         for previous, current in zip(ordered, ordered[1:]):
             if current["qps"] <= previous["qps"]:
                 continue
+            first = previous["ef_search"] == ordered[0]["ef_search"]
             summary["qps_inversions"].append({
                 "engine": previous.get("engine"),
                 "dataset": previous.get("dataset"),
@@ -597,7 +647,10 @@ def summarize(records: List[Dict[str, Any]],
                 "from_qps": round(previous["qps"], 1),
                 "to_qps": round(current["qps"], 1),
                 "ratio": round(current["qps"] / previous["qps"], 2),
-                "first_in_sweep": previous["ef_search"] == ordered[0]["ef_search"],
+                "first_in_sweep": first,
+                "index_warmed": warmed,
+                "likely": ("warm-up" if first and not warmed
+                           else "unexplained"),
             })
     summary["qps_inversions"].sort(key=lambda i: -i["ratio"])
 
@@ -622,13 +675,19 @@ def summarize(records: List[Dict[str, Any]],
     # An engine that spent the phase against its cgroup limit was reclaiming
     # continuously, so its numbers describe the memory budget and not the
     # implementation. Nothing in the records shows this.
-    limit = (((manifest or {}).get("config") or {})
-             .get("resolved_resources") or {}).get("server_memory_bytes")
+    #
+    # The limit is the series' own engine's, from `engines_resolved`, and not
+    # `config.resolved_resources` -- that key is whichever engine
+    # `set_config` saw last (mongodb's in one `full-20260825` snapshot,
+    # AliSQL's in another). Older manifests fall back to it, and the row says
+    # so for §2 to state.
     for name, rows in sorted((memory or {}).items()):
         from report.loaders import ceiling_pressure
+        limit, limit_source = _provenance.series_memory_limit(manifest, name)
         pressure = ceiling_pressure(rows, limit)
         if not pressure:
             continue
+        pressure["limit_source"] = limit_source
         engine = name.split("-", 1)[0]
         pressure["engine"] = engine
         pressure["series"] = name
@@ -714,46 +773,15 @@ def summarize(records: List[Dict[str, Any]],
                     if r["dataset"] == dataset and r["engine"] == engine
                     and pass_or_unknown(
                         r.get("resource_pass")) == resource_pass]
+                # Ordered so an exact tie names the smaller build, whatever
+                # order the result files were walked in.
+                points = builds_mod.smaller_builds_last(points)
                 frontier = pareto_frontier(points)
                 if not frontier:
                     continue
-                # QPS at a recall floor is the comparison an operator actually
-                # makes: "how fast is it, at accuracy I can accept?"
-                entry: Dict[str, Any] = {"points": len(points)}
-                # Which storage engine reached each floor, not only how fast. The
-                # frontier spans every configuration swept, so on the tuned pass
-                # "MariaDB 12.3: 1,176 QPS" is a MyISAM result -- printing it
-                # unattributed credits it to the default build.
-                entry["storage_engines"] = sorted(
-                    {p.get("storage_engine") for p in points if p.get("storage_engine")})
-                for floor in (0.90, 0.95, 0.99):
-                    qualifying = [p for p in frontier if (p.get("recall_at_k") or 0) >= floor]
-                    best = max(qualifying, key=lambda p: p["qps"]) if qualifying else None
-                    entry[f"qps_at_recall_{int(floor * 100)}"] = best["qps"] if best else None
-                    entry[f"qps_at_recall_{int(floor * 100)}_storage"] = (
-                        best.get("storage_engine") if best else None)
-                    entry[f"qps_at_recall_{int(floor * 100)}_recall"] = (
-                        best.get("recall_at_k") if best else None)
-                entry["max_recall"] = max((p.get("recall_at_k") or 0) for p in frontier)
-                # The floor columns compare engines at an accuracy the operator
-                # accepts, which is only a comparison if both engines have
-                # measurements near it. ef_search cannot go below k and MHNSW
-                # exposes no ef_construction, so with M pinned there is no MariaDB
-                # configuration returning recall below about 0.975: its 0.90 and
-                # 0.95 figures are one measurement printed twice. Recording the
-                # lowest recall reached is what lets the report say so.
-                entry["min_recall"] = min((p.get("recall_at_k") or 0) for p in points)
-                for floor in (0.90, 0.95, 0.99):
-                    if entry[f"qps_at_recall_{int(floor * 100)}"] is None:
-                        continue
-                    if entry["min_recall"] > floor:
-                        summary["recall_floor_gaps"].append({
-                            "engine": engine, "dataset": dataset, "floor": floor,
-                            "lowest_recall": entry["min_recall"],
-                            "measured_at": entry[f"qps_at_recall_{int(floor * 100)}_recall"],
-                            "qps": entry[f"qps_at_recall_{int(floor * 100)}"],
-                        })
-                per_engine[engine] = entry
+                per_engine[engine] = _floor_entry(
+                    points, frontier, records, manifest or {}, engine,
+                    dataset, resource_pass, summary["recall_floor_gaps"])
             if per_engine:
                 # Keyed by the pair, and `render._headline_tables` emits one table
                 # per pass with the pass in its heading. The pass is a property of
@@ -910,6 +938,20 @@ def summarize(records: List[Dict[str, Any]],
     from report.loaders import calibration_targets, operating_points
     summary["operating_points"] = operating_points(records)
     summary["calibration_targets"] = calibration_targets(records)
+    # The cross-engine concurrency headline, built from the same operating
+    # points so a unit that missed its recall target is unranked here and
+    # marked in the table by one derivation. Client-bound points never set a
+    # peak; see `report/operating.py`.
+    from report.operating import concurrency_peaks
+    summary["concurrency_peaks"] = concurrency_peaks(
+        records, summary["operating_points"])
+    # Ops version 9: the server's CPU and pressure over each concurrency
+    # window, joined by timestamp from the `mem-*.jsonl` samples. Beside the
+    # Client CPU column, so a flattening curve says whose ceiling it is.
+    from report.server_windows import server_windows
+    summary["server_windows"] = server_windows(records, memory, manifest)
+    # And the ann warm-up that did not converge or ran short (#75).
+    summary["index_warmup_flags"] = index_warmup_flags(recall_records)
 
     # PR 5 §5.2. Built here for the reason `filter_strategies` and
     # `churn_during_writes` are: the matching rule is the correctness
@@ -931,7 +973,7 @@ def summarize(records: List[Dict[str, Any]],
     # slow, because nothing distinguished "did not run" from "ran and produced
     # no measurement".
     measured = {r.get("engine") for r in recall_records}
-    for phase in (manifest or {}).get("phases", []):
+    for phase in _provenance.latest_attempts((manifest or {}).get("phases")):
         engine = phase.get("engine")
         if (phase.get("phase") == "ann" and phase.get("status") == "completed"
                 and engine and engine not in measured):
@@ -949,13 +991,122 @@ def summarize(records: List[Dict[str, Any]],
     # build would not fit the server limit) is neither: it carries its reason
     # and is reported as a refusal, not as a crash.
     summary.setdefault("refused_phases", [])
-    for phase in (manifest or {}).get("phases", []):
+    # The last attempt per unit: a failure a later attempt fixed is history,
+    # not a hole in the results.
+    for phase in _provenance.latest_attempts((manifest or {}).get("phases")):
         if phase.get("status") == "refused":
             summary["refused_phases"].append(phase)
         elif phase.get("status") != "completed":
             summary["failed_phases"].append(phase)
 
     return summary
+
+
+
+def _floor_entry(points: List[Dict[str, Any]],
+                 frontier: List[Dict[str, Any]],
+                 records: List[Dict[str, Any]], manifest: Dict[str, Any],
+                 engine: str, dataset: str, resource_pass: Any,
+                 gaps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """§4's figures for one engine: the swept frontier's, and the ops build's.
+
+    QPS at a recall floor is the comparison an operator actually makes: "how
+    fast is it, at accuracy I can accept?" -- over every configuration they
+    could choose, because identically named parameters are not identical
+    work across engines (`report/frontier.py` has the reviewer's argument).
+    So the unprefixed `qps_at_recall_N` fields -- the headline, the floor
+    chart, `recall_floor_gaps` -- are the frontier over EVERY build swept in
+    this (dataset, pass), and each names the build it came from (`_build`,
+    the `build_signature`; `_build_label`, the words printed under it) and
+    whether that is the build the ops pass measured (`_is_ops_build`).
+
+    The `reference_` fields are the same floors at the reference build --
+    the index the ops pass builds (`report/builds.py` says where it comes
+    from) -- for the secondary table. Before this change those were the
+    unprefixed fields and the sweep's were `best_`; `best_` is kept as an
+    alias of the headline so a reader of an older summary layout finds the
+    same numbers under the name it knew. `full-20260825`'s lesson is kept by
+    the labels and the marker, not by narrowing the headline: its table
+    printed 138 / 124 / 88 for Percona Search from the unquantized index
+    with nothing saying so.
+    """
+    from report import builds, frontier as frontier_mod
+    from report.loaders import pareto_frontier
+
+    build, source = builds.reference_build(points, records, manifest, engine,
+                                           dataset, resource_pass)
+    reference = ([p for p in points if builds.matches(p, build)]
+                 if build is not None else [])
+    reference_frontier = pareto_frontier(reference)
+    ops_builds = [r for r in records
+                  if r.get("phase") == "index_build"
+                  and r.get("engine") == engine
+                  and r.get("dataset") == dataset
+                  and pass_or_unknown(r.get("resource_pass")) == resource_pass]
+    space = frontier_mod.swept_space(points)
+    # The ops build as far as a point can be compared with it: None when it
+    # is unknown, names an unrecorded server default, or matches no swept
+    # point -- "cannot be said", never "different" (`usable_reference`).
+    comparable = frontier_mod.usable_reference(build, points)
+
+    entry: Dict[str, Any] = {
+        "reference_build": build,
+        "reference_build_label": builds.spell_build(build),
+        "reference_source": source,
+        "reference_points": len(reference),
+        "points": len(points),
+        "sweep_points": len(points),
+        "sweep_builds": space["builds"],
+        # What was actually swept, so a frontier from one build is
+        # called a curve and a reader can see which axes were explored.
+        "swept_space": space,
+        # Which storage engine reached each floor, not only how fast. The
+        # frontier spans every configuration swept, so on the tuned pass
+        # "MariaDB 12.3: 1,176 QPS" was a MyISAM result -- printing it
+        # unattributed credits it to the default build.
+        "storage_engines": sorted({p.get("storage_engine") for p in points
+                                   if p.get("storage_engine")}),
+    }
+    entry.update(builds.floor_figures(frontier, ""))
+    frontier_mod.ops_build_flags(entry, frontier, comparable)
+    entry.update(builds.floor_figures(frontier, "best_"))
+    entry.update(builds.floor_figures(reference_frontier, "reference_"))
+    entry.update(frontier_mod.smallest_figures(points, ops_builds,
+                                               comparable))
+    entry["frontier_builds"] = frontier_mod.frontier_builds(
+        points, frontier, ops_builds, comparable)
+    # The reference build's ceiling, which is what the secondary table's "—"
+    # footnote prints: "its reference build peaks at 0.892" is the sentence
+    # the 25 Aug post needed and did not have.
+    entry["reference_max_recall"] = (
+        max((p.get("recall_at_k") or 0) for p in reference)
+        if reference else None)
+    entry["reference_min_recall"] = (
+        min((p.get("recall_at_k") or 0) for p in reference)
+        if reference else None)
+    # The floor columns compare engines at an accuracy the operator accepts,
+    # which is only a comparison if both engines have measurements near it.
+    # ef_search cannot go below k and MHNSW exposes no ef_construction, so
+    # with M pinned there is no MariaDB configuration returning recall below
+    # about 0.975: its 0.90 and 0.95 figures are one measurement printed
+    # twice. Recording the lowest recall reached is what lets the report say
+    # so -- over every build, because that is what the headline cells span.
+    entry["min_recall"] = min((p.get("recall_at_k") or 0) for p in points)
+    entry["max_recall"] = max((p.get("recall_at_k") or 0) for p in frontier)
+    entry["sweep_min_recall"] = entry["min_recall"]
+    entry["sweep_max_recall"] = entry["max_recall"]
+    for floor in builds.FLOORS:
+        key = f"qps_at_recall_{int(floor * 100)}"
+        if entry[key] is None:
+            continue
+        if entry["min_recall"] > floor:
+            gaps.append({
+                "engine": engine, "dataset": dataset, "floor": floor,
+                "lowest_recall": entry["min_recall"],
+                "measured_at": entry[f"{key}_recall"],
+                "qps": entry[key],
+            })
+    return entry
 
 
 def attach_peak_rss(records: List[Dict[str, Any]],
@@ -1249,6 +1400,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     # persisted there is inherited by every later reader.
     measured = scope.scope_of(manifest)
     records, out_of_scope = scope.narrow_to_measured_scope(records, manifest)
+    # Then per file: a pair the phase log names is not enough, because the
+    # attempt it names may not be the one that wrote the file -- see
+    # `report/provenance.py` for `full-20260825`, whose M=16 recall table
+    # stood under a manifest naming M=6 attempts.
+    records, unprovenanced, ann_provenance = \
+        _provenance.split_by_provenance(records, manifest)
+    if unprovenanced:
+        print(f"[report] excluded "
+              f"{sum(r['records'] for r in unprovenanced)} recall record(s) "
+              f"from {sum(r['files'] for r in unprovenanced)} result file(s) "
+              f"that no ann attempt of this run wrote or reused; §2 Validity "
+              f"names them.")
+    if ann_provenance["counts"][_provenance.UNVERIFIED]:
+        print(f"[report] {ann_provenance['counts'][_provenance.UNVERIFIED]} "
+              f"recall record(s) come from ann attempts that recorded no file "
+              f"list; they are labelled unverified.")
     # The PAIRS first, because that is the unit the narrowing works in. The
     # two axis lists are printed under it as the sets the pairs are drawn
     # from and as what each unrecorded-axis warning is about -- printing only
@@ -1363,6 +1530,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[report] merged records -> {merged_path}")
 
     summary = summarize(records, manifest, memory)
+    # The perf profiles `ops.profile_window_clients` asked for, keyed like the
+    # memory series plus the client count, for the limiter table's links.
+    # From the run directory, which `summarize` is not given.
+    from report.limiters import profile_index
+    summary["profiles"] = profile_index(run_dir, out_dir)
     # Set here rather than built inside `summarize`, because `summarize`'s
     # inputs cannot produce it: by the time it is called the excluded records
     # are gone, and a census of them is exactly the thing the remaining
@@ -1371,6 +1543,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # it with `.get`, like every other optional notice, so a summary built by
     # hand -- several tests build one -- simply has nothing to say.
     summary["out_of_scope_ann"] = out_of_scope
+    # Same reasoning: the census is of records `summarize` never sees.
+    summary["unprovenanced_ann"] = unprovenanced
+    summary["ann_provenance"] = ann_provenance
     chart_paths: Dict[str, Dict[str, str]] = {}
 
     for dataset in summary["datasets"]:

@@ -256,6 +256,18 @@ class EngineDriver(abc.ABC):
     #: Valkey and Percona Search inherit "none" and need no edit, which is
     #: what "No hooks" in §4.1 item 4 means.
     repair_path: str = "none"
+    #: What the bytes `index_bytes()` counts hold of the vectors (ops
+    #: measurement version 9): `float32`, `int16`, `int8`, `none` (a graph
+    #: of ids only) or `unknown`, and whether the index carries its own copy
+    #: of them at all (None = not verified). Copied onto every record that
+    #: carries `index_bytes`, because a size comparison that does not say
+    #: this compares storage formats. Set ONLY from the engine's source as
+    #: pinned: MHNSW and VIDX store `int16_t dims[]` per graph node
+    #: (`FVector` in `sql/vector_mhnsw.cc` / `sql/vidx/vidx_hnsw.cc`),
+    #: pgvector's HNSW element tuples carry the `vector` value. Every other
+    #: engine's on-disk format is not in this checkout, so it says unknown.
+    index_vector_format: str = "unknown"
+    index_includes_vectors: Optional[bool] = None
     #: Server status variables worth recording, by name, or `()` for an engine
     #: that exposes none. Read today by one caller only,
     #: `harness/workloads/build.py:_server_status`, so the values land on the
@@ -563,6 +575,48 @@ class EngineDriver(abc.ABC):
         """
         return {}
 
+    # -- server-reported waits, per measured window ------------------------
+    #
+    # A fifth optional hook pair, added the way `status_counters` /
+    # `status_gauges` were: a no-op default on the base class, so an engine
+    # that overrides nothing writes `server_waits: null` with the reason
+    # below and needs no code. The capture lives in
+    # `harness/workloads/server_waits.py`; see `harness/drivers/server_waits.py`
+    # for why a wait profile is the evidence the version-9 server CPU and
+    # pressure columns could not supply.
+
+    #: Seconds between samples for an engine whose wait accounting is a
+    #: point-in-time view rather than a cumulative counter (pgvector's
+    #: `pg_stat_activity`). None for every engine with counters, for which
+    #: two snapshots -- one before the window, one after -- are enough.
+    wait_sample_interval_s: Optional[float] = None
+
+    def wait_snapshot(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """`(snapshot, None)` or `(None, why not)`. Never raises.
+
+        Called on a SEPARATE connection -- the capture opens its own driver
+        through the factory -- immediately before and immediately after a
+        window, and never inside it: a performance_schema scan is not free,
+        and paying for it inside the span the QPS divides by would charge
+        the instrument to the engine. A sampling engine
+        (`wait_sample_interval_s` set) is instead called once per interval
+        from a sampler process the capture forks before the clients (a
+        thread alive at their fork is what `tests/test_g4_pool_teardown.py`
+        forbids), on the sampler's own connection.
+        """
+        # Imported here, not at the top: line numbers in this file are cited
+        # by `tests/test_e13_percona_churn_repair_is_a_noop.py`.
+        from .server_waits import NOT_IMPLEMENTED
+        return None, NOT_IMPLEMENTED
+
+    def wait_delta(self, before: Dict[str, Any], after: Dict[str, Any]
+                   ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """The window's waits from two snapshots, in the shape
+        `harness/drivers/server_waits.py` documents; `(None, why)` when the
+        two cannot be differenced."""
+        from .server_waits import NOT_IMPLEMENTED
+        return None, NOT_IMPLEMENTED
+
     # -- query ----------------------------------------------------------
 
     @abc.abstractmethod
@@ -663,7 +717,23 @@ class EngineDriver(abc.ABC):
             "incremental_index": self.incremental_index,
             "async_index_build": self.async_index_build,
             "ef_construction_tunable": False,
+            **self.index_format(),
         }
+
+    def index_format(self) -> Dict[str, Any]:
+        """The two `index_vector_format` keys, for every `capabilities()`."""
+        return {"index_vector_format": self.index_vector_format,
+                "index_includes_vectors": self.index_includes_vectors}
+
+    def settle_index_bytes(self):
+        """(bytes, seconds, detail) for the size after the build has settled.
+
+        Immediate by default. Percona Search overrides it -- its directory
+        sum halves over minutes as Lucene merges -- and the InnoDB engines do
+        not: a tablespace grows when pages are ALLOCATED, not when they are
+        flushed, so a checkpoint would not move the `.ibd` size a reader sees.
+        """
+        return self.index_bytes(), 0.0, {"method": "immediate"}
 
 
 def batched(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:

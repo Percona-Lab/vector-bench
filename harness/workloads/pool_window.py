@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 from .client_process import Answer, PoolError
-from ..metrics.latency import scaling_status, served_fraction
+from ..metrics.latency import scaling_note, scaling_status, served_fraction
 
 #: Share of the client container's CPUs above which a point is reported as
 #: client-bound. Not a measured constant and not claimed to be one: it is the
@@ -205,8 +205,22 @@ class PoolWindow(NamedTuple):
         two statuses, and carries the measurement that chose the floor. This
         property is the window's view of it and nothing else, so there is one
         definition a test can move.
+
+        `outstanding` is passed as the primary figure since ops version 9 --
+        the exact span sum, no longer the median estimate alone, for the
+        reason `metrics/scaling.scaling_status` gives. No efficiency: the
+        window does not know the one-client baseline `concurrency.run`
+        divides by, so that caller recomputes the status with it.
         """
-        return scaling_status(self.served_concurrency, self.spec.clients)
+        return scaling_status(self.served_concurrency, self.spec.clients,
+                              outstanding=self.outstanding_concurrency)
+
+    @property
+    def scaling_note(self) -> Optional[str]:
+        """`tail_dominated` or None: the note `metrics/scaling.scaling_note`
+        computes from the two figures, never a refusal."""
+        return scaling_note(self.served_concurrency,
+                            self.outstanding_concurrency)
 
 
 def window_ratio(numerator: PoolWindow, denominator: PoolWindow,

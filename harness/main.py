@@ -33,6 +33,7 @@ from .workloads import churn as churn_workload  # noqa: E402
 from .workloads import concurrency as concurrency_workload  # noqa: E402
 from .workloads import filtered as filtered_workload  # noqa: E402
 from .workloads.context import RunContext  # noqa: E402
+from .workloads.server_waits import sampler_disclosure  # noqa: E402
 
 ALL_WORKLOADS = ("build", "concurrency", "filtered", "churn")
 
@@ -185,6 +186,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--quantization", default=None,
                    choices=(None, "none", "scalar", "binary"))
     p.add_argument("--load-threads", type=int, default=1)
+    # How the orchestrator chose the build this run measures, when the profile
+    # asked it to choose (`ops.build_selection: frontier`): JSON written on the
+    # host, stamped verbatim on every record as `extra.ops_build_selection`.
+    # The build itself is already on every record (m, ef_construction,
+    # quantization); this says WHY it is that build and whether it reached the
+    # target -- a `fallback_reference` or `below_target` build measured
+    # without that note would read as the frontier's choice.
+    p.add_argument("--ops-build-selection", default=None, type=_json_object)
 
     p.add_argument("--workloads", default=",".join(ALL_WORKLOADS),
                    help=f"comma-separated subset of: {','.join(ALL_WORKLOADS)}")
@@ -230,7 +239,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--churn-fractions", default="0.10,0.25")
     # An engine that stalls re-inserting must release the machine and record
     # what it managed, rather than holding the run until someone notices.
-    p.add_argument("--churn-budget", type=float, default=1800.0)
+    p.add_argument("--churn-budget", type=float,
+                   default=churn_workload.DEFAULT_CHURN_BUDGET_S)
     # PR 4 §4.3 item 2. A churn number measured with nothing else touching the
     # index describes a maintenance window, not a database under load, and the
     # two can differ by more than the engines differ from each other. 0 turns
@@ -252,6 +262,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="pgvector only: one or more of off | relaxed_order | "
                         "strict_order, comma-separated")
 
+    # Server-side evidence of what limited throughput. Both decided on the
+    # host from the profile (`ops.server_wait_instruments`,
+    # `ops.profile_window_clients`); the harness only records the first and
+    # signals the window for the second.
+    p.add_argument("--server-wait-instruments", action="store_true",
+                   help="the server was started with performance_schema "
+                        "mutex/rwlock wait instruments ON; stamped on every "
+                        "record because it changes server behaviour")
+    p.add_argument("--server-wait-sampler", action="store_true",
+                   help="let a sampling engine (pgvector) sample its wait "
+                        "events DURING each window; off by default because "
+                        "it is load the other engines' windows do not carry")
+    p.add_argument("--profile-window-clients", type=int, default=None,
+                   help="client count whose first measured concurrency "
+                        "window the orchestrator profiles with perf")
+    p.add_argument("--profile-ack-dir", default=None,
+                   help="directory the orchestrator acknowledges a profiled "
+                        "window's start in")
     p.add_argument("--run-id", required=True)
     p.add_argument("--resource-pass", default="normalized",
                    choices=("normalized", "tuned"))
@@ -260,6 +288,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--output", required=True, help="JSONL file to append records to")
     p.add_argument("--cache-dir", default="/results/.cache")
     return p.parse_args(argv)
+
+
+def _json_object(text: str) -> Dict[str, Any]:
+    """An argparse type: a JSON object, refused loudly if it is anything else."""
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise argparse.ArgumentTypeError("expected a JSON object")
+    return value
 
 
 def _floats(csv: str) -> List[float]:
@@ -363,6 +402,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     # target and the status are not known until the sweep has run, and are
     # declared afterwards. See `Recorder.declare_run_extra`.
     recorder = Recorder(args.output, run_extra={"ef_mode": args.ef_mode})
+    if args.ops_build_selection:
+        recorder.declare_run_extra(ops_build_selection=args.ops_build_selection)
+    if args.server_wait_instruments:
+        # On every record, not only on the ones that read waits: the
+        # instruments are a server setting, and a build or filtered figure
+        # measured with them on was measured on a different server. Absent
+        # (not False) when off, so a default run's records are unchanged.
+        recorder.declare_run_extra(server_wait_instruments=True)
     ctx = RunContext(
         run_id=args.run_id,
         resource_pass=args.resource_pass,
@@ -381,6 +428,12 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"driver, not run. {reason}", file=sys.stderr)
     if declined:
         recorder.declare_run_extra(declined_workloads=declined)
+    # Stamped on every record when the sampler ran, because then every
+    # window of this engine carried a sampling backend the other engines'
+    # windows did not. Absent otherwise, so a default record is unchanged.
+    sampled = sampler_disclosure(driver, args.server_wait_sampler)
+    if sampled is not None:
+        recorder.declare_run_extra(server_wait_sampler=sampled)
     facts = _query_path_facts(driver, index)
     if facts:
         recorder.declare_run_extra(**facts)
@@ -453,6 +506,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 max_queries=args.concurrency_queries,
                 repeats=args.concurrency_repeats,
                 indexed_rows=indexed_rows,
+                profile_window_clients=args.profile_window_clients,
+                profile_ack_dir=args.profile_ack_dir,
+                wait_sampler=args.server_wait_sampler,
             )
 
         # The calibrated *unfiltered* ef, not one calibrated per selectivity.
@@ -488,6 +544,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # readers saw.
                 driver_factory=driver_factory,
                 readers=args.churn_readers,
+                # Ops version 9: the re-insert writes with the load's thread
+                # count, and both are recorded beside its rate.
+                ingest_threads=args.load_threads,
+                wait_sampler=args.server_wait_sampler,
             )
 
     except Exception:

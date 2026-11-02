@@ -29,6 +29,9 @@ REQUIRED_KEYS = ("name", "datasets")
 KNOWN_TOP_LEVEL = {
     "name", "description", "datasets", "engines", "k", "runs", "ann", "ops",
     "resources", "default_resource_pass",
+    # Marks a profile a report is published from; such a profile must carry
+    # `runs: 2` or more (tests/test_config.py, TestPublishableProfiles).
+    "publishable",
 }
 
 

@@ -271,14 +271,214 @@ The standard approximate-nearest-neighbour quality/speed tradeoff.
   the true top-`k` neighbours that appear in the engine's returned top-`k`.
   Ground truth ships with the HDF5 dataset; it is exact, computed by brute force.
 - **QPS** — queries per second, single client, best of `--runs` repetitions.
-- Sweep: for each `M` (graph degree), query at several `ef_search` values. Each
-  `(M, ef_search)` pair is one point. The upper-left envelope of those points is
-  the **Pareto frontier** — that is what gets plotted and compared.
+  Every profile a report is published from (`publishable: true` —
+  `tuned-complete`, `main`, `full`) sets `runs` to 2 or more, and
+  `tests/test_config.py` refuses one that does not.
+- **Warm-up** — before the first configuration on each built index, the
+  overlay module queries that index with a fixed, seeded sample of
+  **training** vectors (never the test set, which would pre-cache the paths
+  about to be timed) in batches of 200, until two consecutive batches agree on
+  mean latency within 5%, capped at 5,000 queries
+  (`overlay/ann-benchmarks/ann_benchmarks/vb_warmup.py`, identical for every
+  engine). The count, duration and whether it converged are written into each
+  result file as `index_warmup_queries`, `index_warmup_seconds` and
+  `index_warmup_converged`. Thirty further random-vector queries still run
+  before every configuration. Without the one-time warm-up the first
+  `ef_search` point measured a cold graph: full-20260825 published ef_search
+  10 slower than 20 on every MySQL-family curve. On a warmed index the report
+  labels a first-step throughput inversion **unexplained**, not "warm-up".
+  Introduced as `ANN_MEASUREMENT_VERSION` 3, which moved every results tree.
+- Sweep: each point is one build (graph degree `M`, and wherever the engine
+  exposes them `ef_construction`, quantization, storage engine and build mode)
+  queried at one `ef_search`. The upper-left envelope of every point an engine
+  produced in one dataset and resource pass is its **Pareto frontier** — that
+  is what gets plotted and compared.
 
 Higher and further right is better. An engine is faster than another *only* if
 its frontier is above the other's at the same recall.
 
+**A frontier is only as wide as the space it searched.** Where a profile swept
+one build for an engine and varied only `ef_search`, the line is that build's
+recall–throughput curve, not a Pareto frontier, and the report says so: the
+§4 opening sentence, the swept-space table ("curve at `M=16` — build space not
+explored") and the chart legend ("— curve at M=16") all switch wording for
+that engine. The swept-space table lists, per engine, every build axis that
+varied with its values, the axes that were fixed, and the `ef_search` range.
+
 `k = 10` by default (`--count`). Recall at k=100 is also recorded.
+
+**The headline QPS-at-recall table is the frontier over every build swept.**
+Engines are compared at a recall, not at a setting: `M=16` names different work
+in MHNSW, VIDX, pgvector and hnswlib, so a table at matched parameter names
+compares the names. Each floor figure is the fastest point at or above the
+floor across every build swept in that dataset and resource pass (two passes
+are never pooled into one frontier), and the build that produced it is printed
+under the number. Where two builds give exactly the same throughput, the
+smaller build (by index size, then `M`, then `ef_construction`) is named, so
+the result does not depend on the order the result files were read in. The
+floor chart draws the same figures, with value, mark and build printed upright
+above each bar. The recall–throughput charts draw one line per engine and do
+not name builds on it; the build-cost table's per-build recall ranges say which
+build supplies which stretch of a line.
+
+**Every headline figure says whether it is the build the ops pass measured.**
+Each engine declares its reference build in `config/engines/<e>.yml`
+(`runtime.reference_build`) as the index the ops pass builds — M=16 for the
+MySQL family, `ef_construction` as the ops pass sets it for pgvector, Valkey,
+Percona Server and MyVector, and the pass's quantization for Percona Search.
+`orchestrator/reference_build.py` resolves it per profile and pass, `run`
+refuses one the ann grid does not contain, and the manifest carries it to the
+report in `engines.<name>.presentation.reference_builds`. An archived run whose
+manifest predates that falls back to the ops pass's own `index_build` record.
+A headline figure from any other build carries a **◇** and a note naming the
+ops build, because §2.2–§2.5 (build cost, concurrency, filtered, churn)
+describe the ops build, not the one that won the floor.
+
+The answer is "cannot be said", never "different", in three cases, and the
+report lists the engine with the reason instead of marking anything: no ops
+build is recorded; the ops build left a setting to the server default, which
+no record names (Valkey's `ef_construction` on 2026-08-25); or the ops build
+matches none of the swept builds. The ops harness stamps `build_mode: post` and
+`storage_engine: InnoDB` on every unit, including engines with neither knob,
+so those two axes are compared only where the ann grid actually varied them
+(MariaDB's storage engines, pgvector's build modes). Comparing them everywhere
+made the 2026-08-25 mongot ops record (`post`, `InnoDB`) match none of its
+scalar points (`async`, `wiredTiger`).
+
+A secondary table, "at the build the ops pass measured", keeps the same floors
+restricted to that reference build. It is the one view in which §4 and the ops
+sections describe the same index. A floor the reference build never reaches
+reads "—" there, with that build's highest recall in a note. The run of
+2026-08-25 is why every figure names its build: its published table gave
+Percona Search 138 / 124 / 88 QPS at 0.90 / 0.95 / 0.99 from the unquantized
+sweep with nothing saying so, while every other Percona Search figure came from
+the scalar index, which peaks at recall 0.892. The headline now shows those
+figures again, labelled `quantization=none` and marked ◇.
+
+**Build cost on the frontier.** For every build that contributes a frontier
+point the report prints its time to a queryable index and its index size, each
+labelled with where it came from. The time is ann-benchmarks' `build_time`
+("ann fit"), the wall clock of `fit()`, which loads the corpus and builds the
+index (for MHNSW and VIDX those are one operation). Where the ann file has none
+— true of every build on 2026-08-25 — it is the ops pass's time to a queryable
+index for the same build, marked "(ops)": ingest plus `CREATE INDEX` for a bulk
+build, the load alone for a graph built on insert, never the bare
+`CREATE INDEX`, which leaves the load out. The size is the server-side figure
+each overlay module measures and writes as `index_bytes`: the index's files
+under the datadir for the MySQL family, `pg_relation_size` for pgvector,
+mongot's index for Percona Search, the hnswlib index files for MyVector, and
+resident `used_memory` growth for Valkey (labelled "resident"). ann-benchmarks'
+own `index_size` attribute is never used: upstream computes it from the
+benchmark client's RSS, which for a client/server engine is the size of the
+Python process, not the index. Where the ann file has no size (or a size of 0,
+which is what the MySQL-family module writes when its file glob matched
+nothing) the ops record for the same build is used if exactly one matches,
+marked "(ops)"; otherwise the cell says "not measured". An ops axis left to the
+server default matches no ann build, so it supplies nothing.
+
+**What an ann index size can and cannot tell apart.** On 2026-08-25 pgvector's
+three `ef_construction` builds all report 8,110,088,192 bytes, AliSQL's M=6 and
+M=16 both 4,156,555,264, and Valkey's efC 64 and 200 both 6,086,322,000. Some of
+that may be real (pgvector's page count depends little on `ef_construction`),
+but a byte-identical figure across different graphs is at least as likely to be
+one reading per run as one per build, and nothing in the result file says
+which. The build-cost table marks such a size with a trailing **=**, and the
+smallest-build view below never treats equal sizes as a ranking.
+
+**Smallest build that reaches each floor.** Beside the fastest build, the
+report names, per floor, the smallest build whose points reach it and that
+build's best QPS there. Each cell's rule is stated: nothing is ranked when one
+build reaches the floor; otherwise by measured index size when every build
+reaching it has one and the smallest is unique; "(=size)" when the smallest
+size is shared, and `M` then `ef_construction` decided among those; by lowest
+`M` then lowest `ef_construction` when a size is missing; and "(tie)" when no
+size was measured and several builds share the lowest `M` and
+`ef_construction` (Percona Search's quantizations, for one), where the fastest
+of the tie is shown rather than a pick presented as a ranking. The fastest
+build at a floor is very often the largest graph swept, and this view keeps the
+headline from reading as an argument for it.
+
+#### Which build the ops pass measures: `ops.build_selection`
+
+Equal M is not equal work. M names the graph degree in every engine here, but
+what one unit of it costs and buys differs by implementation, so "every engine
+at M=16" hands each a different budget under one label. The comparison that
+means something is each engine's Pareto frontier over its whole swept grid, and
+once the headline is that frontier the ops sections — build cost, concurrency,
+filtered, churn — have to describe the same index, or the report puts a
+frontier figure from one build beside throughput measured on another.
+
+`ops.build_selection` decides which build the ops pass measures:
+
+- **`reference`** (the default, and what every profile did before the key
+  existed): the declared reference build above, built at every `ops.m_values`
+  entry.
+- **`frontier`** (`tuned-complete`): after the ann phase of each
+  (engine, dataset, pass), and from **that phase's own result files** — the
+  ones it wrote or reused, as recorded in the manifest, so a stale file from
+  another grid cannot be chosen — the ops pass picks the
+  (M, `ef_construction`, quantization) whose frontier point at the ops
+  calibration target (`ops.target_recall`, 0.95 by default, the same value
+  §2.0's calibration then chases) has the highest QPS. Only points of the ops
+  pass's **primary** storage engine and build mode compete — the head of the
+  lists it measures (InnoDB for MariaDB unless the profile reorders them; the
+  first of `pgvector_build_modes`) — because the chosen M is then built for
+  every declared storage engine and build mode, and a MyISAM or incremental
+  curve must not choose the M InnoDB or `post` is measured at (an axis the
+  grid did not sweep is not filtered; see below). Points that fell back to a
+  table scan are excluded. Ties go to the smaller index, then the smaller M,
+  then the smaller `ef_construction`, then the build's name, so the choice is
+  the same on every re-read. The ops
+  pass then builds exactly that M, `ef_construction` and quantization, in
+  every declared storage engine and build mode; the record says which curve
+  the ranking was done on (`selected_on`).
+
+Nothing substitutes silently. If no build reaches the target, the build with
+the highest recall is measured and the status is **`below_target`**; if the ann
+phase did not run in this run directory, failed, or left no usable point —
+or the selection container could not read it (no bench image, a non-zero
+exit, unparsable output, a timeout, a docker CLI that would not start; the
+container is removed) — the declared reference build is measured and the
+status is **`fallback_reference`**. Both print a warning and land in the
+manifest's `warnings`.
+
+The choice is stored in the manifest
+(`ops_build_selection["<pass>/<engine>/<dataset>"]`) when it is made, with
+the identity of the ann attempt it came from (attempt number, start time, a
+digest of its file list). A resumed run reuses a `selected` or `below_target`
+choice only while that attempt is still the latest completed ann attempt of
+the unit; after an ann re-run (`--force`, a changed grid, a retried failure)
+it chooses again. A `fallback_reference` is never reused once a completed ann
+attempt exists. Two cases are refused rather than measured: a choice, stored
+or fresh, naming a build outside the grid the profile renders now, and a
+re-selection that would change the build after ops units of that engine and
+dataset were already measured on the old one — their records stay in the run
+directory, and the rest would be measured on another index under one name.
+
+The manifest's `engines.<name>.presentation.reference_builds_by_dataset`
+carries the chosen build and its source (`frontier@0.95`, `below_target@0.95`,
+`fallback_reference`) to the report. It becomes the ops build the headline's ◇
+is judged against and the build of the "at the build the ops pass measured"
+table, and a line under that table says how each engine's build was chosen.
+The choice breaks an exact QPS tie with the headline's own key (index size,
+then M, then `ef_construction`, then the build's name), so where both see the
+same points they name the same build, and the headline's 0.95 figure is
+normally the ops build and carries no ◇. Under `frontier` a ◇ can still appear
+at 0.95 in exactly these cases: the fastest point at 0.95 is on a storage
+engine or build mode other than the ops pass's primary one (only possible
+where the grid swept that axis); `ops.target_recall` is not 0.95, so the build
+was chosen at another recall; the status is `below_target` or
+`fallback_reference`; or the ann points the report reads are not the ones the
+selection read (a report over a wider ann tree than the phase's own files).
+A storage engine or build mode is filtered at all only where the ann grid
+swept more than one value of it — every ann module stamps both axes, and
+Percona Search's `async`/`wiredTiger` are not the ops pass's words. Every ops
+record carries the same facts in
+`extra.ops_build_selection`. With a `select-builds` overlay the grid the
+choice must lie in is the overlay's restricted one. Ops
+measurement version 10 marks the change: a version 9 and a version 10 figure
+for one engine may describe different indexes, and the report refuses to chart
+them together.
 
 ### 2.2 Index build cost (ops harness)
 
@@ -416,7 +616,18 @@ be wrong while the quotient stays plausibly between 0 and 1.
 `clients.CLIENT_BOUND_UTIL`, which is **0.80**, and the report draws those
 points hollow and names them in a footnote. That threshold is not a measured
 constant and is not offered as one: it is the level at which this harness stops
-being able to say whose ceiling a figure shows.
+being able to say whose ceiling a figure shows. A client-bound point never sets
+an engine's peak in the report's peak-throughput table, and neither does a unit
+whose ef calibration ended `target_unreached` or `floor_above_target`: those
+are listed with their status and not ranked.
+
+**Sizing the client set.** `resources.cpu.client_cpus: auto` gives the clients
+one CPU per two clients of the profile's largest `ops.client_counts`, never
+fewer than four (16 for a 1–32 sweep), taken from the topology pool after the
+server cpuset. When the pool cannot supply it, `run` refuses before anything
+loads and names both numbers; a numeric pin keeps its old behaviour of warning
+and sharing cores. The run's estimate prints the resolved size beside the
+largest client count.
 
 **The flag is blind to a ceiling that costs no CPU, and that is measured rather
 than suspected. The case below is the one it was measured on, and §7 has since
@@ -1144,8 +1355,21 @@ measured window reports two figures derived from the spans it already keeps:
 | Field | What it is |
 | --- | --- |
 | `extra.outstanding_concurrency` | The exact time-average number of queries **outstanding**: the sum of every in-window query's duration, divided by the window. No estimator, no distributional assumption. |
-| `extra.served_concurrency` | The queries the window counted times their **median** latency, divided by the window — the robust estimate of how many were **in service**. |
-| `extra.scaling_status` | `ok`, or `concurrency_not_achieved` when `served_concurrency` fell below half the client count. |
+| `extra.served_concurrency` | The queries the window counted times their **median** latency, divided by the window — a median **estimate** of how many were in service; `served / outstanding` is exactly `p50 / mean`. |
+| `extra.scaling_status` | `ok`, or `concurrency_not_achieved`. Since `ops_measurement_version` 9: when `outstanding_concurrency` fell below half the client count, or when both the median estimate and a credible scaling efficiency did. Before version 9: when `served_concurrency` fell below half the client count. |
+| `extra.scaling_note` | Version 9: `tail_dominated` when `served / outstanding < 0.5` — the latency had a heavy tail. A note, never a refusal. |
+
+**What the version-9 guard detects, and what it does not.** It detects
+client-side starvation — the clients kept fewer than half their queries
+outstanding — and the residue where both the median estimate and a credible
+efficiency are under half. It does **not** detect a server that answers one
+query at a time: from the clients' clocks that server is a saturated one
+(outstanding ≈ N, the median ≈ N because the queue raises it, efficiency ≈
+1/N), and it is published `ok` with its low efficiency. Serialization inside
+the server and saturation of it are not distinguished by these figures; the
+report's Server CPU and Server CPU pressure columns, taken from the server's
+own cgroup over the same window, are the evidence for that.
+| `extra.efficiency_reliability` | Version 9: `baseline_not_credible` when the one-client median was more than 1.4x this point's, in which case `scaling_efficiency` is null. |
 
 Where the status is `concurrency_not_achieved` the report prints no scaling
 efficiency for that point at all, the chart's efficiency panel omits it, and
@@ -1418,3 +1642,73 @@ invalidates comparison with every run measured before it — including the
 2026-10-14 run above, which is the first that ever stamped a version 5. That
 is an `OPS_MEASUREMENT_VERSION` bump by the same rule version 3's query-pool
 change earned one, and it is version **6**.
+
+### 7.1 Server-side evidence: wait counters and CPU profiles
+
+The version-9 guard above cannot tell a server that serializes from one that
+is saturated, and neither can the Server CPU and pressure columns on their
+own: both readings are "server CPU below its cpuset, clients not bound". What
+can is the engine's own account of what its threads waited on, so every
+concurrency record (and the churn `during_writes` record, for both reader
+windows) carries `extra.server_waits`: the top ten events by wait time, their
+counts and the total, differenced from the engine's counters.
+
+| Engine | Source | Unit |
+| --- | --- | --- |
+| MySQL family | `performance_schema.events_waits_summary_global_by_event_name` (excluding `idle`), plus `SHOW ENGINE INNODB MUTEX` when it returns rows | seconds waited |
+| pgvector | **opt-in only** (`ops.server_wait_sampler`): `pg_stat_activity` sampled once a second *during* the window, active client backends only | samples per wait event (`CPU (no wait event)` when none) |
+| Valkey | `INFO commandstats`, plus `LATENCY LATEST` spikes stamped inside the window | seconds of command *service* time, not waiting |
+| MongoDB | `serverStatus` lock acquisition waits and ticket gauges; mongot's metrics endpoint when reachable | seconds waited |
+
+The snapshots are read on a **separate connection**, immediately before and
+after the window and never inside it, so the deltas also span the pool's
+warm-up and teardown (`server_waits.covers` says so). When an engine cannot
+say — MariaDB's `performance_schema` is off by default — the record carries
+`server_waits: null` and `server_waits_reason`; an empty event list is
+reserved for "measured, and nothing waited".
+
+**pgvector is the asymmetry, and by default it has no wait profile.**
+PostgreSQL keeps no cumulative wait-event counters, so two snapshots at the
+window's edges would be two point-in-time views of mostly idle backends, not
+a delta of anything — and they are not substituted. The only source is
+sampling `pg_stat_activity` while the clients run, which adds a backend and a
+query whose cost grows with the client count to the very window being
+measured. That perturbs pgvector's window and no other engine's, so it is off
+by default: pgvector's records carry `server_waits: null` with the reason.
+`ops.server_wait_sampler: true` turns it on; then `engines_resolved` lists it
+and every pgvector record carries `extra.server_wait_sampler: {interval_s,
+concurrent: true}`, and its throughput is not comparable with a run that had
+it off.
+
+**Latch waits are opt-in.** With the shipped settings the MySQL-family
+profiles contain file IO, table IO and table-lock waits but no mutex or
+rwlock, because those instruments are off by default. `ops.server_wait_instruments:
+true` turns them on (and `performance_schema` itself on MariaDB) for the ops
+servers only. **It changes the server being measured**: every latch
+acquisition then reads a timer. Measure the overhead first — the same `smoke`
+unit with the key off and on — and do not publish throughput from a profile
+that has it on without saying so; while it is on, `engines_resolved` lists it
+under `applied` and every record carries `extra.server_wait_instruments`.
+
+**CPU profiles are optional.** `ops.profile_window_clients: <N>` adds one
+EXTRA window at N clients per ops unit — same length, after the measured
+repeats, never a candidate for the published median, like the version-9
+warm-up window — and has the orchestrator run `perf record -g` against the
+server container's cgroup over it. Its throughput is recorded as
+`extra.profile_window_qps` beside whether perf was recording
+(`extra.profile_window`), writing `perf.data`,
+`folded.txt` and `profile.json` under `<run>/profiles/<unit>-c<N>/`. perf is
+used only if the host already has it and permits it; otherwise the reason
+(not installed, `perf_event_paranoid`, missing CAP_PERFMON) is written and the
+run continues.
+
+The report's **What limited throughput** table puts client CPU, server CPU,
+server CPU pressure, the top server wait and the profile link side by side and
+names only the largest of the three CPU shares. It draws no conclusion beyond
+that.
+
+None of this needed an `OPS_MEASUREMENT_VERSION` bump: by default every
+engine's measured windows are exactly what version 9 measured — the snapshots
+are outside the timed span, and the instruments, the pgvector sampler and the
+profile window are all off — and no identity or published figure reads the
+new keys.

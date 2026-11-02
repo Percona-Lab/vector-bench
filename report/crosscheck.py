@@ -268,6 +268,32 @@ COVERAGE_NO_OPS = "no calibration sweep for this engine and dataset"
 COVERAGE_NO_M_OVERLAP = "no M is measured by both paths (by configuration)"
 COVERAGE_NOTHING_MATCHED = "M overlaps but no point matched"
 COVERAGE_MATCHED = "matched"
+#: Ops version 9: the calibration sweep exists but its recall is the ID
+#: overlap (every ops record before version 9), which is not the rule the
+#: ann path's `recall_qps` records use. Not compared, and said rather than
+#: folded into "no calibration sweep", which would hide that it ran.
+COVERAGE_RECALL_KIND = ("calibration recall is ID overlap (ops version < 9), "
+                        "not the ann path's distance threshold")
+
+#: `extra.recall_kind` values, spelled as `harness.datasets` spells them.
+#: Literals rather than an import for the reason `render.py` declares its
+#: status strings: `harness.datasets` pulls numpy for two strings.
+RECALL_DISTANCE_THRESHOLD = "distance_threshold"
+RECALL_ID_OVERLAP = "id_overlap"
+
+
+def recall_kind(record: Dict[str, Any]) -> str:
+    """Which rule a record's `recall_at_k` was computed with.
+
+    ann-benchmarks' `recall_qps` records are the distance threshold by
+    construction (`report/loaders.py:knn_recall`). An ops record says so in
+    `extra.recall_kind` since version 9; one without the key predates it and
+    was the ID overlap, which is what `datasets.recall_at_k` computed.
+    """
+    if record.get("phase") == "recall_qps":
+        return RECALL_DISTANCE_THRESHOLD
+    return str((record.get("extra") or {}).get("recall_kind")
+               or RECALL_ID_OVERLAP)
 
 
 def _append_crosscheck_row(matches: List[Dict[str, Any]],
@@ -288,6 +314,13 @@ def _append_crosscheck_row(matches: List[Dict[str, Any]],
     # would otherwise find a "post" the table does not show.
     declared_build_mode = ops_rec.get("build_mode")
 
+    # One rule on both sides, or no row: a delta between a distance-threshold
+    # recall and an ID overlap is a delta between definitions, and on a
+    # corpus with ties at the k-th distance it is not zero for any engine.
+    if recall_kind(ann_rec) != recall_kind(ops_rec):
+        raise ValueError(
+            f"refusing to compare a {recall_kind(ann_rec)} recall with a "
+            f"{recall_kind(ops_rec)} one for {named}")
     recall_ann = float(ann_rec["recall_at_k"])
     recall_ops = float(ops_rec["recall_at_k"])
     interval = Interval.from_field(
@@ -350,8 +383,13 @@ def consistency_checks(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     ann = [r for r in records if r.get("phase") == "recall_qps"
            and r.get("recall_at_k") is not None]
-    ops = [r for r in records if r.get("phase") == "ef_calibration"
-           and r.get("recall_at_k") is not None]
+    calibrated = [r for r in records if r.get("phase") == "ef_calibration"
+                  and r.get("recall_at_k") is not None]
+    # Ops version 9: only calibration records scored by the ann path's rule.
+    ops = [r for r in calibrated
+           if recall_kind(r) == RECALL_DISTANCE_THRESHOLD]
+    other_kind = {(r.get("engine"), r.get("dataset")) for r in calibrated
+                  if recall_kind(r) != RECALL_DISTANCE_THRESHOLD}
 
     # Which engines have a real build-mode axis, decided from the RECALL
     # records alone -- the ops side always has a value, so letting it vote
@@ -412,6 +450,8 @@ def consistency_checks(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         overlap = mine_ann & mine_ops
         if not mine_ann:
             status = COVERAGE_NO_ANN
+        elif not mine_ops and pair in other_kind:
+            status = COVERAGE_RECALL_KIND
         elif not mine_ops:
             status = COVERAGE_NO_OPS
         elif not overlap:

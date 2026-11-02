@@ -325,7 +325,8 @@ class MyVectorDriver(MySQLFamilyDriver):
         was asked for.
         """
         caps: Dict[str, Any] = {"incremental_index": False,
-                                "ef_construction_tunable": True}
+                                "ef_construction_tunable": True,
+                                **self.index_format()}
         if self._status:
             caps["myvector_status"] = dict(self._status)
             floor = graph_bytes_floor(self._status)

@@ -112,6 +112,27 @@ PR4_MAINTENANCE_KEYS = frozenset({"maintenance", "maintenance_s"})
 #: writes, and the frozenset would still have the right size.
 PR5_UNCONDITIONAL_KEYS = frozenset({stats.RECALL_CI_KEY, stats.QPS_CI_KEY})
 
+#: What ops measurement version 9 adds to every completed step: the writer
+#: pool and the load it is compared with, the accepted and indexed rates, the
+#: post-delete wait, which recall rule `recall_at_k` is with the other one
+#: beside it, and when the index size was read. Declared, for the reason
+#: PR 5's keys are: the exact-key assertions below exist so a record cannot
+#: grow a key nobody declared. (`index_vector_format` and
+#: `index_includes_vectors` are absent here only because the fake's
+#: `capabilities()` does not declare them; every real driver does.)
+V9_STEP_KEYS = frozenset({
+    "reinsert_writers", "ingest_threads",
+    "reinsert_rows_per_s_accepted", "reinsert_rows_per_s_indexed",
+    "index_sync_after_delete_s",
+    "recall_kind", "recall_id_overlap", "size_read_at",
+})
+
+#: And to the baseline: the wait before it, the recall rule, the size read.
+V9_BASELINE_KEYS = frozenset({
+    "index_sync_before_baseline_s", "recall_kind", "recall_id_overlap",
+    "size_read_at",
+})
+
 #: Every driver class the harness can instantiate, taken from the registry
 #: rather than listed here.
 #:
@@ -910,16 +931,20 @@ class TestTheSequenceIsTheOneSpecified:
         `churn.run` does with the hooks; this fails unless each hook is called
         at the point §4.2 puts it.
 
-        Honest (read back out of `driver.trace`):
+        Honest (read back out of `driver.trace`) -- ops measurement
+        version 9 added the wait before the baseline and the one after the
+        deletes, because Percona Search's mongot was measured before it had
+        caught up at both points on `full-20260825`:
 
             prepare_churn
+            wait_index_synced 2000
             measure 70   record 'baseline before any churn'
-            delete 200   insert 200
+            delete 200   wait_index_synced 1800   insert 200
             wait_index_synced 2000
             measure 70   record 'before'
             maintain
             measure 70   record 'after'
-            delete 300   insert 300
+            delete 300   wait_index_synced 1700   insert 300
             wait_index_synced 2000
             measure 70   record 'before'
             maintain
@@ -957,7 +982,8 @@ class TestTheSequenceIsTheOneSpecified:
 
         per_measure = N_QUERIES + min(20, N_QUERIES)
         step = lambda rows: [                              # noqa: E731
-            ("delete", rows), ("insert", rows),
+            ("delete", rows), ("wait_index_synced", N_ROWS - rows),
+            ("insert", rows),
             ("wait_index_synced", N_ROWS),
             ("measure", per_measure), ("record", "before"),
             ("maintain", None),
@@ -965,6 +991,7 @@ class TestTheSequenceIsTheOneSpecified:
         ]
         assert trace == (
             [("prepare_churn", None),
+             ("wait_index_synced", N_ROWS),
              ("measure", per_measure),
              ("record", "baseline before any churn")]
             + step(200) + step(300)
@@ -992,10 +1019,12 @@ class TestTheSequenceIsTheOneSpecified:
         hooks = [name for name, _arg in driver.churn_hook_calls]
         assert hooks.count("prepare_churn") == 1, driver.churn_hook_calls
         assert hooks[0] == "prepare_churn"
-        # Three fractions, three waits: the once-per-run hook and the
-        # once-per-fraction hooks are counted in the same list, so a change
-        # that made one of them follow the other's schedule shows up here.
-        assert hooks.count("wait_index_synced") == 3
+        # Three fractions, seven waits since ops version 9: one before the
+        # baseline and two per fraction (after the deletes, after the
+        # re-insert). The once-per-run hook and the per-fraction hooks are
+        # counted in the same list, so a change that made one of them follow
+        # the other's schedule shows up here.
+        assert hooks.count("wait_index_synced") == 7
         # And the two logs agree, which is what makes either trustworthy.
         assert [e for e in driver.trace if e[0] == "prepare_churn"] == \
             [("prepare_churn", None)]
@@ -1013,7 +1042,9 @@ class TestTheSequenceIsTheOneSpecified:
                                    ef_half=1.0, ef_search=512)
         run_churn(ctx, driver, dataset, fractions=(0.10, 0.25))
         waits = [e[1] for e in driver.trace if e[0] == "wait_index_synced"]
-        assert waits == [N_ROWS, N_ROWS]
+        # Before the baseline, then per step: after the deletes (the corpus
+        # minus the churned rows), after the re-insert (whole again).
+        assert waits == [N_ROWS, N_ROWS - 200, N_ROWS, N_ROWS - 300, N_ROWS]
         assert driver.count_rows() == N_ROWS
 
 
@@ -1136,7 +1167,7 @@ class TestADriverWithoutHooksRecordsWhatItAlwaysDid:
 
         step = rows[1]
         assert set(step["extra"]) == PRE_PR4_STEP_KEYS | \
-            PR4_UNCONDITIONAL_KEYS | PR5_UNCONDITIONAL_KEYS
+            PR4_UNCONDITIONAL_KEYS | PR5_UNCONDITIONAL_KEYS | V9_STEP_KEYS
         assert step["extra"]["repair_path"] == "none"
         assert step["extra"]["maintenance_state"] == "before"
         assert step["extra"]["index_sync_s"] == 0.0
@@ -1162,7 +1193,8 @@ class TestADriverWithoutHooksRecordsWhatItAlwaysDid:
         # `maintenance_state` is still absent, which is what this test was
         # named for.
         assert set(baseline["extra"]) == {
-            records.OPS_MEASUREMENT_VERSION_KEY} | PR5_UNCONDITIONAL_KEYS
+            records.OPS_MEASUREMENT_VERSION_KEY} | PR5_UNCONDITIONAL_KEYS \
+            | V9_BASELINE_KEYS
         assert "maintenance_state" not in baseline["extra"]
 
 
@@ -1475,8 +1507,12 @@ class TestANonPositiveChurnBudgetMeansNoCap:
         # for Valkey -- and a 0.0 recorded here would read as "the index was
         # ready". Pinned, because the alternative is a plausible-looking key.
         assert "index_sync_s" not in stopped["extra"]
-        assert "wait_index_synced" not in [
-            name for name, _arg in driver.churn_hook_calls]
+        # Since ops version 9 the wait also runs before the baseline and
+        # after the deletes, both of which DID happen on a stopped step --
+        # what must not run is the post-re-insert wait for `n_rows`.
+        waits = [arg for name, arg in driver.churn_hook_calls
+                 if name == "wait_index_synced"]
+        assert waits == [N_ROWS, N_ROWS - 200], waits
         # Raw text, because a float that reached the file as `Infinity` would
         # be read back by `json.loads` as a float and compare fine.
         assert "Infinity" not in open(ctx.recorder.path).read()
@@ -1508,7 +1544,8 @@ class TestANonPositiveChurnBudgetMeansNoCap:
         assert emitted({**base, "churn_budget_s": None}) == "0"
         assert emitted({**base, "churn_budget_s": 0}) == "0"
         assert emitted({**base, "churn_budget_s": 900}) == "900"
-        assert emitted(base) == "1800"
+        # 7200 since ops measurement version 9 (was 1800).
+        assert emitted(base) == "7200"
 
         args = parse_args([
             "--engine", "e", "--host", "h", "--port", "1", "--dataset", "d",

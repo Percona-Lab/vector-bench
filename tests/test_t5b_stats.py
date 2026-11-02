@@ -1598,8 +1598,12 @@ class TestMainsGridsActuallyMeet:
                 "dataset": dataset, "resource_pass": "normalized", "m": m,
                 "ef_search": 160, "recall_at_k": 0.968, "qps": 700.0,
                 "storage_engine": "InnoDB",
+                # A version-9 calibration record says which recall rule it
+                # carries; without the key it is read as a pre-v9 ID overlap
+                # and the cross-check declines to compare it.
                 "extra": {"recall_ci95": {"low": 0.962, "high": 0.974,
-                                          "n": 1000}},
+                                          "n": 1000},
+                          "recall_kind": "distance_threshold"},
             })
         out = generate.consistency_checks(records)
         assert len(out["matches"]) == 1, out["matches"]

@@ -46,8 +46,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ..datasets import (Dataset, cached_ground_truth, recall_at_k,
-                        recall_per_query)
+from ..datasets import (RECALL_DISTANCE_THRESHOLD, RECALL_ID_OVERLAP,
+                        Dataset, cached_ground_truth, recall_at_k,
+                        recall_per_query, recall_threshold_per_query)
 from ..drivers.base import EngineDriver, IndexSpec
 from ..metrics.latency import LatencyCollector
 from ..metrics.records import PHASE_CALIBRATION, Record
@@ -119,6 +120,10 @@ class CalibrationPoint:
     effective_ef: int
     recall_at_k: float
     qps: float
+    #: Ops version 9: the id-overlap figure over the same queries, kept
+    #: beside the distance-threshold `recall_at_k` the target is judged on.
+    recall_id_overlap: Optional[float] = None
+    recall_kind: str = RECALL_ID_OVERLAP
 
     def reached(self, target_recall: float) -> bool:
         """Whether this point meets the target.
@@ -229,7 +234,8 @@ def _choose(points: Sequence[CalibrationPoint],
 
 
 def _measure_point(driver: EngineDriver, ctx: RunContext, queries,
-                   truth, ef: int, warmup: int):
+                   truth, ef: int, warmup: int, corpus=None,
+                   metric: Optional[str] = None):
     """One grid point: warm up, time the query set, score it.
 
     Returns the point, its latency summary and whether the planner used the
@@ -275,11 +281,27 @@ def _measure_point(driver: EngineDriver, ctx: RunContext, queries,
     collector.stop()
     progress.finish()
 
-    per_query = recall_per_query(returned, truth, ctx.k)
+    # Ops version 9: the target is judged on ann-benchmarks' distance
+    # threshold, the rule `recall_qps` records use, so a calibration "reached
+    # 0.95" and an ann point "at 0.95" are one claim. The id overlap rides
+    # beside it. A caller with no corpus (a unit test of the selector) keeps
+    # the id overlap, and the record says which it got.
+    overlap = recall_at_k(returned, truth, ctx.k)
+    if corpus is not None and metric is not None:
+        per_query = recall_threshold_per_query(returned, truth, queries,
+                                               corpus, metric, ctx.k)
+        recall = sum(per_query) / len(returned) if returned else float("nan")
+        kind = RECALL_DISTANCE_THRESHOLD
+    else:
+        per_query = recall_per_query(returned, truth, ctx.k)
+        recall = overlap
+        kind = RECALL_ID_OVERLAP
     point = CalibrationPoint(
         ef_search=int(ef), effective_ef=effective,
-        recall_at_k=recall_at_k(returned, truth, ctx.k),
+        recall_at_k=recall,
         qps=collector.qps(clients=1),
+        recall_id_overlap=overlap,
+        recall_kind=kind,
     )
     # PR 5 §5.1 item 4. Computed here, where the samples are, rather than in
     # `_record`: the per-query recalls and the per-query latencies are the two
@@ -321,6 +343,10 @@ def _record(common: Dict[str, object], point: CalibrationPoint, stats,
             "grid_position": position,
             "grid_size": grid_size,
             "warmup_queries": warmup,
+            "recall_kind": point.recall_kind,
+            "recall_id_overlap": (round(point.recall_id_overlap, 6)
+                                  if point.recall_id_overlap is not None
+                                  else None),
             # PR 5 §5.1 item 4's two keys, last so that a future named key
             # above cannot be silently overwritten by one of them.
             **(ci or {}),
@@ -378,7 +404,8 @@ def run(ctx: RunContext, driver: EngineDriver, dataset: Dataset,
     points: List[CalibrationPoint] = []
     for position, ef in enumerate(grid):
         point, stats, index_used, ci = _measure_point(
-            driver, ctx, queries, truth, ef, warmup)
+            driver, ctx, queries, truth, ef, warmup,
+            corpus=dataset.train, metric=dataset.metric)
         points.append(point)
 
         print(f"[calibrate] {driver.name}: ef_search={ef} "

@@ -67,7 +67,12 @@ made the chart above misleading until they were added:
    all and names the point in its Validity section. The quantity is computed
    from the spans the window already keeps, so it is engine- and
    library-agnostic and catches serialization whatever produced it -- which a
-   CPU threshold cannot. See `clients.SERVED_CONCURRENCY_FLOOR`.
+   CPU threshold cannot. See `clients.SERVED_CONCURRENCY_FLOOR`. Since ops
+   measurement version 9 the status reads `outstanding_concurrency` first
+   (the median estimate undercounts heavy tails and is now only the
+   `tail_dominated` note), each client count runs one discarded warm-up
+   window before its first repeat, and an efficiency divided by a cold
+   one-client baseline is withheld (`extra.efficiency_reliability`).
 
 PR 4 §4.3 item 3 moved the client, the barrier, the window trimming and the CPU
 accounting into `clients.py`, because churn's readers need all four and a
@@ -85,10 +90,13 @@ from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
 import numpy
 
-from ..datasets import Dataset, cached_ground_truth, recall_at_k
+from ..datasets import (RECALL_DISTANCE_THRESHOLD, Dataset,
+                        cached_ground_truth, recall_at_k, recall_threshold)
 from ..drivers.base import IndexSpec
 from ..metrics.latency import (INFLIGHT_DISCARDED,  # noqa: F401 - instrument
                                PREWINDOW_DISCARDED, merge_collectors)
+from ..metrics.scaling import (baseline_is_credible, scaling_note,
+                               scaling_status)
 from ..metrics.records import PHASE_CONCURRENCY, Record
 from ..metrics.resources import own_cpu_count, read_own_cpu_usec  # noqa: F401
 # PR 4 §4.3 item 3 moved the client, the barrier, the window trimming and the
@@ -102,6 +110,8 @@ from .clients import (CLIENT_BOUND_UTIL,  # noqa: F401
                       SERVED_CONCURRENCY_FLOOR, Answer, ClientPool,
                       DriverFactory, Instruments, client_cpu, shard_queries)
 from .context import RunContext
+from .profile_window import ProfileWindow
+from .server_waits import REASON_KEY, WAITS_KEY, WaitCapture
 
 _client_cpu = client_cpu
 _shard_queries = shard_queries
@@ -171,6 +181,56 @@ class _Window(NamedTuple):
     outstanding_concurrency: Optional[float]
     served_concurrency: Optional[float]
     scaling_status: Optional[str]
+    #: Ops version 9. The id-overlap recall over the same queries, kept beside
+    #: the distance-threshold `recall` that is published -- see
+    #: `datasets.recall_threshold`.
+    recall_id_overlap: Optional[float] = None
+    #: The window's two ends on the WALL clock (epoch seconds), so the report
+    #: can join the server's `mem-*.jsonl` CPU and pressure samples -- which
+    #: are stamped `time.time()` on the host -- to exactly this window. The
+    #: perf_counter instants the spans use are not comparable across hosts.
+    window_started_at: Optional[float] = None
+    window_ended_at: Optional[float] = None
+    #: The server's own wait profile around this window, as the two record
+    #: keys `server_waits.WaitCapture.finish` returns. Carried on the sample
+    #: for the reason the recall is: the waits beside the median window's
+    #: QPS must be that window's.
+    server_waits: Optional[Dict[str, object]] = None
+
+
+#: `extra.efficiency_reliability` values. A cold one-client baseline inflates
+#: every efficiency divided by it and `CREDIBLE_EFFICIENCY_CEILING` cannot see
+#: it; `scaling.baseline_is_credible` can, and since ops version 9 a point it
+#: flags publishes NO efficiency rather than a number about the baseline.
+EFFICIENCY_CREDIBLE = "credible"
+EFFICIENCY_BASELINE_NOT_CREDIBLE = "baseline_not_credible"
+EFFICIENCY_UNCHECKED = "unchecked"
+
+
+def _efficiency_verdict(efficiency: Optional[float],
+                        baseline_p50: Optional[float],
+                        p50: Optional[float],
+                        clients: int) -> Tuple[Optional[float], Optional[str],
+                                               Optional[float]]:
+    """(efficiency to publish, reliability, p50_1 / p50_n).
+
+    One client publishes its tautological 1.0: it IS the baseline. A median
+    that got FASTER by more than `CREDIBLE_BASELINE_MEDIAN_RATIO` as clients
+    were added is impossible for a warm baseline -- a queue raises the
+    median, a stalled client leaves it -- so the efficiency is withheld and
+    the status is judged without it.
+    """
+    if efficiency is None:
+        return None, None, None
+    ratio = (baseline_p50 / p50 if baseline_p50 and p50 else None)
+    if clients == 1:
+        return efficiency, EFFICIENCY_CREDIBLE, ratio
+    credible = baseline_is_credible(baseline_p50, p50)
+    if credible is False:
+        return None, EFFICIENCY_BASELINE_NOT_CREDIBLE, ratio
+    if credible is None:
+        return efficiency, EFFICIENCY_UNCHECKED, ratio
+    return efficiency, EFFICIENCY_CREDIBLE, ratio
 
 
 def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
@@ -178,7 +238,10 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
         client_counts: Sequence[int] = (1, 2, 4, 8, 16, 32),
         duration_s: float = 20.0, warmup: int = 50,
         max_queries: int = WHOLE_TEST_SET, repeats: int = 1,
-        indexed_rows: Optional[int] = None) -> None:
+        indexed_rows: Optional[int] = None,
+        profile_window_clients: Optional[int] = None,
+        profile_ack_dir: Optional[str] = None,
+        wait_sampler: bool = False) -> None:
     """Measure QPS and latency at each client count.
 
     Each point runs for a fixed duration rather than a fixed query count, so a
@@ -207,6 +270,12 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
     training set would otherwise have its recall scored against neighbours
     pointing at rows the engine never received, understating every engine at
     once in a way that reads as a result.
+
+    `profile_window_clients` names the client count that gets one extra,
+    profiled window after its measured repeats -- never one of them; see
+    `_profiled_window`. `wait_sampler` lets a sampling engine (pgvector)
+    sample its wait events DURING the window, which is off by default because
+    it is load the other engines' windows do not carry.
     """
     queries = _query_pool(dataset.test, max_queries)
 
@@ -228,6 +297,8 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
         meta_driver.close()
 
     baseline_qps: Optional[float] = None
+    baseline_p50: Optional[float] = None
+    corpus = dataset.train
 
     for clients in client_counts:
         if clients > len(queries):
@@ -235,15 +306,58 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
                   f"{len(queries)} queries available")
             continue
 
+        # Ops version 9: ONE DISCARDED WINDOW, same client count and length,
+        # before the first measured repeat. `full-20260825` spread +/-22-24%
+        # across repeats at ONE client, from a cold first repeat: the
+        # per-client `warmup` gives the one-client point the fewest warmed
+        # queries of the sweep, and that point is the baseline every
+        # efficiency divides by. Recorded (`extra.warmup_window_qps`) so a
+        # reader can see what it absorbed, and never a candidate for the
+        # median -- it is not in `samples`.
+        print(f"[concurrency] {clients} client(s): one discarded warm-up "
+              f"window of {duration_s:.0f}s", flush=True)
+        # Not scored: its throughput is all the record keeps of it, and a
+        # recall nobody publishes is a distance computation over every
+        # answer of a 20 s window for nothing.
+        warm = _one_window(
+            driver_factory, queries, clients, ctx.k, ef_search, index,
+            warmup, duration_s, truth, score=False)
+
         samples = []
         for attempt in range(max(1, repeats)):
             label = (f" (run {attempt + 1} of {repeats})" if repeats > 1 else "")
             print(f"[concurrency] {clients} client(s){label}: warming up "
                   f"({warmup} queries each), then measuring for "
                   f"{duration_s:.0f}s", flush=True)
-            samples.append(_one_window(
-                driver_factory, queries, clients, ctx.k, ef_search, index,
-                warmup, duration_s, truth))
+            # The server's wait counters, read on a side connection
+            # immediately before and after the window and never inside it.
+            # See `server_waits.py`; a snapshot that took a second must not
+            # move the window's QPS, and the suite pins that it does not.
+            # (pgvector's opt-in sampler is the one exception, and it is
+            # disclosed on every record -- see `wait_sampler`.)
+            capture = WaitCapture(driver_factory, meta_driver,
+                                  sampler=wait_sampler).begin()
+            try:
+                sample = _one_window(
+                    driver_factory, queries, clients, ctx.k, ef_search, index,
+                    warmup, duration_s, truth, corpus, dataset.metric)
+            finally:
+                waits = capture.finish()
+            samples.append(sample._replace(server_waits=waits))
+
+        # The perf profile gets its OWN window, after the measured repeats
+        # and outside `samples`, exactly as the version-9 warm-up window is
+        # outside them: perf sampling every server thread at 99 Hz with call
+        # graphs is load on the machine being measured, so a profiled window
+        # must never be a candidate for the published median. Same client
+        # count, same length; its throughput is recorded so the cost of the
+        # profiler is visible beside the figures it did not touch.
+        profile_extra: Dict[str, object] = {}
+        if (profile_window_clients is not None
+                and clients == int(profile_window_clients)):
+            profile_extra = _profiled_window(
+                profile_ack_dir, driver_factory, queries, clients, ctx.k,
+                ef_search, index, warmup, duration_s, truth)
 
         # The median window, not an average of several: latency percentiles
         # from one measured window mean something, and the mean of several
@@ -267,9 +381,23 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
         executed = merged.get("queries_executed") or 0
         reuse = (executed / recall_queries) if recall_queries else None
 
+        p50 = merged.get("latency_p50_ms")
         if clients == 1:
             baseline_qps = qps
-        efficiency = (qps / (clients * baseline_qps)) if baseline_qps else None
+            baseline_p50 = p50
+        raw_efficiency = ((qps / (clients * baseline_qps)) if baseline_qps
+                          else None)
+        efficiency, reliability, p50_ratio = _efficiency_verdict(
+            raw_efficiency, baseline_p50, p50, clients)
+        # Recomputed here rather than taken from the window, because only
+        # this loop knows the one-client baseline: a credible efficiency term
+        # joins `outstanding`, the primary figure since version 9. See
+        # `metrics/scaling.scaling_status`.
+        status = scaling_status(window.served_concurrency, clients,
+                                efficiency,
+                                outstanding=window.outstanding_concurrency)
+        note = scaling_note(window.served_concurrency,
+                            window.outstanding_concurrency)
 
         # The median window's, by the same rule as its recall: the figure
         # beside a throughput number has to come from the window that
@@ -287,15 +415,14 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
         # client CPU: a status computed from one window beside a throughput
         # figure from another would be a caveat about a measurement nobody
         # published.
-        if window.scaling_status == SCALING_CONCURRENCY_NOT_ACHIEVED:
+        if status == SCALING_CONCURRENCY_NOT_ACHIEVED:
             _warn_concurrency_not_achieved(
                 clients, window.served_concurrency,
                 window.outstanding_concurrency, window.client_cpu_seconds,
                 window.client_cpu_util)
 
         _print_point(common["engine"], clients, ctx.k, qps, recall, merged,
-                     efficiency, spread, len(samples),
-                     window.scaling_status)
+                     efficiency, spread, len(samples), status)
 
         ctx.recorder.write(Record(
             **common,
@@ -311,6 +438,27 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
             **merged,
             extra={
                 "scaling_efficiency": round(efficiency, 4) if efficiency is not None else None,
+                # Whether the efficiency above was divided by a warm baseline,
+                # and the median ratio that says so -- see
+                # `_efficiency_verdict`. `None` at a point with no baseline.
+                "efficiency_reliability": reliability,
+                "baseline_p50_ratio": (round(p50_ratio, 4)
+                                       if p50_ratio is not None else None),
+                # The discarded window before the first repeat. Never
+                # selected; recorded so the cold-start cost is visible.
+                "warmup_window_qps": round(warm.qps, 2),
+                "warmup_window_s": duration_s,
+                # Which recall rule `recall_at_k` is, and the other rule's
+                # figure over the same queries. Ops version 9: one name, one
+                # definition -- ann-benchmarks' distance threshold.
+                "recall_kind": RECALL_DISTANCE_THRESHOLD,
+                "recall_id_overlap": (round(window.recall_id_overlap, 6)
+                                      if window.recall_id_overlap is not None
+                                      else None),
+                # The median window's wall-clock ends, for joining the
+                # server's CPU and pressure samples to it.
+                "window_started_at": window.window_started_at,
+                "window_ended_at": window.window_ended_at,
                 "duration_s": duration_s,
                 "warmup_queries_per_client": warmup,
                 "repeats": len(samples),
@@ -368,25 +516,70 @@ def run(ctx: RunContext, driver_factory: DriverFactory, dataset: Dataset,
                 # which is the premise `scaling_efficiency` above is
                 # meaningless without. `outstanding_concurrency` is the exact
                 # time-average number outstanding and `served_concurrency`
-                # the median-span estimate of how many were in service; they
-                # diverge by the time a span spends WAITING rather than being
-                # served, whatever it waits on -- until version 6 that was
-                # the interpreter lock, and since then it is a queue in the
-                # engine or its socket. `scaling_status` is keyed to the
-                # second because the first was measured blind to it -- see
-                # `clients.SERVED_CONCURRENCY_FLOOR` for the five-driver
-                # table. Both are recorded, never the status alone: the
-                # status is a comparison against a floor, and a reader has to
-                # be able to see how far from it the point sat.
+                # the median-span estimate; `served / outstanding` is exactly
+                # `p50 / mean`. Since version 9 `scaling_status` is keyed to
+                # the FIRST: it was rejected while the clients were threads,
+                # because a span waiting on the interpreter lock still counted
+                # as flight, and that cause left with version 6. The median
+                # estimate is kept as evidence and drives `scaling_note`
+                # (`tail_dominated`), a note and never a refusal. Both are
+                # recorded, never the status alone: the status is a
+                # comparison against a floor, and a reader has to be able to
+                # see how far from it the point sat.
                 "outstanding_concurrency": (
                     round(window.outstanding_concurrency, 3)
                     if window.outstanding_concurrency is not None else None),
                 "served_concurrency": (
                     round(window.served_concurrency, 3)
                     if window.served_concurrency is not None else None),
-                "scaling_status": window.scaling_status,
+                "scaling_status": status,
+                "scaling_note": note,
+                # What the SERVER waited on over the median window, from its
+                # own counters -- the evidence that tells a server that
+                # serializes from one that is saturated, which the CPU and
+                # pressure columns cannot. `None` beside a reason when the
+                # engine could not say; never an empty profile for "unknown".
+                WAITS_KEY: (window.server_waits or {}).get(WAITS_KEY),
+                REASON_KEY: (window.server_waits or {}).get(
+                    REASON_KEY, "not captured"),
+                # The extra, never-selected window perf profiled, when this
+                # client count was the designated one.
+                **profile_extra,
             },
         ))
+
+
+def _profiled_window(ack_dir: Optional[str], driver_factory: DriverFactory,
+                     queries, clients: int, k: int, ef_search: int,
+                     index: IndexSpec, warmup: int, duration_s: float,
+                     truth: numpy.ndarray) -> Dict[str, object]:
+    """One unscored window bracketed by the perf handshake.
+
+    The handshake -- the begin mark, the wait of up to `ACK_TIMEOUT_S` for
+    the orchestrator's ack, and the end mark -- is outside `_one_window`, so
+    it is outside the barrier-opened span even of this window. Returns the
+    record keys: the window's QPS and whether perf was acknowledged. An
+    unacknowledged window says so: either the orchestrator never answered or
+    perf could not start, and `profile.json` (when written) says which.
+    """
+    print(f"[concurrency] {clients} client(s): one extra window for the perf "
+          f"profile, not measured", flush=True)
+    profile = ProfileWindow(ack_dir, clients)
+    profile.begin()
+    try:
+        window = _one_window(driver_factory, queries, clients, k, ef_search,
+                             index, warmup, duration_s, truth, score=False)
+    finally:
+        profile.end()
+    return {"profile_window_qps": round(window.qps, 2), "profile_window": {
+        "duration_s": duration_s,
+        "acknowledged": bool(profile.acknowledged),
+        # The orchestrator's own word on perf: "recording", or
+        # "unavailable: <why>". Said even when nobody answered.
+        "perf": (profile.perf_status if profile.acknowledged else
+                 "no acknowledgement: the orchestrator did not answer, so no "
+                 "perf profile covers this window"),
+    }}
 
 
 def _query_pool(test: numpy.ndarray, max_queries: int) -> numpy.ndarray:
@@ -417,7 +610,10 @@ def _query_pool(test: numpy.ndarray, max_queries: int) -> numpy.ndarray:
 
 
 def _window_recall(results: Dict[int, Answer], truth: numpy.ndarray,
-                   k: int) -> Tuple[Optional[float], int]:
+                   k: int, queries: Optional[numpy.ndarray] = None,
+                   corpus: Optional[numpy.ndarray] = None,
+                   metric: Optional[str] = None
+                   ) -> Tuple[Optional[float], int]:
     """Recall over the queries this window actually executed, and how many.
 
     Only the queries present in `results` are scored. A window shorter than
@@ -427,7 +623,27 @@ def _window_recall(results: Dict[int, Answer], truth: numpy.ndarray,
 
     The caller has already dropped the answers whose queries fell outside the
     measured window, so this counts the same queries the QPS beside it counts.
+
+    Given the query vectors, the corpus and the metric this is the
+    distance-threshold recall (`datasets.recall_threshold`) -- what the
+    record publishes since ops version 9. Without them it falls back to the
+    id overlap, `_window_recall_id_overlap`.
     """
+    offsets = sorted(results)
+    if not offsets:
+        return None, 0
+    if queries is None or corpus is None or metric is None:
+        return _window_recall_id_overlap(results, truth, k)
+    returned = [results[offset].ids for offset in offsets]
+    picks = numpy.array(offsets, dtype=numpy.int64)
+    return (recall_threshold(returned, truth[picks], queries[picks], corpus,
+                             metric, k), len(offsets))
+
+
+def _window_recall_id_overlap(results: Dict[int, Answer],
+                              truth: numpy.ndarray,
+                              k: int) -> Tuple[Optional[float], int]:
+    """The pre-version-9 rule: share of the true top-k ids returned."""
     offsets = sorted(results)
     if not offsets:
         return None, 0
@@ -520,21 +736,21 @@ def _warn_concurrency_not_achieved(clients: int, served: Optional[float],
     util_text = f"{util:.0%}" if util is not None else "n/a"
     print(
         f"[concurrency] CONCURRENCY NOT ACHIEVED: at {clients} client(s) the "
-        f"pool had {served_text} quer(ies) in service on average, below the "
-        f"{SERVED_CONCURRENCY_FLOOR:.0%} of {clients} this figure needs. "
-        f"The scaling efficiency at this point is NOT a property of the "
-        f"engine and the report refuses to render it. The clients are "
-        f"separate OS processes, so the cause this check was written for -- "
-        f"clients serialized on Python's interpreter lock -- is no longer "
-        f"reachable; what is left is the engine itself answering one query at "
-        f"a time, a fault in this pool, or a service time skewed far enough "
-        f"that the median under-reads the mean. The client container spent "
+        f"pool had {outstanding_text} quer(ies) outstanding on average "
+        f"(the exact mean-based figure; {served_text} by the median "
+        f"estimate), and either that is below the "
+        f"{SERVED_CONCURRENCY_FLOOR:.0%} of {clients} this figure needs or "
+        f"neither the median estimate nor the throughput shows the clients' "
+        f"queries being served at once. The scaling efficiency at this point "
+        f"is NOT a property of the engine and the report refuses to render "
+        f"it. The clients are separate OS processes, so the cause this check "
+        f"was written for -- clients serialized on Python's interpreter lock "
+        f"-- is no longer reachable; what is left is the engine itself "
+        f"answering one query at a time, or a fault in this pool. A skewed "
+        f"service time alone no longer lands here (ops version 9): it is "
+        f"noted `tail_dominated` instead. The client container spent "
         f"{cores_text} ({util_text} of its CPUs) over this window; compare "
-        f"that against {clients} client(s) rather than against a threshold, "
-        f"because the one-core rule this line used to quote was a property of "
-        f"the shared lock. {outstanding_text} quer(ies) were OUTSTANDING on "
-        f"average, and that figure counts any wait as flight, which is why it "
-        f"is not the one compared here.",
+        f"that against {clients} client(s) rather than against a threshold.",
         file=sys.stderr, flush=True)
 
 
@@ -618,7 +834,10 @@ def _check_recall_spread(samples: Sequence[_Window],
 
 def _one_window(driver_factory: DriverFactory, queries, clients: int, k: int,
                 ef_search: int, index: IndexSpec, warmup: int,
-                duration_s: float, truth: numpy.ndarray) -> _Window:
+                duration_s: float, truth: numpy.ndarray,
+                corpus: Optional[numpy.ndarray] = None,
+                metric: Optional[str] = None,
+                score: bool = True) -> _Window:
     """One warm-up and one measured window.
 
     Recall is computed here, inside the window that produced the results, so
@@ -640,8 +859,12 @@ def _one_window(driver_factory: DriverFactory, queries, clients: int, k: int,
     pool.start(f"{clients}-client warm-up", prefix="concurrency")
     # The window is exactly this sleep: the pool's start instant was read in
     # the barrier action, before any client was released, and its stop instant
-    # is read before the flag is set. See `clients.ClientPool`.
+    # is read before the flag is set. See `clients.ClientPool`. The two wall
+    # readings bracket it to within one call, far inside the server
+    # sampler's 0.25 s interval they are joined against.
+    started_at = time.time()
     time.sleep(duration_s)
+    ended_at = time.time()
     window = pool.stop()
 
     merged = window.merged
@@ -649,7 +872,12 @@ def _one_window(driver_factory: DriverFactory, queries, clients: int, k: int,
         _warn_nothing_finished(clients, duration_s, window.inflight_discarded)
 
     results = window.results
-    recall, recall_queries = _window_recall(results, truth, k)
+    if score:
+        recall, recall_queries = _window_recall(results, truth, k, queries,
+                                                corpus, metric)
+        overlap, _ = _window_recall_id_overlap(results, truth, k)
+    else:
+        recall, recall_queries, overlap = None, 0, None
 
     return _Window(
         qps=window.qps,
@@ -664,4 +892,7 @@ def _one_window(driver_factory: DriverFactory, queries, clients: int, k: int,
         outstanding_concurrency=window.outstanding_concurrency,
         served_concurrency=window.served_concurrency,
         scaling_status=window.scaling_status,
+        recall_id_overlap=overlap,
+        window_started_at=round(started_at, 3),
+        window_ended_at=round(ended_at, 3),
     )

@@ -66,6 +66,31 @@ def query_path_extra(attrs: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def warmup_extra(attrs: Dict[str, Any]) -> Dict[str, Any]:
+    """The one-time index warm-up the overlay module ran, for `extra`.
+
+    Only keys that are present come back, so a result file that predates the
+    warm-up (ANN_MEASUREMENT_VERSION 2 and older) yields a record identical to
+    the one it always did -- and `summarize` can tell the two apart, which is
+    the point: a first-step inversion is the cold-cache artifact only on an
+    index nobody warmed.
+    """
+    # Imported here: coercers needs numpy, and nothing else in this module does.
+    from report.coercers import maybe_bool, maybe_float, maybe_int
+
+    out: Dict[str, Any] = {}
+    queries = maybe_int(attrs.get("index_warmup_queries"))
+    if queries is not None:
+        out["index_warmup_queries"] = queries
+    seconds = maybe_float(attrs.get("index_warmup_seconds"))
+    if seconds is not None and seconds == seconds:
+        out["index_warmup_seconds"] = seconds
+    converged = maybe_bool(attrs.get("index_warmup_converged"))
+    if converged is not None:
+        out["index_warmup_converged"] = converged
+    return out
+
+
 def _size(nbytes: int) -> str:
     """GiB for a real corpus, MiB below one -- `0.00 GiB` reads as nothing."""
     if nbytes >= 1024 ** 3:

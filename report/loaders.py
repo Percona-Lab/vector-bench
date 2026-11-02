@@ -46,6 +46,9 @@ from report.coercers import (  # noqa: F401
     maybe_str as _maybe_str,
 )
 
+# Moved to `report/builds.py`, which also says which build a summary may use.
+from report.builds import build_params, build_signature  # noqa: E402,F401
+
 
 def knn_recall(dataset_distances: numpy.ndarray, run_distances: numpy.ndarray,
                count: int, epsilon: float = 1e-3) -> float:
@@ -162,6 +165,10 @@ def load_annb_results(annb_dir: str, datasets_dir: str,
                         "ef_search": _maybe_int(attrs.get("ef_search")),
                         "ef_construction": _maybe_int(attrs.get("ef_construction")),
                         "build_mode": _maybe_str(attrs.get("build_mode")),
+                        # The one swept build axis no column carried, so the
+                        # floor table could not tell Percona Search's
+                        # scalar and unquantized curves apart (25 Aug run).
+                        "quantization": _maybe_str(attrs.get("quantization")),
                         "index_bytes": _maybe_int(attrs.get("index_bytes")),
                         "march": _maybe_str(attrs.get("march")),
                         "vector_index_used": _maybe_bool(attrs.get("vector_index_used")),
@@ -177,6 +184,7 @@ def load_annb_results(annb_dir: str, datasets_dir: str,
                             # report.
                             "source_mtime": os.path.getmtime(path),
                             **_disclosures.query_path_extra(attrs),
+                            **_disclosures.warmup_extra(attrs),
                         },
                     }
                     if attrs.get("index_size") is not None:
@@ -457,44 +465,6 @@ def _foreign_cpu_one(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         "foreign_cores": round(cores, 2),
         "peak_load1": round(max(loads), 1) if loads else None,
     }
-
-def build_signature(record: Dict[str, Any]) -> Any:
-    """Everything about a measurement except the query effort.
-
-    Two points belong to the same curve when they differ only in ef_search.
-    Deciding that from named columns needs the key to list every axis a
-    profile may sweep, and it silently fails the moment an engine gains one:
-    Percona Search's quantization is not a column, so its unquantized and
-    scalar curves collapsed into a single series -- which made eight legitimate
-    measurements look like duplicates and invented six inversions comparing
-    ef_search 10 against ef_search 10.
-
-    ann-benchmarks already solves this. It names each result file after the
-    build arguments with the query argument appended:
-
-        angular_M_16_quantization_none_400.hdf5
-        angular_M_16_build_mode_post_efConstruction_200_400.hdf5
-
-    Dropping the trailing query argument leaves the build configuration, for
-    any engine, including axes this code has never heard of. The named columns
-    stay as the fallback for records loaded without a source file.
-    """
-    source = (record.get("extra") or {}).get("source_file")
-    if source:
-        stem = os.path.basename(str(source))
-        if stem.endswith(".hdf5"):
-            stem = stem[:-len(".hdf5")]
-        head, _, tail = stem.rpartition("_")
-        # Only strip a trailing query argument, never part of the build name.
-        # A stem that does not end in one is still a configuration identifier
-        # and is kept whole: falling back to the columns here would discard
-        # the very information the filename was consulted for.
-        build = head if (head and tail.isdigit()) else stem
-        return ("file", record.get("engine"), record.get("dataset"), build)
-    return ("cols", record.get("engine"), record.get("dataset"), record.get("m"),
-            record.get("build_mode"), record.get("storage_engine"),
-            record.get("ef_construction"),
-            (record.get("extra") or {}).get("quantization"))
 
 # A gap this long between consecutive samples cannot be sampling jitter -- the
 # sampler runs four times a second -- so it separates two measurements that

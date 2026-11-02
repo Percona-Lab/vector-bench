@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 import numpy
 
 from ..base.module import BaseANN
+from ...vb_warmup import IndexWarmupMixin
 
 try:  # pragma: no cover - exercised only inside the bench image
     import valkey as valkey_client
@@ -94,7 +95,7 @@ def hdf5_safe(values):
     return {k: v for k, v in values.items() if v is not None}
 
 
-class ValkeySearch(BaseANN):
+class ValkeySearch(IndexWarmupMixin, BaseANN):
     def __init__(self, metric: str, method_param: Dict[str, Any]):
         if valkey_client is None:
             raise RuntimeError(
@@ -192,6 +193,7 @@ class ValkeySearch(BaseANN):
     # ------------------------------------------------------------------
 
     def fit(self, X: numpy.ndarray) -> None:
+        self._keep_warmup_sample(X)
         dim = int(X.shape[1])
         self._dim = dim
         self._probe = X[0]
@@ -401,6 +403,7 @@ class ValkeySearch(BaseANN):
         self._ef_runtime = int(ef_runtime)
         if self._query_verified is None:
             self._query_verified = self._verify_query()
+        self._warm_index_once()   # once per built index; see vb_warmup.py
         self._warm_cache()
 
     def _search(self, conn, vector, k: int) -> List[int]:
@@ -516,6 +519,7 @@ class ValkeySearch(BaseANN):
             # versions are the provenance instead.
             "march": "none",
             "packages": self._packages(),
+            **self._warmup_attrs(),
         })
 
     def _server_version(self) -> str:

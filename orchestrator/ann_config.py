@@ -181,7 +181,18 @@ def result_stems(body: Dict[str, Any]) -> Set[Tuple[str, str]]:
     that, and resolving it here would mean knowing the dataset's metric, which
     this module is deliberately not given.)
     """
-    stems: Set[Tuple[str, str]] = set()
+    return {(name, result_stem(index_args + query))
+            for name, index_args, query in result_definitions(body)}
+
+
+def result_definitions(body: Dict[str, Any]
+                       ) -> List[Tuple[str, List[Any], List[Any]]]:
+    """(algorithm, index arguments, query arguments) per file the body asks
+    for, before the stem collapses them -- the expansion `result_stems`
+    counts. Split out so `ann_provenance` can tell which build parameters a
+    result file was written for, which the stem alone spells only lossily.
+    """
+    out: List[Tuple[str, List[Any], List[Any]]] = []
     by_name: Dict[str, Dict[str, Any]] = {}
     for algorithm in ((body.get("float") or {}).get("any") or []):
         by_name[str(algorithm.get("name", ""))] = algorithm
@@ -205,8 +216,8 @@ def result_stems(body: Dict[str, Any]) -> Set[Tuple[str, str]]:
                 else:
                     arguments.append(arg_group)
                 for query in query_args:
-                    stems.add((name, result_stem(arguments + list(query))))
-    return stems
+                    out.append((name, arguments, list(query)))
+    return out
 
 
 def expected_result_count(body: Dict[str, Any]) -> int:
@@ -236,9 +247,14 @@ def expected_results(work_dir: str, engine: str) -> int:
     render that failed to land must not be checked against a grid that
     existed only in memory.
     """
+    body = read_config(work_dir, engine)
+    return 0 if body is None else expected_result_count(body)
+
+
+def read_config(work_dir: str, engine: str) -> Any:
+    """The rendered config as the container consumed it, or None."""
     try:
         with open(config_path(work_dir, engine)) as fh:
-            body = yaml.safe_load(fh)
+            return yaml.safe_load(fh)
     except (OSError, yaml.YAMLError):
-        return 0
-    return expected_result_count(body)
+        return None

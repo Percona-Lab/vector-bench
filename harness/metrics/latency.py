@@ -208,6 +208,23 @@ class WindowConcurrency(NamedTuple):
     stays at the client count and it is not flagged. That is the distinction
     a guard has to get right.
 
+    **THAT VERDICT WAS ABOUT THREADS AND IS RETIRED AT OPS VERSION 9.**
+    Every row above that separates the two columns is a lock-HOLDING driver,
+    and the blindness is mechanical only while the clients share one
+    interpreter lock. They have been separate OS processes since version 6,
+    so a span can no longer stretch while its client waits for a lock some
+    other client holds, and `outstanding` is again what it always was: the
+    exact time-average occupancy, with no estimator in it. Keeping the median
+    as the guard kept only its own bias -- under a heavy tail `served`
+    undercounts by `p50 / mean`, which on `full-20260825` put MariaDB 12.3 at
+    32 clients (p50 34 ms, p99 1,043 ms) at a fraction of its real occupancy,
+    and printed a one-client "share of the window inside the call" of 74-75%
+    where `qps x mean latency` is 1.00 for all six engines. So since version 9
+    `scaling.scaling_status` reads `outstanding` first, and `served` survives
+    as the median ESTIMATE beside it and as `scaling.tail_dominated`'s input.
+    The table stays because it is the evidence for why the thread pool needed
+    the median and why the process pool does not.
+
     `None`, never 0.0, when the window counted no query: zero is the claim
     "the clients had nothing in flight", which cannot be true of a window
     that executed queries, and it is the value a guard would read as
@@ -270,10 +287,11 @@ def window_concurrency(collectors: Sequence["LatencyCollector"],
 # `scaling.py`'s globals. Patch `harness.metrics.scaling`.
 from .scaling import (CREDIBLE_BASELINE_MEDIAN_RATIO,  # noqa: F401
                       CREDIBLE_EFFICIENCY_CEILING,
-                      SCALING_CONCURRENCY_NOT_ACHIEVED, SCALING_OK,
-                      SCALING_STATUSES, SERVED_CONCURRENCY_FLOOR,
-                      achieved_fraction, baseline_is_credible,
-                      scaling_status, served_fraction, throughput_fraction)
+                      SCALING_CONCURRENCY_NOT_ACHIEVED, SCALING_NOTES,
+                      SCALING_OK, SCALING_STATUSES, SCALING_TAIL_DOMINATED,
+                      SERVED_CONCURRENCY_FLOOR, achieved_fraction,
+                      baseline_is_credible, scaling_note, scaling_status,
+                      served_fraction, tail_dominated, throughput_fraction)
 
 
 class LatencyCollector:

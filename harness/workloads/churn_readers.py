@@ -219,11 +219,19 @@ def reader_contention_shape(window: Optional[PoolWindow]) -> Dict[str, Any]:
     """
     if window is None:
         return {}
+    # Ops measurement version 9: the status is judged on the exact
+    # mean-based figure (`PoolWindow.scaling_status` passes `outstanding`),
+    # so that figure travels with it, and a heavy-tailed read window is the
+    # `tail_dominated` note rather than a refusal of the writer rate.
     return {
+        "reader_outstanding_concurrency": (
+            round(window.outstanding_concurrency, 3)
+            if window.outstanding_concurrency is not None else None),
         "reader_served_concurrency": (round(window.served_concurrency, 3)
                                       if window.served_concurrency is not None
                                       else None),
         "reader_scaling_status": window.scaling_status,
+        "reader_scaling_note": window.scaling_note,
     }
 
 
@@ -296,6 +304,7 @@ def _reader_extra(window: PoolWindow, prefix: str) -> Dict[str, Any]:
             round(window.served_concurrency, 3)
             if window.served_concurrency is not None else None),
         f"{prefix}_scaling_status": window.scaling_status,
+        f"{prefix}_scaling_note": window.scaling_note,
     }
 
 
@@ -391,6 +400,7 @@ def _during_writes_extra(baseline: PoolWindow, during: PoolWindow,
                                if during.served_concurrency is not None
                                else None),
         "scaling_status": during.scaling_status,
+        "scaling_note": during.scaling_note,
     }
     extra.update(_reader_extra(baseline, "reader_baseline"))
     extra.update(_reader_extra(during, "reader_under_writes"))
@@ -470,12 +480,17 @@ def _warn_readers_serialized(name: str, fraction: float,
     """
     served = extra.get("served_concurrency")
     served_text = f"{served:.2f}" if served is not None else "n/a"
+    outstanding = extra.get("outstanding_concurrency")
+    outstanding_text = (f"{outstanding:.2f}" if outstanding is not None
+                        else "n/a")
     readers = extra.get("readers") or 0
     print(
         f"[churn] {name}: READERS DID NOT ACHIEVE CONCURRENCY at "
-        f"{fraction:.0%} churn: {readers} reader(s) had {served_text} "
-        f"quer(ies) in service on average, below the "
-        f"{SERVED_CONCURRENCY_FLOOR:.0%} of {readers} these figures need. "
+        f"{fraction:.0%} churn: {readers} reader(s) had {outstanding_text} "
+        f"quer(ies) outstanding on average ({served_text} by the median "
+        f"estimate), below the {SERVED_CONCURRENCY_FLOOR:.0%} of {readers} "
+        f"these figures need: the readers did not keep their reads in "
+        f"flight. "
         f"The p99 ratio and the reader throughput on this record are not "
         f"evidence about what the writes cost the engine, because the reads "
         f"were not running concurrently. The writer rate beside them "

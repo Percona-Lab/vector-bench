@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy
 
 from .algorithms.base.module import BaseANN
+from .vb_warmup import IndexWarmupMixin
 
 try:  # pragma: no cover - exercised only inside the bench images
     import mariadb as _connector
@@ -66,6 +67,10 @@ def to_binary_f32(vector) -> bytes:
 # which inverts the low end of the recall/QPS curve: on a 990k x 1536 corpus
 # both MySQL-family engines reported ef_search=10 as slower than ef_search=20,
 # which cannot happen once the cache is warm.
+#
+# Thirty was not enough: full-20260825 still measured ef_search 10 below 20 on
+# every MySQL-family curve (1.69x-2.13x). The one-time index warm-up in
+# vb_warmup.py now does the heavy warming; this per-configuration top-up stays.
 WARMUP_QUERIES = int(os.environ.get("VB_WARMUP_QUERIES", "30"))
 
 
@@ -101,7 +106,7 @@ class Dialect:
         )
 
 
-class VBMySQLBase(BaseANN):
+class VBMySQLBase(IndexWarmupMixin, BaseANN):
     """Base ann-benchmarks algorithm for MariaDB and AliSQL."""
 
     dialect: Dialect  # set by subclasses
@@ -257,6 +262,7 @@ class VBMySQLBase(BaseANN):
     # ------------------------------------------------------------------
 
     def fit(self, X: numpy.ndarray) -> None:
+        self._keep_warmup_sample(X)
         dim = int(X.shape[1])
         cur = self._cur
 
@@ -371,6 +377,9 @@ class VBMySQLBase(BaseANN):
         # and would quietly poison the comparison.
         if self.dialect.verify_index_used and self._plan_verified is None:
             self._plan_verified = self._verify_plan()
+        # Once per built index, before the first timed configuration; see
+        # vb_warmup.py for the cold first point that made it necessary.
+        self._warm_index_once()
         self._warm_cache()
 
     def _warm_cache(self) -> None:
@@ -525,6 +534,7 @@ class VBMySQLBase(BaseANN):
             "insert_threads": self._insert_threads,
             "vector_index_used": self._plan_verified,
             "march": self._image_march(),
+            **self._warmup_attrs(),
         }
 
     def _server_version(self) -> str:

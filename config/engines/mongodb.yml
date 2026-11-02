@@ -85,6 +85,16 @@ server:
     - "skipAuthenticationToSearchIndexManagementServer=true"
     - --setParameter
     - "useGrpcForSearch=true"
+  # WiredTiger's cache is this engine's buffer pool, so it is sized from the
+  # resource pass's buffer share exactly as InnoDB's buffer pool and
+  # pgvector's shared_buffers are (`orchestrator/config.py`
+  # `resolve_resources`, `wiredtiger_cache_bytes`). Until ops measurement
+  # version 9 nothing set it: `full-20260825` ran mongod on its own default
+  # of 57-64 GB beside a 42.3 GB InnoDB buffer pool.
+  normalized:
+    - --wiredTigerCacheSizeGB={wiredtiger_cache_gb}
+  tuned:
+    - --wiredTigerCacheSizeGB={wiredtiger_cache_gb}
 
 resources:
   # Heap scales with the number of indexed fields, not with the number of
@@ -94,9 +104,12 @@ resources:
   # queries, which MongoDB's own guidance warns against above 50%.
   mongot_heap_gb: 8
   # The rest of the container is left to WiredTiger and the filesystem cache.
-  # mongod takes the same fraction the other engines give their buffer pool so
-  # the split is not invented here.
-  wiredtiger_cache_fraction: 0.6
+  # mongod takes the same buffer share the other engines give their buffer
+  # pool, so the split is not invented here -- the `server:` flags above.
+  # (A `wiredtiger_cache_fraction: 0.6` sat here until ops version 9 and
+  # nothing read it; it was removed rather than wired, because a second
+  # fraction for one engine is the asymmetry the resource pass exists to
+  # prevent.)
 
 storage_engines:
   normalized: [wiredTiger]
@@ -173,3 +186,22 @@ runtime:
     label: "Percona Search (mongot)"
     # The table has room for the full name; the chart legend does not.
   label: "Percona Search for MongoDB (mongot)"
+  # The index the ops pass builds. §4's secondary table ("at the build the
+  # ops pass measured") is taken from it, and a headline floor figure from any
+  # other build is marked, because the load, build, concurrency, filtered and
+  # churn sections describe this index. `full-20260825` published Percona
+  # Search's floor figures from the unquantized sweep beside ops figures from
+  # the scalar index (which peaks at recall 0.892), and
+  # pgvector's and Valkey's from efC=400 beside ops figures at 200 and the
+  # server default. A value of `ops` is resolved per profile and
+  # pass from what `orchestrator/ops_pass.py` passes the harness
+  # (`orchestrator/reference_build.py`), and `cmd_run` refuses a build the ann grid
+  # does not contain rather than reporting "—" for a whole engine afterwards.
+  # No `m`: mongot exposes no graph degree, and `render_config` gives this
+  # engine `m_values[:1]` as a label only -- M=8 on `main`/`full`/`quick`,
+  # whose ann grids start at 8. Declaring m=16 would refuse those profiles
+  # over a number the index never reads. Quantization is the build axis, and
+  # `ops` because the ops pass takes it from the tuned extras' first value
+  # (scalar) or the profile's `ann.mongodb_quantization` (none) by pass.
+  reference_build:
+    quantization: ops

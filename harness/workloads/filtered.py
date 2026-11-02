@@ -54,6 +54,8 @@ import numpy
 
 from ..datasets import (FILTER_COLUMNS, FILTER_TAG, Dataset, cached_ground_truth,
                         filtered_truth_for, recall_at_k, recall_per_query)
+from ..datasets import (RECALL_DISTANCE_THRESHOLD,
+                        recall_threshold_per_query)
 from ..drivers.base import EngineDriver, IndexSpec
 from ..metrics.latency import LatencyCollector, LatencyStats
 from ..metrics.records import PHASE_FILTERED, Record
@@ -221,7 +223,9 @@ def _returned_count_hist(returned: Sequence[Sequence[int]], k: int) -> Dict[str,
 
 
 def _group_recall(returned: Sequence[Sequence[int]], truth: numpy.ndarray,
-                  k: int, rows: Sequence[int]) -> Optional[float]:
+                  k: int, rows: Sequence[int],
+                  per_query: Optional[Sequence[float]] = None
+                  ) -> Optional[float]:
     """Recall over one subset of the queries, or None if the subset is empty.
 
     None rather than 0.0, and the difference is the whole point. `tag` at 1%
@@ -233,6 +237,11 @@ def _group_recall(returned: Sequence[Sequence[int]], truth: numpy.ndarray,
     """
     if len(rows) == 0:
         return None
+    if per_query is not None:
+        # Ops version 9: the group means of the SAME per-query vector the
+        # point's recall is the mean of, so a group figure and the point
+        # beside it are one rule.
+        return sum(per_query[i] for i in rows) / len(rows)
     subset = [returned[i] for i in rows]
     return recall_at_k(subset, truth[list(rows)], k)
 
@@ -536,10 +545,23 @@ def _measure_and_record(ctx: RunContext, driver: EngineDriver,
     # draws its interval from. `recall_at_k` is itself `sum(per_query) / n`
     # (see `datasets.recall_per_query`), so taking the mean here keeps the
     # point and the bar on one arithmetic rather than two.
-    per_query = recall_per_query(point.returned, truth, ctx.k)
+    #
+    # Ops version 9: ann-benchmarks' distance threshold, scored against the
+    # filtered ground truth -- still recomputed over the qualifying rows, so
+    # the k-th distance is the k-th among the rows the predicate admits. The
+    # id overlap rides beside it as `extra.recall_id_overlap`.
+    executed_queries = queries[:len(point.returned)]
+    per_query = recall_threshold_per_query(
+        point.returned, truth, executed_queries, dataset.train,
+        dataset.metric, ctx.k)
+    overlap = recall_per_query(point.returned, truth, ctx.k)
     recall = (sum(per_query) / len(per_query)) if point.executed else None
-    recall_near_pass = _group_recall(point.returned, truth, ctx.k, near_pass)
-    recall_near_fail = _group_recall(point.returned, truth, ctx.k, near_fail)
+    recall_id_overlap = ((sum(overlap) / len(overlap)) if point.executed
+                         else None)
+    recall_near_pass = _group_recall(point.returned, truth, ctx.k, near_pass,
+                                     per_query)
+    recall_near_fail = _group_recall(point.returned, truth, ctx.k, near_fail,
+                                     per_query)
     insufficient = point.executed < MIN_SAMPLE_QUERIES
 
     print(
@@ -562,7 +584,8 @@ def _measure_and_record(ctx: RunContext, driver: EngineDriver,
     _record_point(ctx, common, filt, ef_search, index_used, point, recall,
                   recall_near_pass, recall_near_fail, len(near_pass),
                   len(near_fail), insufficient, mode, declared_budget,
-                  column, per_query=per_query)
+                  column, per_query=per_query,
+                  recall_id_overlap=recall_id_overlap)
 
 
 def _record_point(ctx: RunContext, common: Dict[str, object], filt,
@@ -571,7 +594,8 @@ def _record_point(ctx: RunContext, common: Dict[str, object], filt,
                   recall_near_fail: Optional[float], near_pass_queries: int,
                   near_fail_queries: int, insufficient: bool,
                   mode: Optional[str], budget_s: float, column: str,
-                  per_query: Optional[Sequence[float]] = None) -> None:
+                  per_query: Optional[Sequence[float]] = None,
+                  recall_id_overlap: Optional[float] = None) -> None:
     """Write one filtered record.
 
     `selectivity=filt.actual_selectivity` is the fix this file owed. What was
@@ -669,6 +693,9 @@ def _record_point(ctx: RunContext, common: Dict[str, object], filt,
                         recall_per_query=per_query or None,
                         latencies_s=point.latencies or None),
             "iterative_scan": mode,
+            "recall_kind": RECALL_DISTANCE_THRESHOLD,
+            "recall_id_overlap": (None if recall_id_overlap is None
+                                  else round(recall_id_overlap, 6)),
             **({"tag_threshold": filt.threshold}
                if column == FILTER_TAG else {}),
         },

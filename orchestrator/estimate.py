@@ -428,8 +428,13 @@ _PER_QUERY_OPS_COSTS: Dict[str, Tuple[str, ...]] = {
         "~6.7 min for main's two datasets x two columns",
     ),
 }
+# Named, not quantified: there is no measured single-client ann QPS to
+# multiply by, so `runs: 2` on the publishable profiles doubles a term this
+# estimator never put a number on. The index warm-up is in the same position
+# -- bounded (5,000 queries per built index) but with no rate to price it.
 _ANN_QUERY_COST = ("recall/QPS sweep: every ann.ef_search point, `runs` times, "
-                   "over each dataset's query set")
+                   "over each dataset's query set, plus a one-time index "
+                   "warm-up of up to 5,000 training-set queries per built index")
 
 
 def _query_qps(engine: str, dataset: str) -> Optional[float]:
@@ -459,6 +464,75 @@ def _ops_rows(ops: Dict[str, Any], dataset: str) -> int:
     return rows
 
 
+def _frontier(profile: Dict[str, Any]) -> bool:
+    # Imported here: the selection module pulls in the manifest and docker
+    # plumbing, which nothing else in this module needs.
+    from .ops_build_selection import MODE_FRONTIER, build_selection_mode
+    return build_selection_mode(profile) == MODE_FRONTIER
+
+
+def frontier_ops_bound(profile: Dict[str, Any], engines: Sequence[str],
+                       passes: Sequence[str]) -> Optional[Dict[str, Any]]:
+    """The ops build to charge when `ops.build_selection: frontier`, or None.
+
+    Under `frontier` the ops build is not known until the ann phase of each
+    (engine, dataset, pass) has run, so there is no build to estimate -- and
+    printing the M=16 figure as though it were the plan would be the same
+    unlabelled substitution the key exists to remove. What IS known is the
+    grid it will be chosen from, so each engine's ops ingest is charged at
+    the largest M its RENDERED grid asks for -- `estimate_grid.ann_builds`,
+    which sees `m_values_by_engine`, the tuned extras and a select-builds
+    overlay exactly as the run will -- at ONE build per unit (the selection
+    picks exactly one, so `ops.m_values` no longer multiplies it).
+
+    The M price is `estimate_grid.m_cost_factor`, the rule the per-build ann
+    block beside this line uses, so the two blocks of one estimate cannot
+    disagree about what an M costs: ~M^1.1 from the M=16 rate for the engines
+    that build the graph inside every INSERT, and nothing for the others,
+    whose rate is the load alone -- which also covers Percona Search, whose M
+    is a label in a result file name and not a knob. ef_construction is not
+    priced, because no ingest rate here was measured at more than one value
+    of it -- so where the grid sweeps it above the rates' 200 (the tuned pass
+    sweeps pgvector and Valkey to 400) this is NOT an upper bound, and the
+    printed line says so.
+    """
+    if not _frontier(profile):
+        return None
+    from .config import load_resources, merge_resource_overrides
+    from .estimate_grid import ann_builds, m_cost_factor
+
+    per_engine: Dict[str, Dict[str, Any]] = {}
+    for engine in engines:
+        largest: Optional[int] = None
+        for resource_pass in passes:
+            resources = merge_resource_overrides(
+                load_resources(resource_pass), profile)
+            try:
+                builds = ann_builds(engine, profile, resources, resource_pass)
+            except ValueError:
+                # `run` refuses an unrenderable grid before it starts; the
+                # estimate has nothing to charge from and charges M=16.
+                builds = []
+            for build in builds:
+                if build.get("M") is not None:
+                    largest = max(int(build["M"]), largest or 0)
+        per_engine[engine] = {
+            "m": largest,
+            "ingest_factor": round(m_cost_factor(engine, largest), 3)}
+    return {"engines": per_engine,
+            "m": max((r["m"] for r in per_engine.values()
+                      if r["m"] is not None), default=None)}
+
+
+def ops_ingest_factor(bound: Optional[Dict[str, Any]], engine: str) -> float:
+    """The M factor one engine's ops ingest is charged at: 1.0 in `reference`
+    mode, else what `frontier_ops_bound` priced for that engine."""
+    if not bound:
+        return 1.0
+    return ((bound.get("engines") or {}).get(engine) or {}).get(
+        "ingest_factor", 1.0)
+
+
 def _ops_units(profile: Dict[str, Any], engine: str) -> int:
     """How many times the ops phase runs for one (engine, dataset, pass).
 
@@ -475,7 +549,9 @@ def _ops_units(profile: Dict[str, Any], engine: str) -> int:
     """
     ops = profile.get("ops", {}) or {}
     ann = profile.get("ann", {}) or {}
-    m_values = max(1, len(ops.get("m_values", [16])))
+    # One M under `frontier`: the selection builds the chosen build only.
+    m_values = (1 if _frontier(profile)
+                else max(1, len(ops.get("m_values", [16]))))
     # Mirrors `cli.py`'s `_OPS_BUILD_MODE_KEYS`, and must: this is how many
     # times the ops workloads actually run, so an engine whose second build
     # mode the runner executes and this does not count is an estimate short by
@@ -602,13 +678,22 @@ def _concurrency_windows(plan: _QueryPlan) -> Optional[_QueryTerm]:
     repeats = max(1, int(plan.ops.get("concurrency_repeats", 1)))
     if not points or duration <= 0:
         return None
-    seconds = len(points) * duration * repeats
+    # `+ 1`: ops measurement version 9 runs one discarded warm-up window,
+    # same length, before each client count's first repeat
+    # (`harness/workloads/concurrency.py`). The run pays it, so this counts it.
+    seconds = len(points) * duration * (repeats + 1)
+    # `ops.profile_window_clients`: one more window of the same length at
+    # that count, outside the measured repeats, for the perf profile.
+    profiled = plan.ops.get("profile_window_clients")
+    if profiled is not None and int(profiled) in points:
+        seconds += duration
     return _QueryTerm(
         name="concurrency windows",
         typical_s=seconds,
         worst_s=seconds,
         basis=(f"{len(points)} client count(s) x {duration:.0f}s"
                + (f" x {repeats} repeat(s)" if repeats > 1 else "")
+               + " + one warm-up window each"
                + " per ops unit, fixed by the profile not by the engine"),
         bounded=True,
     )
@@ -885,7 +970,11 @@ def _churn_reinsert(plan: _QueryPlan) -> Optional[_QueryTerm]:
     fractions = [float(f) for f in plan.ops.get("churn_fractions", [0.1])]
     # `or 0.0` so a key present with value null means "no cap" rather than a
     # TypeError, matching `_filtered_search` and `ops_pass`'s `_budget_arg`.
-    budget = float(plan.ops.get("churn_budget_s", 1800) or 0.0)
+    # The same default `ops_pass` passes the harness (7200 s since ops
+    # measurement version 9), so the estimate and the run cannot disagree.
+    from orchestrator.ops_pass import DEFAULT_CHURN_BUDGET_S
+    budget = float(plan.ops.get("churn_budget_s", DEFAULT_CHURN_BUDGET_S)
+                   or 0.0)
     uncapped = budget <= 0
     # None means no ingest rate has ever been measured for this engine, which
     # is a different state from a rate of zero and is reported differently:
@@ -984,6 +1073,37 @@ def _churn_reader_baseline(plan: _QueryPlan) -> Optional[_QueryTerm]:
                f"before each step's deletes, fixed by the profile not by the "
                f"engine"),
         bounded=True)
+
+
+def _mongot_index_settle(plan: _QueryPlan) -> Optional[_QueryTerm]:
+    """mongot's index-size settle after each build (ops version 9).
+
+    `harness/drivers/mongo.py:MongoDriver.settle_index_bytes` re-reads
+    mongot's directory sum every `SETTLE_INTERVAL_S` until two readings
+    agree within 1%, or until `SETTLE_CAP_S` -- because Lucene keeps merging
+    segments for minutes after a build (`full-20260825` read 15.1 GiB after
+    the load and 7.2 GiB at the churn baseline). Version 9 added that wait
+    and the estimate did not count it, so the printed worst case was short by
+    up to ten minutes per mongodb unit. Typical is one interval (the fewest
+    readings that can agree); worst is the cap. mongodb only: every other
+    engine's settle is immediate.
+    """
+    if plan.engine != "mongodb" or "build" not in plan.workloads:
+        return None
+    return _QueryTerm(
+        name="mongot index-size settle",
+        typical_s=MONGOT_SETTLE_INTERVAL_S, worst_s=MONGOT_SETTLE_CAP_S,
+        basis=(f"one {MONGOT_SETTLE_INTERVAL_S:.0f}s reading interval typical, "
+               f"the {MONGOT_SETTLE_CAP_S:.0f}s cap worst, after each mongodb "
+               f"build"),
+        bounded=True)
+
+
+#: `harness.drivers.mongo.SETTLE_INTERVAL_S` / `SETTLE_CAP_S` at their
+#: defaults (both env-overridable inside the container, which the host cannot
+#: see). Pinned against the harness by `tests/test_estimate.py`.
+MONGOT_SETTLE_INTERVAL_S = 30.0
+MONGOT_SETTLE_CAP_S = 600.0
 
 
 #: Seconds of reader traffic before each churn step's deletes. Matches
@@ -1085,6 +1205,7 @@ _QUERY_TERMS: Tuple[Callable[[_QueryPlan], Optional[_QueryTerm]], ...] = (
     _filtered_search,
     _churn_reinsert,
     _churn_reader_baseline,
+    _mongot_index_settle,
 )
 
 
@@ -1238,7 +1359,9 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
     what is named as unknown instead of being guessed at.
     """
     m_count = max(1, len(profile.get("ann", {}).get("m_values", [16])))
-    ops_m = max(1, len(profile.get("ops", {}).get("m_values", [16])))
+    ops_bound = frontier_ops_bound(profile, engines, passes)
+    ops_m = (1 if ops_bound
+             else max(1, len(profile.get("ops", {}).get("m_values", [16]))))
     per_engine: Dict[str, float] = {}
     unknown: List[str] = [d for d in datasets if d not in _DATASET_ROWS]
     # An engine this repo has no ingest rate for, on any dataset the plan
@@ -1260,6 +1383,7 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
             # is known about an engine that maintains an HNSW graph per INSERT.
             continue
         engine_h = 0.0
+        ops_factor = ops_ingest_factor(ops_bound, engine)
         for dataset in datasets:
             rows = _DATASET_ROWS.get(dataset)
             if not rows:
@@ -1277,7 +1401,7 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
             if "ann" in phases:
                 engine_h += (rows / effective) * m_count / 3600
             if "ops" in phases:
-                engine_h += (rows / effective) * ops_m / 3600
+                engine_h += (rows / effective) * ops_m * ops_factor / 3600
         per_engine[engine] = round(engine_h * len(passes), 2)
 
     total_h = round(sum(per_engine.values()), 2)
@@ -1290,6 +1414,9 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
         "per_engine_hours": per_engine,
         "m_values": m_count,
         "ops_m_values": ops_m,
+        # None in `reference` mode. Otherwise the ops build is chosen after
+        # the ann phase and this is what the ops ingest was charged at.
+        "ops_build_bound": ops_bound,
         "passes": len(passes),
         "phases": list(phases),
         "datasets_without_estimate": unknown,
@@ -1309,9 +1436,37 @@ def estimate_load_hours(profile: Dict[str, Any], engines: List[str],
     }
 
 
+def client_cpu_line(profile: Dict[str, Any],
+                    client_cpus: Dict[str, int]) -> Optional[str]:
+    """The resolved client cpuset size beside the largest client count.
+
+    Printed before the run because the two numbers are only meaningful
+    together: a 32-client sweep from 4 client CPUs measures the clients, and
+    the report can mark such a point hollow only after the hours are spent.
+    """
+    if not client_cpus:
+        return None
+    counts = ((profile or {}).get("ops", {}) or {}).get("client_counts") or [1]
+    largest = max(int(c) for c in counts)
+    sizes = ", ".join(f"{n} client CPU(s) ({name})"
+                      for name, n in client_cpus.items())
+    return f"clients   : {sizes} for up to {largest} clients"
+
+
 def print_load_estimate(profile: Dict[str, Any], engines: List[str],
                          datasets: List[str], passes: List[str],
-                         phases: List[str]) -> None:
+                         phases: List[str],
+                         client_cpus: Optional[Dict[str, int]] = None,
+                         axis_hint: bool = True) -> None:
+    # `axis_hint` False when `estimate_grid.print_run_estimate` will print
+    # the per-build block beneath: there the multiplier may be ef_construction
+    # or quantization rather than M, and that block names the axis per engine
+    # instead of the "Reduce ann.m_values" advice below.
+    # Before the early return below: a short run still drives its largest
+    # client count from whatever the client cpuset is.
+    line = client_cpu_line(profile, client_cpus or {})
+    if line:
+        print(line)
     estimate = estimate_load_hours(profile, engines, datasets, passes, phases)
     # The gate is the whole run, not ingest alone. It used to be ingest, which
     # meant `smoke` -- 0.5 h of loading against a 3.5 h churn ceiling across
@@ -1348,7 +1503,21 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
               f"smoke run supplies the figure; until then the ingest\n    "
               f"cost of this plan is higher than the number above, by an "
               f"amount nothing here knows.")
-    if estimate["long_run"]:
+    bound = estimate.get("ops_build_bound")
+    if bound:
+        priced = ", ".join(
+            f"{engine} M={row['m']} x{row['ingest_factor']:g}"
+            for engine, row in bound["engines"].items()
+            if row["ingest_factor"] != 1.0)
+        print(f"  ops build: unknown until each ann phase has run "
+              f"(ops.build_selection: frontier); the ops ingest above is "
+              f"charged\n    one build per unit at each engine's largest "
+              f"swept M"
+              + (f" ({priced})" if priced else "")
+              + f", priced as the\n    per-build block prices M. "
+              f"ef_construction is not priced, so where the grid sweeps it\n"
+              f"    above 200 this is not an upper bound.")
+    if estimate["long_run"] and axis_hint:
         print(f"  ! This is a long run. Each M value costs a full reload of every "
               f"dataset,\n    and MHNSW/VIDX build incrementally at a few hundred "
               f"rows/s. Reduce\n    ann.m_values or the dataset list to cut it "

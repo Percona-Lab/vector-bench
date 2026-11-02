@@ -82,6 +82,13 @@ class EngineRuntime:
     #: reason. Callers that want a mapping build one -- `dict(engine.ulimits)`
     #: -- which also keeps them from mutating the registry.
     ulimits: Tuple[Tuple[str, str], ...] = ()
+    #: The build every summary figure for this engine is taken from, as
+    #: `((axis, value), ...)` with `value` an int, a string or `"ops"` -- the
+    #: last meaning "whatever the ops pass builds under this profile and pass",
+    #: which `reference_build.resolve_reference_build` turns into a value. A
+    #: tuple of pairs for the reason `ulimits` is one. Empty for an engine
+    #: that declares none, and `reference_build_problem` refuses that.
+    reference_build: Tuple[Tuple[str, Any], ...] = ()
 
     @property
     def credentials(self) -> Tuple[str, str]:
@@ -142,7 +149,29 @@ def _build(name: str, config: Dict[str, Any], fallback_index: int) -> EngineRunt
         ulimits=tuple(sorted(
             (str(key), str(value))
             for key, value in (runtime.get("ulimits") or {}).items())),
+        reference_build=_reference_build(name, runtime.get("reference_build")),
     )
+
+
+#: The axes a reference build may name: the ones `report/loaders.build_params`
+#: reads back off a recall record. An axis outside this set could never match
+#: a point, so it is refused here rather than turning a whole row into "—".
+REFERENCE_BUILD_AXES = ("m", "ef_construction", "quantization")
+
+
+def _reference_build(name: str, declared: Any) -> Tuple[Tuple[str, Any], ...]:
+    if not declared:
+        return ()
+    if not isinstance(declared, dict):
+        raise ValueError(f"config/engines/{name}.yml: runtime.reference_build "
+                         f"must be a mapping, got {declared!r}")
+    unknown = sorted(set(declared) - set(REFERENCE_BUILD_AXES))
+    if unknown:
+        raise ValueError(
+            f"config/engines/{name}.yml: runtime.reference_build names "
+            f"{', '.join(unknown)}; a reference build can name only "
+            f"{', '.join(REFERENCE_BUILD_AXES)}")
+    return tuple(sorted(declared.items()))
 
 
 _cache: Optional[Dict[str, EngineRuntime]] = None

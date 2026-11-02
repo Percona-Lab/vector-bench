@@ -27,6 +27,7 @@ from ..drivers.base import EngineDriver, IndexSpec, RowAttrs
 from ..metrics.latency import Timer
 from ..metrics.records import PHASE_BUILD, PHASE_INGEST, Record, Recorder
 from ..progress import Heartbeat
+from .index_size import index_size_shape, settled_index_bytes
 from .context import RunContext
 
 
@@ -147,12 +148,19 @@ def run(ctx: RunContext, driver: EngineDriver, dataset: Dataset,
               + ", ".join(f"{name}={value:,}"
                           for name, value in sorted(server_status.items())))
 
-    index_bytes = driver.index_bytes()
+    index_bytes_after_build = driver.index_bytes()
+    # Ops measurement version 9: the published size is read after a settle
+    # step, and the immediate reading travels beside it. See
+    # `harness/workloads/index_size.py` for the 15.1 -> 7.2 GiB run.
+    index_bytes, settle_s, settle = settled_index_bytes(
+        driver, index_bytes_after_build)
     table_bytes = driver.table_bytes()
     rows = driver.count_rows()
     print(
-        f"[{driver.name}] index {index_bytes:,} B, table {table_bytes:,} B, "
-        f"{rows:,} rows"
+        f"[{driver.name}] index {index_bytes:,} B"
+        + (f" (settled in {settle_s:.0f}s from {index_bytes_after_build:,})"
+           if index_bytes != index_bytes_after_build else "")
+        + f", table {table_bytes:,} B, {rows:,} rows"
     )
 
     common = ctx.record_defaults(driver, dataset, index)
@@ -203,6 +211,10 @@ def run(ctx: RunContext, driver: EngineDriver, dataset: Dataset,
         # variable.
         extra={**_driver_capabilities(driver),
                "separable_build": not incremental,
+               **index_size_shape(driver, "after_settle"),
+               "index_bytes_after_build": index_bytes_after_build,
+               "index_size_settle_s": round(settle_s, 3),
+               "index_size_settle": settle,
                **({"server_status": server_status} if server_status else {})},
     ))
 

@@ -596,6 +596,50 @@ def wait_healthy(name: str, probe: Sequence[str], timeout_s: int = 180,
 # Resource sampling
 # ---------------------------------------------------------------------------
 
+#: The cgroup v2 pressure files `MemorySampler` reads, by the prefix their
+#: fields carry in a sample row.
+PRESSURE_FILES = (("cpu", "/sys/fs/cgroup/cpu.pressure"),
+                  ("io", "/sys/fs/cgroup/io.pressure"))
+
+#: The fields kept from each file's `some` and `full` lines. `avg10` is the
+#: kernel's ten-second moving average, kept for a reader looking at one row;
+#: `total` is cumulative stall MICROSECONDS, which is what a window's figure
+#: is computed from (`report/server_windows.py`), because a difference of
+#: totals covers exactly the window and a moving average does not.
+PRESSURE_FIELDS = ("avg10", "total")
+
+
+def pressure_fields(prefix: str, text: Optional[str]
+                    ) -> Dict[str, Optional[float]]:
+    """`{<prefix>_pressure_<some|full>_<avg10|total>: value}` from one PSI
+    file's text.
+
+    EVERY key is always present, and a missing file, an unreadable one or a
+    line the kernel did not write is None -- never 0. Zero is the claim "no
+    task stalled", which is a measurement; a kernel built without PSI, a
+    cgroup v1 host or a container that has exited says nothing at all, and a
+    sampler that wrote 0 for those would publish an idle server where nobody
+    looked. (cgroup v2 writes no `full` line for cpu at the root on older
+    kernels; that key is None for the same reason.)
+    """
+    out: Dict[str, Optional[float]] = {
+        f"{prefix}_pressure_{kind}_{field}": None
+        for kind in ("some", "full") for field in PRESSURE_FIELDS}
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if not parts or parts[0] not in ("some", "full"):
+            continue
+        for item in parts[1:]:
+            name, _, value = item.partition("=")
+            if name not in PRESSURE_FIELDS:
+                continue
+            try:
+                out[f"{prefix}_pressure_{parts[0]}_{name}"] = float(value)
+            except ValueError:
+                continue
+    return out
+
+
 class MemorySampler(threading.Thread):
     """Sample a container's memory and CPU into a JSONL timeseries.
 
@@ -640,6 +684,34 @@ class MemorySampler(threading.Thread):
                 except (IndexError, ValueError):
                     return None
         return None
+
+    def _cgroup_pressure(self) -> Dict[str, Optional[float]]:
+        """The container's own CPU and IO pressure (ops version 9).
+
+        One `docker exec` for both files, not one each: the sampler already
+        spends three per row at a 0.25 s interval, and every exec is time a
+        row is late. A file that does not exist prints nothing between its
+        markers, and `pressure_fields` turns that into None.
+        """
+        script = "; ".join(f"echo @@{prefix}; cat {path} 2>/dev/null"
+                           for prefix, path in PRESSURE_FILES)
+        try:
+            proc = exec_in(self.container, ["sh", "-c", script], timeout=10)
+            text = proc.stdout or ""
+        except Exception:
+            text = ""
+        sections: Dict[str, str] = {}
+        current = None
+        for line in text.splitlines():
+            if line.startswith("@@"):
+                current = line[2:].strip()
+                sections[current] = ""
+            elif current is not None:
+                sections[current] += line + "\n"
+        out: Dict[str, Optional[float]] = {}
+        for prefix, _path in PRESSURE_FILES:
+            out.update(pressure_fields(prefix, sections.get(prefix)))
+        return out
 
     def _host_pressure(self) -> Dict[str, Optional[float]]:
         """What the whole machine is doing, not only this container.
@@ -705,6 +777,7 @@ class MemorySampler(threading.Thread):
                         "cpu_seconds": self._cpu_seconds(),
                         "session": self.session,
                         **self._host_pressure(),
+                        **self._cgroup_pressure(),
                     }) + "\n")
                     self.samples += 1
                 self._stop_event.wait(self.interval_s)

@@ -1445,3 +1445,193 @@ class TestTheArchivedPerconaBundle:
         assert len(_table_rows(markdown, OUT_OF_SCOPE_HEADER)) == 8
         assert "353 result files" in _section(markdown,
                                               OUT_OF_SCOPE_HEADING)
+
+
+# ---------------------------------------------------------------------------
+# F5: every recall number has an ann attempt of this run behind it
+# ---------------------------------------------------------------------------
+
+from report import provenance as provenance_mod  # noqa: E402
+from report import provenance_render  # noqa: E402
+
+UNPROVENANCED_HEADING = provenance_render.UNPROVENANCED_HEADING
+UNPROVENANCED_HEADER = provenance_render.UNPROVENANCED_HEADER
+DBPEDIA = "dbpedia-openai-1000k-angular"
+
+
+def _files(records: Sequence[Dict[str, Any]], kind: str = "written",
+           m: Optional[int] = 16) -> Dict[str, List[Dict[str, Any]]]:
+    """An ann attempt's `files` block, as `ann_provenance.phase_files`
+    writes it, listing exactly these records' source files."""
+    listed = [{"path": r["extra"]["source_file"], "mtime": MEASURED_LATER,
+               "M": m} for r in records]
+    return {"written": listed if kind == "written" else [],
+            "skipped": listed if kind == "skipped" else []}
+
+
+def _attempt(engine: str, dataset: str, files=None, *, phase: str = "ann",
+             attempt: int = 1) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {"phase": phase, "engine": engine,
+                             "dataset": dataset, "status": "completed",
+                             "resource_pass": PASS, "exit_code": 0,
+                             "duration_s": 2.1, "attempt": attempt}
+    if files is not None:
+        entry["files"] = files
+    return entry
+
+
+class TestEveryRecallNumberHasAnAttemptBehindIt:
+    """A pair the phase log names is not enough: the attempt it names has to
+    be the one that wrote the file. `full-20260825` passed the pair check and
+    published M=16 recall under a manifest whose ann attempts wrote M=6."""
+
+    def _with_log(self, phases):
+        manifest = _manifest(["percona", "pgvector"])
+        manifest["phases"] = phases
+        return manifest
+
+    def test_an_ann_file_whose_phase_is_absent_is_excluded_and_named(
+            self, tmp_path, monkeypatch):
+        """pgvector is in the engines block -- configured -- and no attempt
+        of it ever returned. `scope.py` admits it on the run's corpora (it is
+        `unpaired`); with file lists in the log, nothing of this run wrote
+        those files, so they leave §4 and appear in §2."""
+        own = _shared_tree("percona")
+        manifest = self._with_log([_attempt("percona", FASHION, _files(own))])
+        code, markdown, written = _report(
+            tmp_path, manifest, own + _shared_tree("pgvector"), monkeypatch)
+        assert code == 0
+        assert _engines_in(written, "recall_qps") == ["percona"]
+        assert _column(markdown, HEADLINE_HEADER) == [_label("percona")]
+        assert _column(markdown, UNPROVENANCED_HEADER) == [_label("pgvector")]
+        assert "3 result file(s)" in _section(markdown, UNPROVENANCED_HEADING)
+
+    def test_an_ops_only_phase_no_longer_admits_ann_files(
+            self, tmp_path, monkeypatch):
+        """Before: an ops phase for (pgvector, fashion) made the pair
+        "measured", and any ann file for it in the shared tree was drawn as
+        this run's. An ops phase writes no ann file; it vouches for none."""
+        own = _shared_tree("percona")
+        manifest = self._with_log([
+            _attempt("percona", FASHION, _files(own)),
+            _attempt("pgvector", FASHION, phase="ops")])
+        _code, markdown, written = _report(
+            tmp_path, manifest, own + _shared_tree("pgvector"), monkeypatch)
+        assert _engines_in(written, "recall_qps") == ["percona"]
+        rows = _table_rows(markdown, UNPROVENANCED_HEADER)
+        assert [r[0] for r in rows] == [_label("pgvector")]
+        assert "no ann phase" in rows[0][-1]
+
+    def test_the_ops_only_case_is_also_refused_without_file_lists(self):
+        """The ops-only rule does not depend on the new record: an archived
+        log naming only an ops phase for a pair still vouches for no ann
+        file of it."""
+        manifest = self._with_log([
+            _attempt("percona", FASHION),
+            _attempt("pgvector", FASHION, phase="ops")])
+        kept, missing, _info = provenance_mod.split_by_provenance(
+            _shared_tree("percona", "pgvector"), manifest)
+        assert _engines_in(kept, "recall_qps") == ["percona"]
+        assert [r["engine"] for r in missing] == ["pgvector"]
+
+    def test_the_25_august_shape(self):
+        """Regression fixture. The MySQL-family ann attempt listed is the
+        08-31 one, which wrote M=6 files; the M=16 files beside them on disk
+        are what the published recall table used. M=16 goes to
+        `unprovenanced_ann`, M=6 stays as measured."""
+        def mariadb(m, ef):
+            record = _recall("mariadb", DBPEDIA, ef_search=ef)
+            record["m"] = m
+            record["extra"]["source_file"] = (
+                f"{DBPEDIA}/10/mariadb/angular_M_{m}_engine_InnoDB_{ef}.hdf5")
+            return record
+        m6 = [mariadb(6, ef) for ef in (10, 20, 40)]
+        m16 = [mariadb(16, ef) for ef in (10, 20, 40)]
+        manifest = _manifest(["mariadb"], profile_datasets=(DBPEDIA,))
+        manifest["phases"] = [
+            _attempt("mariadb", DBPEDIA, phase="ops"),
+            _attempt("mariadb", DBPEDIA, _files(m6, m=6))]
+        kept, missing, info = provenance_mod.split_by_provenance(
+            m6 + m16, manifest)
+        assert sorted(r["m"] for r in kept) == [6, 6, 6]
+        assert all(r["extra"]["ann_provenance"] == "measured" for r in kept)
+        assert missing == [{
+            "resource_pass": PASS, "engine": "mariadb", "dataset": DBPEDIA,
+            "reason": provenance_mod.NOT_LISTED, "records": 3, "files": 3,
+            "m": [16]}]
+        assert info["counts"]["measured"] == 3
+
+    def test_a_cache_hit_is_admitted_and_labelled_reused(
+            self, tmp_path, monkeypatch):
+        """ann-benchmarks skipped these files on the second attempt. They are
+        a measurement of the configuration asked for, so they are drawn --
+        and §2 says whose they are, the way `stale_ann` does."""
+        own = _shared_tree("percona")
+        manifest = self._with_log([
+            _attempt("percona", FASHION, _files(own), attempt=1),
+            _attempt("percona", FASHION, _files(own, kind="skipped"),
+                     attempt=2)])
+        kept, missing, info = provenance_mod.split_by_provenance(
+            own, {**manifest, "phases": manifest["phases"][1:]})
+        assert missing == []
+        assert {r["extra"]["ann_provenance"] for r in kept} == {"reused"}
+        assert info["reused"][0]["files"] == 3
+        _code, markdown, written = _report(tmp_path, {
+            **manifest, "phases": manifest["phases"][1:]}, own, monkeypatch)
+        assert _column(markdown, HEADLINE_HEADER) == [_label("percona")]
+        assert provenance_render.REUSED_HEADING in markdown
+        assert "**Reused:**" in markdown
+
+    def test_an_archived_manifest_labels_its_recall_unverified(
+            self, tmp_path, monkeypatch):
+        """No file lists: nothing can vouch for or against a file. Refusing
+        would delete the recall half of every report written before this
+        change; the numbers are shown and called what they are."""
+        own = _shared_tree("percona")
+        _code, markdown, written = _report(
+            tmp_path, _manifest(["percona"]), own, monkeypatch)
+        assert _column(markdown, HEADLINE_HEADER) == [_label("percona")]
+        recall = [r for r in written if r["phase"] == "recall_qps"]
+        assert {r["extra"]["ann_provenance"] for r in recall} == \
+            {"unverified"}
+        assert provenance_render.UNVERIFIED_HEADING in markdown
+        section4 = markdown.split("## 4. Recall vs throughput", 1)[1]
+        assert "**Unverified:** 3 of 3" in section4.split("\n## ", 1)[0]
+        assert UNPROVENANCED_HEADING not in markdown
+
+    def test_a_second_attempt_of_the_same_unit_does_not_hide_the_first(
+            self):
+        """`add_phase` appends now; the first attempt's written files are
+        still the provenance of the records they hold, whatever the second
+        attempt did."""
+        own = _shared_tree("percona")
+        manifest = self._with_log([
+            _attempt("percona", FASHION, _files(own), attempt=1),
+            _attempt("percona", FASHION, {"written": [], "skipped": []},
+                     attempt=2)])
+        kept, missing, _info = provenance_mod.split_by_provenance(
+            own, manifest)
+        assert missing == []
+        assert {r["extra"]["ann_provenance"] for r in kept} == {"measured"}
+
+
+class TestALaterAttemptDecidesHowAUnitEnded:
+    """`add_phase` keeps every attempt now. A unit that failed and was then
+    re-run successfully is not a failed unit, and §2 must not say it is."""
+
+    def test_a_fixed_failure_is_not_reported(self):
+        manifest = _manifest(["percona"])
+        failed = dict(manifest["phases"][0], status="failed", exit_code=1,
+                      attempt=1)
+        manifest["phases"] = [failed, dict(manifest["phases"][0],
+                                           attempt=2)]
+        summary = generate.summarize([], manifest)
+        assert summary["failed_phases"] == []
+
+    def test_a_failure_after_a_success_is_reported(self):
+        manifest = _manifest(["percona"])
+        done = dict(manifest["phases"][0], attempt=1)
+        manifest["phases"] = [done, dict(done, status="failed", exit_code=1,
+                                         attempt=2)]
+        summary = generate.summarize([], manifest)
+        assert len(summary["failed_phases"]) == 1

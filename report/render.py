@@ -17,9 +17,11 @@ from __future__ import annotations
 import html as _html
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from report import disclosures as _disclosures
+from report import provenance_render as _provenance
 from report import scope as _scope
 
 # Defaults; the manifest's per-engine `presentation.label` overrides them, so an
@@ -617,6 +619,13 @@ def _widening_note(manifest: Dict[str, Any]) -> str:
             f"engines a profile names. Widening means editing the profile.")
 
 
+def _inversion_likely(inversion: Dict[str, Any]) -> str:
+    """`summarize`'s verdict; a summary written before it carried one falls
+    back to the old rule, which was first step = warm-up."""
+    return inversion.get("likely") or (
+        "warm-up" if inversion.get("first_in_sweep") else "unexplained")
+
+
 def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
                       records: Optional[List[Dict[str, Any]]] = None) -> str:
     parts: List[str] = []
@@ -721,6 +730,14 @@ def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
     if scaling:
         parts.append(scaling)
 
+    warmup = _index_warmup_section(summary)
+    if warmup:
+        parts.append(warmup)
+
+    fixed = _fixed_ef_section(records or [])
+    if fixed:
+        parts.append(fixed)
+
     if summary.get("recall_floor_gaps"):
         parts.append(
             "\n### Recall floors an engine never approached\n\n"
@@ -767,7 +784,7 @@ def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
 
     if summary.get("qps_inversions"):
         inversions = summary["qps_inversions"]
-        severe = [i for i in inversions if not i.get("first_in_sweep")]
+        severe = [i for i in inversions if _inversion_likely(i) != "warm-up"]
         parts.append(
             "\n### Throughput that rose as query effort rose\n\n"
             "Examining more candidates cannot be faster on the same index, so "
@@ -779,7 +796,9 @@ def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
             "configuration pays for a cold cache and the second looks faster. "
             "Anything larger, or anywhere other than the first step, is not "
             "explicable that way and the affected points should be "
-            "re-measured rather than published.\n"
+            "re-measured rather than published. A sweep whose index was "
+            "warmed before its first configuration has no cold first point, "
+            "so a first-step inversion there is unexplained too.\n"
         )
         rows = [[_label(i.get("engine", "?")),
                  str(i.get("storage_engine") or "—"),
@@ -787,7 +806,8 @@ def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
                  f"{i.get('from_ef')} → {i.get('to_ef')}",
                  f"{i.get('from_qps'):,} → {i.get('to_qps'):,}",
                  f"{i.get('ratio')}x",
-                 "warm-up" if i.get("first_in_sweep") else "**unexplained**"]
+                 ("warm-up" if _inversion_likely(i) == "warm-up"
+                  else "**unexplained**")]
                 for i in inversions[:30]]
         parts.append(_md_table(
             ["Engine", "Storage", "ef_construction", "ef_search",
@@ -797,7 +817,7 @@ def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
         if severe:
             worst = severe[0]
             parts.append(
-                f"\n**{len(severe)} of these are not at the first step.** The "
+                f"\n**{len(severe)} of these are not the cold-first-step artifact.** The "
                 f"largest is {_label(worst['engine'])}, where ef_search "
                 f"{worst['from_ef']} measured {worst['from_qps']:,} QPS and "
                 f"ef_search {worst['to_ef']} measured {worst['to_qps']:,} — "
@@ -936,6 +956,12 @@ def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
         if more > 0:
             parts.append(f"\n_…and {more} more._\n")
 
+    # Only when there is something to say: `if not parts` below picks the
+    # "no validity problems" ending, and an appended empty string retires it.
+    provenance_notices = _provenance.validity_notices(manifest, summary)
+    if provenance_notices:
+        parts.append(provenance_notices)
+
     if summary.get("passes_without_a_tree"):
         # The notice that has to be IN the document. `full-20261015-215006`
         # ran both passes, recorded one pass's `ann_fingerprint`, and
@@ -1059,6 +1085,41 @@ def _validity_section(manifest: Dict[str, Any], summary: Dict[str, Any],
     return "".join(parts)
 
 
+def _fixed_ef_section(records: List[Dict[str, Any]]) -> str:
+    """Validity: throughput measured at one ef_search, not at one recall.
+
+    `ef_mode: fixed` gives every engine the same `ef_search`, which is the
+    same *intention* and not the same accuracy -- two engines at ef 100 can
+    sit at recall 0.98 and 0.80, and the faster one may simply be doing less
+    work per query. §6 says so for the operating-point table; a reader who
+    starts at §7's throughput needs it in Validity, with the ef named.
+    """
+    from report.operating import is_fixed_ef
+    # `is_fixed_ef`, not `ef_mode == "fixed"`: records from before ops
+    # measurement version 4 carry no `ef_mode` and WERE fixed -- the 25 Aug
+    # run is one, and it is the run this section was written for.
+    fixed = [r for r in records
+             if r.get("phase") in ("concurrency", "filtered", "churn")
+             and is_fixed_ef(r)]
+    if not fixed:
+        return ""
+    efs = sorted({r.get("ef_search") for r in fixed
+                  if r.get("ef_search") is not None})
+    named = ", ".join(str(ef) for ef in efs) or "unrecorded"
+    return (
+        "\n### Throughput at a fixed ef_search, not at a fixed recall\n\n"
+        f"This run measured at a fixed ef -- `ef_mode: fixed`, or a harness "
+        f"from before ops measurement version 4, which had no other mode and "
+        f"records no `ef_mode`: every engine's concurrency, "
+        f"filtered and churn figures were measured at ef_search = {named}, "
+        f"whatever recall that bought each engine. Throughput is therefore "
+        f"**not compared at equal recall** in §7-§9 -- an engine with a "
+        f"higher QPS there may be answering a cheaper, less accurate query. "
+        f"The Recall@k column beside each figure is the measure of how far "
+        f"apart they were; `ef_mode: calibrated` holds every engine to one "
+        f"recall target instead.\n")
+
+
 def _scaling_refused_section(summary: Dict[str, Any]) -> str:
     """Validity: the scaling efficiencies this report refuses to publish.
 
@@ -1083,50 +1144,35 @@ def _scaling_refused_section(summary: Dict[str, Any]) -> str:
         "`Scaling efficiency` divides an N-client throughput by N times a "
         "one-client throughput. **That is a statement about the engine only "
         "if N queries were actually in flight**, and at the points below "
-        "fewer than half of them were: the queries each window counted, times "
-        "their median latency, divided by the window, came out below half the "
-        "client count. The efficiency figure there is not a measurement of "
-        "how this engine scales, so the table prints "
+        "they were not: either the clients had fewer than half their queries "
+        "outstanding on average — the sum of every in-window query's "
+        "duration over the window, Little's law with no estimator in it — or "
+        "neither the median estimate nor the throughput shows the queries "
+        "being served at once. The efficiency figure there is not a "
+        "measurement of how this engine scales, so the table prints "
         f"*{SCALING_REFUSED_CELL}* in that cell and the chart's efficiency "
         "panel omits the point. **The QPS and the latency percentiles are "
         "left in place and are real**: the pool did answer that many queries "
         "at those latencies. It is the division by the client count that has "
         "no basis.\n\n"
-        "**Since `ops_measurement_version` 6 this is a tripwire rather than "
-        "an expected finding, and that changes what it can mean.** Each "
-        "client is a forked OS process with its own interpreter, so the cause "
-        "this refusal was built for is no longer in the measurement path: "
-        "until version 6 the clients were Python threads in one interpreter, "
-        "and a client library that did not release the interpreter lock "
-        "around its socket wait made them take turns. They cannot now. Three "
-        "things can still put a point here. The engine may itself answer one "
-        "query at a time, in which case there is a real finding, but it is "
-        "\"this engine serializes queries\" and not \"this engine scales at "
-        "0.25\". This harness's pool may have a defect, which is the case the "
-        "guard is kept as a tripwire for. Or the engine's service time may be "
-        "skewed far enough that the median this figure uses sits well below "
-        "the mean — **a known false positive**, because the rule was "
-        "calibrated against synthetic servers of deterministic cost; it is "
-        "being addressed separately and is not claimed sound here. "
-        "**`Queries outstanding` beside the cell narrows the field and does "
-        "not close it, and that is worth saying because the pair used to be "
-        "an answer.** Outstanding near the client count while in service "
-        "sits near one says the clients were waiting rather than being "
-        "served; it does not say what they waited for. Since version 6 the "
-        "skew above and a serializing engine whose own service time is "
-        "skewed look identical from here. The one case it does separate is a "
-        "saturated server of *deterministic* service time: a real queue "
-        "raises its median along with everything else, so it lands at its "
-        "client count — measured at 1.004 of it — and is never refused at "
-        "all. Read the Client CPU column with it.\n\n"
-        "**The two-engine argument this section used to make is gone with its "
-        "premise.** It read a refusal on one engine and not another as a "
-        "property of the client library, because the engines here do not "
-        "share one — pgvector goes through psycopg3 and the MySQL family "
-        "through MariaDB Connector/C. That inference needed both libraries' "
-        "locks to be in one interpreter with the clients, and nothing "
-        "replaces it: a per-library difference is no longer something this "
-        "measurement can see.\n",
+        "**Since `ops_measurement_version` 9 the mean-based figure is the "
+        "primary one.** Until then this section was keyed to the MEDIAN "
+        "estimate — queries × p50 ÷ window — because, while the clients were "
+        "Python threads, a client waiting for the interpreter lock still "
+        "counted as in flight and the mean was blind to it. The clients have "
+        "been separate OS processes since version 6, so that reason is gone, "
+        "and the median kept only its own bias: under a heavy tail it "
+        "undercounts by p50 ÷ mean (MariaDB 12.3 at 32 clients on "
+        "`full-20260825`, p50 34 ms against p99 1,043 ms). A skewed service "
+        "time is therefore no longer a refusal; it is noted "
+        f"`tail_dominated` ({TAIL_DOMINATED_MARK}) beside a published figure. "
+        "What remains here is a pool whose clients did not keep their "
+        "queries in flight — a fault in this harness, the case the guard is "
+        "kept as a tripwire for — or an engine that answers one query at a "
+        "time with a tail, which a client clock cannot tell apart from "
+        "clients taking turns. Read the Client CPU column with it. Records "
+        "from before version 9 were judged by the median rule and keep that "
+        "verdict.\n",
     ]
     rows = []
     for r in sorted(refused, key=lambda r: (r.get("dataset") or "",
@@ -1136,8 +1182,8 @@ def _scaling_refused_section(summary: Dict[str, Any]) -> str:
         rows.append([
             _label(r.get("engine", "?")), r.get("dataset", "?"),
             _storage(r), str(r.get("clients", "—")),
-            _fmt(extra.get("served_concurrency"), 2),
             _fmt(extra.get("outstanding_concurrency"), 2),
+            _fmt(extra.get("served_concurrency"), 2),
             _fmt(r.get("qps"), 0),
             # The figure that is not published, shown here and nowhere else.
             # Withholding it from the table and then hiding it entirely would
@@ -1147,25 +1193,52 @@ def _scaling_refused_section(summary: Dict[str, Any]) -> str:
             _fmt(extra.get("client_cpu_seconds"), 1, " s"),
         ])
     parts.append(_md_table(
-        ["Engine", "Dataset", "Storage", "Clients", "Queries in service",
-         "Queries outstanding", "QPS", "Efficiency withheld", "Client CPU"],
+        ["Engine", "Dataset", "Storage", "Clients", "In service (mean)",
+         "Median estimate", "QPS", "Efficiency withheld", "Client CPU"],
         rows))
     parts.append(
-        "\n**Queries outstanding is the exact figure and is not the one the "
-        "refusal uses.** It is the sum of every in-window query's duration "
-        "over the window — Little's law with no estimator in it — and it "
-        "**counts any wait as flight**, because from the client's clock a "
-        "query it is blocked on is in flight whatever it is blocked on. That "
-        "used to be said of the interpreter lock specifically, which was the "
-        "only cause there was; the cause is gone and the blindness is not. "
-        "Over ten readings — five synthetic drivers through the retired "
-        "thread pool and five through this one, efficiencies from 0.249 to "
-        "1.009 — it stayed between 0.84 and 1.00 of the client count on "
-        "every one: exact, and blind to the thing this section is about. It "
-        "is printed because the pair is the diagnostic — outstanding at the "
-        "client count while in service sits near one is the signature of "
-        "waiting rather than of serving.\n")
+        "\n**In service (mean)** is the exact figure the refusal reads since "
+        "version 9: the sum of every in-window query's duration over the "
+        "window. It counts any wait as flight — from the client's clock a "
+        "query it is blocked on is in flight whatever it is blocked on — "
+        "which is why it could not be the guard while the clients shared one "
+        "interpreter lock, and can be now. **Median estimate** is queries × "
+        "p50 ÷ window, the figure the guard used before version 9; the two "
+        "differ by exactly p50 ÷ mean, so a median estimate far under the "
+        "mean says the latency had a tail and nothing more.\n")
     return "".join(parts)
+
+
+def _index_warmup_section(summary: Dict[str, Any]) -> str:
+    """Validity: ann sweeps whose one-time index warm-up did not converge.
+
+    `summary["index_warmup_flags"]` (`report/generate.index_warmup_flags`):
+    a warm-up that hit its cap without two batches agreeing, or that ran
+    fewer than two batches. Either way the sweep's first configuration may
+    have met the cold cache the warm-up exists to absorb, and its QPS is
+    then the cache's, not the engine's.
+    """
+    flags = summary.get("index_warmup_flags") or []
+    if not flags:
+        return ""
+    rows = [[_label(f.get("engine") or "?"), f.get("dataset") or "?",
+             f.get("resource_pass") or "—", f.get("build") or "—",
+             _fmt(f.get("queries"), 0),
+             {True: "yes", False: "**no**"}.get(f.get("converged"), "—"),
+             _fmt(f.get("seconds"), 1, " s")]
+            for f in flags]
+    return (
+        "\n### Index warm-ups that did not settle\n\n"
+        "Each ann sweep warms its index before the first configuration, "
+        "querying until two consecutive 200-query batches agree to within 5% "
+        "or 5,000 queries have run. The sweeps below either reached that cap "
+        "without agreeing or ran fewer than 400 queries — two batches, the "
+        "least that can be compared — so the **first configuration of each "
+        "may still have been measured against a cold cache**, and a QPS "
+        "rise from it to the next point is that artefact rather than the "
+        "engine.\n"
+        + _md_table(["Engine", "Dataset", "Pass", "Build",
+                     "Warm-up queries", "Converged", "Warm-up time"], rows))
 
 
 def _known_asymmetries(summary: Optional[Dict[str, Any]] = None) -> str:
@@ -1308,6 +1381,9 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
     # pass's heading correctly and every later one bare, which the §4 heading
     # test caught and inspection did not.
     many_passes = len(described_passes(summary)) > 1
+    # Lazily: `frontier_render` imports this module's cell helpers at its
+    # own import time, and this module is the one `generate` imports first.
+    from report import frontier_render
     for dataset, by_pass in sorted(per_dataset.items()):
         for resource_pass, per_engine in sorted(
                 by_pass.items(), key=lambda kv: str(kv[0])):
@@ -1352,13 +1428,19 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
                     if (value != "—" and at is not None and lowest is not None
                             and lowest > floor / 100.0):
                         value += " †"
-                    return value
+                    # The headline is the fastest build swept, which
+                    # may not be the index §5 onward measured. Said beside
+                    # the number, because that is where it gets copied from.
+                    if value != "—":
+                        value += frontier_render.headline_mark(entry, floor)
+                    return _with_build(value, entry.get(
+                        f"qps_at_recall_{floor}_build_label"))
 
                 # The range, not only the best. Two identical floor columns mean
                 # the engine has no measurement between them, and the lowest recall
                 # it reached is the number that says so.
-                low, high = entry.get("min_recall"), entry.get("max_recall", 0)
-                span = f"{low:.4f} to {high:.4f}" if low is not None else f"{high:.4f}"
+                span = _recall_span(entry.get("min_recall"),
+                                    entry.get("max_recall"))
                 rows.append([
                     _label(engine),
                     cell(90), cell(95), cell(99),
@@ -1372,8 +1454,9 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
             ))
             parts.append(
                 "\n_QPS at a recall floor is the comparison an operator makes: how fast "
-                "is the engine at an accuracy I can accept. A dash means the engine did "
-                "not reach that recall anywhere in the swept grid._\n"
+                "is the engine at an accuracy I can accept, over every build this run "
+                "swept. The build that produced each figure is printed under it. A "
+                "dash means no build swept reached that recall._\n"
                 "\n_Each cell also carries the recall the figure was measured at. "
                 "A frontier reports the fastest configuration at or above the "
                 "floor, and that configuration is frequently well above it, so two "
@@ -1386,10 +1469,138 @@ def _headline_tables(summary: Dict[str, Any]) -> str:
                 "number shown is its throughput at the higher recall printed beside "
                 "the dagger. Those cells are not comparable with engines that do have "
                 "a point near the floor — they are taken at a materially harder task. "
-                "Lowering the graph degree M is what would produce points there; this "
-                "run pins M=16 for every engine._\n"
+                "A lower graph degree M or build effort is what would produce points "
+                "there; the swept-space table below says what this run varied._\n"
             )
+            parts.append(frontier_render.mismatch_notes(per_engine))
+            parts.append(frontier_render.swept_space_table(per_engine))
+            parts.append(frontier_render.smallest_table(per_engine))
+            parts.append(frontier_render.build_cost_table(per_engine))
+            parts.append(frontier_render.ops_build_table(per_engine,
+                                                         FLOOR_MARK))
+            parts.append(_reference_build_notes(per_engine))
     return "".join(parts) or "_No recall/QPS data in this run._\n"
+
+
+def _with_build(value: str, label: Optional[str]) -> str:
+    """A floor figure with the build it came from on the line below it.
+
+    `full-20260825` printed Percona Search's 138 with nothing to say it came
+    from the unquantized index while every other figure for the engine came
+    from the scalar one. A number that names its build cannot be mistaken
+    for another build's.
+    """
+    if value == "—" or not label:
+        return value
+    return f"{value}<br>`{label}`"
+
+
+def _frontier_intro(summary: Dict[str, Any]) -> str:
+    """§4's opening sentence. It said "Pareto frontier" for every engine,
+    including those measured at one build with only ef_search varied, which
+    is a curve; `frontier_render.section_intro` words it per run."""
+    from report import frontier_render
+    return frontier_render.section_intro(summary)
+
+
+def _recall_span(low: Optional[float], high: Optional[float]) -> str:
+    if high is None:
+        return "—"
+    return f"{low:.4f} to {high:.4f}" if low is not None else f"{high:.4f}"
+
+
+def _reference_build_notes(per_engine: Dict[str, Any]) -> str:
+    """Why a row of the ops-build table holds dashes.
+
+    One sentence per engine whose reference build left a cell empty, giving
+    the build's own ceiling: "its reference build peaks at recall 0.892" is
+    what the 25 Aug post needed beside Percona Search, and printed 138 from
+    another index instead. The headline now does take the fastest build --
+    named, and marked when it is not the ops build -- so these notes explain
+    the secondary table rather than the headline.
+    """
+    lines = []
+    for engine, entry in sorted(per_engine.items()):
+        build = entry.get("reference_build_label") or "not recorded"
+        if not any(entry.get(f"reference_qps_at_recall_{f}") is None
+                   for f in (90, 95, 99)):
+            continue
+        source = entry.get("reference_source") or ""
+        if entry.get("reference_build") is None and source.startswith(
+                "ambiguous"):
+            lines.append(
+                f"- **{_label(engine)}**: the ops build is ambiguous "
+                f"-- {source.split(': ', 1)[-1]} -- so this table prints no "
+                f"figure rather than one pooled across them.\n")
+        elif entry.get("reference_build") is None:
+            lines.append(
+                f"- **{_label(engine)}**: no ops build is recorded for this "
+                f"run and the grid swept {entry.get('sweep_builds', 0)} "
+                f"builds, so this table prints no figure rather than guess "
+                f"which of them the ops pass measured.\n")
+        elif entry.get("reference_max_recall") is None and any(
+                value is None for value in entry["reference_build"].values()):
+            # Valkey on the 25 Aug run: the ops pass left efC to the server,
+            # so whether an ann build is the same index cannot be said --
+            # which is not the same as "nothing was measured at it".
+            lines.append(
+                f"- **{_label(engine)}**: its ops build (`{build}`) left a "
+                f"setting to the server default, which no record names, so "
+                f"no swept build can be matched to it and every floor here "
+                f"reads \"—\".\n")
+        elif entry.get("reference_max_recall") is None:
+            lines.append(
+                f"- **{_label(engine)}**: no recall point was measured at its "
+                f"ops build (`{build}`), so every floor here reads \"—\".\n")
+        else:
+            lines.append(
+                f"- **{_label(engine)}**: its ops build (`{build}`) peaks at "
+                f"recall {entry['reference_max_recall']:.3f}; a \"—\" here "
+                f"means that build has no point at or above the floor, "
+                f"whatever another build reached.\n")
+    return (_chosen_build_notes(per_engine)
+            + ("\n" + "".join(lines) if lines else ""))
+
+
+#: How `report/builds.py` prefixes a source the ops pass chose per dataset
+#: under `ops.build_selection: frontier`.
+_CHOSEN_PREFIX = "manifest: "
+_CHOSEN_WORDS = {
+    "frontier": "chosen from this run's frontier as the build fastest at "
+                "recall {target}",
+    "below_target": "chosen from this run's frontier, but NO swept build "
+                    "reached recall {target}; this is the one with the "
+                    "highest recall",
+    "fallback_reference": "the declared reference build, measured because "
+                          "the ann phase left no frontier to choose from "
+                          "(see the run's warnings)",
+}
+
+
+def _chosen_build_notes(per_engine: Dict[str, Any]) -> str:
+    """One line per engine whose ops build was chosen rather than declared.
+
+    `ops.build_selection: frontier` picks the ops build off the ann phase,
+    so the reference build differs per engine and dataset and may be a
+    fallback; a reader has to be told which, not left to assume the
+    declared build.
+    """
+    lines = []
+    for engine, entry in sorted(per_engine.items()):
+        source = str(entry.get("reference_source") or "")
+        if not source.startswith(_CHOSEN_PREFIX):
+            continue
+        how = source[len(_CHOSEN_PREFIX):]
+        kind, _, target = how.partition("@")
+        words = _CHOSEN_WORDS.get(kind, how).format(target=target or "?")
+        build = entry.get("reference_build_label") or "not recorded"
+        lines.append(f"- **{_label(engine)}**: `{build}` -- {words} "
+                     f"(`{how}`).\n")
+    if not lines:
+        return ""
+    return ("\n_The ops build was chosen per engine from this run's ann "
+            "frontier (`ops.build_selection: frontier`) rather than declared; "
+            "how each engine's was chosen:_\n\n" + "".join(lines))
 
 
 # The ops harness stamps a storage engine on every unit and defaults to
@@ -1669,6 +1880,13 @@ SCALING_REFUSED_CELL = f"{SCALING_REFUSED_MARK} not measurable"
 #: every driver module in to obtain one string. The two declarations are
 #: pinned together by `tests/test_g1_client_concurrency.py`.
 SCALING_CONCURRENCY_NOT_ACHIEVED = "concurrency_not_achieved"
+
+#: `extra.scaling_note` when the window's median sat under half its mean
+#: (ops version 9; `harness/metrics/scaling.SCALING_TAIL_DOMINATED`, pinned
+#: equal by a test). A NOTE: the cell carries the mark beside a published
+#: figure, and nothing is withheld for it.
+TAIL_DOMINATED = "tail_dominated"
+TAIL_DOMINATED_MARK = "△"
 
 #: Footnote marks for the two statuses the ef sweep can end on without having
 #: put an engine at the target recall. `report/charts.py` imports these rather
@@ -2012,6 +2230,7 @@ def _engines_without_an_operating_point(summary: Dict[str, Any]
 # defect exactly, one axis further out.
 def _concurrency_table(summary: Dict[str, Any]) -> str:
     rows = []
+    points = _operating_point_index(summary)
     for r in sorted(summary.get("concurrency", []),
                     key=lambda r: (r.get("dataset", ""), r.get("engine", ""),
                                    # All four ops-unit axes sort ahead of the
@@ -2076,14 +2295,178 @@ def _concurrency_table(summary: Dict[str, Any]) -> str:
             _fmt(float(pool) if pool is not None else None, 0),
             _fmt(extra.get("query_reuse"), 2, "x"),
             _client_cpu_cell(extra),
+            # Beside the client's, so a flattening curve says whose ceiling
+            # it is: an engine out of cores, stalled, or idle behind a lock.
+            *_server_cells(r, summary.get("server_windows")),
+            *_operating_point_cells(r, points),
         ])
     return _md_table(
         ["Engine", "Dataset", "Pass", "M", "Build mode", "Storage", "Clients",
          "QPS", "Spread", "Recall@k", "p50 (ms)", "p95 (ms)", "p99 (ms)",
          "Scaling efficiency", "Queries in service", "Query pool", "Reuse",
-         "Client CPU"],
+         "Client CPU", "Server CPU", "Server CPU pressure",
+         "Calibrated ef", "Calibration recall"],
         rows,
-    ) + BUILD_MODE_COLUMN_NOTE + _concurrency_notes(summary)
+    ) + BUILD_MODE_COLUMN_NOTE + OPERATING_POINT_NOTE \
+        + _concurrency_notes(summary)
+
+
+#: What the limiter table is and, as importantly, what it is not.
+LIMITER_NOTE = (
+    "\n_**What limited throughput** puts the measured components of each "
+    "point side by side: the client container's CPU, the server's CPU and "
+    "CPU pressure over the same window, and the server's own largest wait "
+    "(performance_schema for the MySQL family, INFO commandstats for "
+    "Valkey -- service time, not waiting -- and mongod's lock waits for "
+    "MongoDB), read on a separate connection before and after the window "
+    "and so also spanning the pool's warm-up. "
+    "**Largest measured** names the largest of the first three shares and "
+    "is not a verdict: a wait profile has no common unit with them and is "
+    "shown, not ranked. A dash with a reason means the engine could not "
+    "say, which is not the same as nothing waited. **Profile** links the "
+    "perf stacks for the one EXTRA window `ops.profile_window_clients` "
+    "asked for: same client count and length, run after the measured "
+    "repeats and never one of them, so no published figure was taken under "
+    "the profiler. pgvector has no cumulative wait counters; its wait column "
+    "is a dash unless `ops.server_wait_sampler` sampled pg_stat_activity "
+    "during the window, which every such record states._\n")
+
+
+def _limiter_table(summary: Dict[str, Any]) -> str:
+    """One "what limited throughput" row per concurrency point."""
+    from report.limiters import (largest_component, profile_cell,
+                                 top_wait_cell)
+    from report.server_windows import window_key
+    windows = summary.get("server_windows") or {}
+    rows = []
+    for r in sorted(summary.get("concurrency", []),
+                    key=lambda r: (r.get("dataset", ""), r.get("engine", ""),
+                                   r.get("resource_pass") or "",
+                                   r.get("m") or 0,
+                                   r.get("build_mode") or "",
+                                   r.get("storage_engine") or "",
+                                   r.get("clients") or 0)):
+        extra = r.get("extra") or {}
+        figures = windows.get(window_key(r)) or {}
+        server, pressure = _server_cells(r, windows)
+        rows.append([
+            _label(r.get("engine", "?")), r.get("dataset", "?"),
+            r.get("resource_pass") or "—", _fmt(r.get("m"), 0),
+            r.get("build_mode") or "—", _storage(r),
+            str(r.get("clients", "—")),
+            _client_cpu_cell(extra), server, pressure,
+            top_wait_cell(extra),
+            profile_cell(r, summary.get("profiles")),
+            largest_component(extra.get("client_cpu_util"),
+                              figures.get("cpu_util"),
+                              figures.get("cpu_pressure")),
+        ])
+    return ("\n#### What limited throughput\n" + _md_table(
+        ["Engine", "Dataset", "Pass", "M", "Build mode", "Storage", "Clients",
+         "Client CPU", "Server CPU", "Server CPU pressure", "Top server wait",
+         "Profile", "Largest measured"],
+        rows,
+    ) + LIMITER_NOTE)
+
+
+#: What the two columns every concurrency and churn table ends with --
+#: "Calibrated ef" and "Calibration recall" -- mean. Spelled as literals in
+#: each header rather than unpacked from a constant, because
+#: `tests/test_e10_report_unit_join_keys.py` finds the unit tables by an AST
+#: scan for literal header lists. The calibration point is what makes a
+#: throughput figure comparable: the policy chose that ef because the sweep
+#: measured the target recall there.
+OPERATING_POINT_NOTE = (
+    "\n_**Calibrated ef** is the ef_search the calibration chose for this "
+    "unit and every throughput figure in the row was measured at; "
+    "**Calibration recall** is the recall the sweep measured there, which is "
+    "the accuracy the throughput was bought at. A status beside it means the "
+    "sweep did not put the engine at the target -- `target_unreached` "
+    f"{UNREACHED_MARK} (never got there: the throughput is at a lower recall) "
+    f"or `floor_above_target` {FLOOR_MARK} (could not be slowed to it) -- and "
+    "that unit is not ranked in the peak-throughput headline. "
+    "`<ef> (fixed)` with *not calibrated* means the unit ran at a "
+    "declared ef_search (`ef_mode: fixed`, or a record from before ops "
+    "measurement version 4), so its throughput is not at equal recall with "
+    "any other row._\n")
+
+
+#: The two cells of a unit measured at a declared ef. Words, not a dash: a
+#: dash reads as "not recorded", and the point is that no recall target was
+#: pursued, so the QPS beside it is not at any engine's equal recall.
+FIXED_EF_RECALL_CELL = "not calibrated"
+
+
+def _operating_point_cells(row: Dict[str, Any], points: Any) -> List[str]:
+    from report.operating import UNRANKED_STATUSES, is_fixed_ef, status_of
+    point = points.find(row)
+    status = status_of(row, point)
+    ef = (point or {}).get("ef_search")
+    # Records only: a churn-under-writes row is derived and carries no
+    # `extra`, so the pre-version-4 rule would read every one as fixed.
+    if point is None and row.get("phase") and is_fixed_ef(row):
+        return [f"{_fmt(row.get('ef_search'), 0)} (fixed)",
+                FIXED_EF_RECALL_CELL]
+    if ef is None and point is None:
+        return ["—", "—"]
+    recall = _fmt((point or {}).get("recall_at_k"), 4)
+    if status in UNRANKED_STATUSES:
+        mark = UNREACHED_MARK if status == "target_unreached" else FLOOR_MARK
+        recall = f"{recall} {status} {mark}"
+    return [_fmt(ef, 0), recall]
+
+
+def _operating_point_index(summary: Dict[str, Any]) -> Any:
+    from report.operating import OperatingPointIndex
+    return OperatingPointIndex(summary.get("operating_points") or [])
+
+
+def _peak_throughput_table(summary: Dict[str, Any]) -> str:
+    """The cross-engine concurrency headline, ranked only where comparable.
+
+    Built from `summary["concurrency_peaks"]` (`report/operating.py`):
+    client-bound points never set a peak, and a unit whose calibration missed
+    the target shows its status where the number would be and sorts after
+    every ranked unit -- its throughput is at a recall the others were not
+    held to.
+    """
+    peaks = summary.get("concurrency_peaks") or []
+    if not peaks:
+        return ""
+    rows = []
+    rank = 0
+    for p in peaks:
+        if p["ranked"]:
+            rank += 1
+            figure = _fmt(p["peak_qps"], 0)
+            clients = str(p.get("peak_clients") or "—")
+        else:
+            figure = f"not ranked: {p.get('status') or 'no point'}"
+            clients = "—"
+        rows.append([
+            _label(p.get("engine") or "?"), p.get("dataset") or "?",
+            p.get("resource_pass") or "—", _fmt(p.get("m"), 0),
+            p.get("build_mode") or "—", _storage(p),
+            str(rank) if p["ranked"] else "—",
+            figure, clients, _fmt(p.get("scaling_efficiency"), 2),
+            (f"{_fmt(p.get('ef_search'), 0)} (fixed)" if p.get("fixed_ef")
+             else _fmt(p.get("ef_search"), 0)),
+            (FIXED_EF_RECALL_CELL if p.get("fixed_ef")
+             else _fmt(p.get("calibration_recall"), 4)),
+            str(p.get("client_bound_excluded") or 0),
+        ])
+    return (
+        "\n**Peak throughput.** Each unit's highest concurrency QPS and the "
+        "client count it scaled to, ranked within the run. Client-bound "
+        f"points ({CLIENT_BOUND_MARK}) are excluded -- the clients were the "
+        "ceiling there -- and counted in the last column; a unit whose "
+        "calibration missed the recall target is listed but not ranked.\n"
+        + _md_table(["Engine", "Dataset", "Pass", "M", "Build mode",
+                     "Storage", "Rank", "Peak QPS", "At clients",
+                     "Scaling efficiency",
+                     "Calibrated ef", "Calibration recall",
+                     "Client-bound points excluded"], rows)
+        + "\n")
 
 
 def _efficiency_cell(extra: Dict[str, Any]) -> str:
@@ -2116,7 +2499,15 @@ def _efficiency_cell(extra: Dict[str, Any]) -> str:
 
 def _served_cell(extra: Dict[str, Any], clients: Any) -> str:
     """How many queries the pool had in service, against how many it had
-    clients.
+    clients: the mean-based figure first, the median estimate second.
+
+    Ops version 9 put `outstanding_concurrency` first, labelled "(mean)", and
+    `served_concurrency` second as "median est.". The order was the other
+    way round while the guard read the median, and on `full-20260825` that
+    printed a MariaDB 12.3 32-client point as a fraction of the queries it
+    held because its p99 was thirty times its p50. A record with no
+    `outstanding_concurrency` (written before G1 recorded it) still renders
+    the median figure alone, as it always did.
 
     `served / clients` written out as a pair rather than as the ratio the
     status is computed from, because the two numbers are what a reader needs
@@ -2128,12 +2519,49 @@ def _served_cell(extra: Dict[str, Any], clients: Any) -> str:
     written before this existed, and where the window counted no query.
     """
     served = extra.get("served_concurrency")
-    if served is None:
+    outstanding = extra.get("outstanding_concurrency")
+    if served is None and outstanding is None:
         return "—"
-    text = f"{served:,.2f} of {clients}" if clients else f"{served:,.2f}"
+    of = f" of {clients}" if clients else ""
+    if outstanding is None:
+        text = f"{served:,.2f}{of}"
+    else:
+        text = f"{outstanding:,.2f}{of} (mean)"
+        if served is not None:
+            text += f" · {served:,.2f} median est."
+    if extra.get("scaling_note") == TAIL_DOMINATED:
+        text += f" {TAIL_DOMINATED_MARK}"
     if extra.get("scaling_status") == SCALING_CONCURRENCY_NOT_ACHIEVED:
         return f"{text} {SCALING_REFUSED_MARK}"
     return text
+
+
+def _server_cells(row: Dict[str, Any], windows: Dict[Any, Any]) -> List[str]:
+    """Server CPU and server CPU pressure over this row's window.
+
+    From `report/server_windows.py`, joined by the window's wall-clock ends.
+    Cores and, when the manifest recorded the cpuset, utilisation; pressure
+    is the share of the window in which a runnable task waited for CPU.
+    Dashes for a record from before ops version 9, which has no window ends.
+    """
+    from report.server_windows import window_key
+    figures = (windows or {}).get(window_key(row))
+    if not figures:
+        return ["—", "—"]
+    cores = figures.get("cpu_cores")
+    util = figures.get("cpu_util")
+    if cores is None:
+        cpu = "—"
+    elif util is not None:
+        cpu = f"{cores:,.1f} cores ({util:.0%})"
+    else:
+        cpu = f"{cores:,.1f} cores"
+    pressure = figures.get("cpu_pressure")
+    io = figures.get("io_pressure")
+    cell = "—" if pressure is None else f"{pressure:.0%}"
+    if io is not None:
+        cell += f" (io {io:.0%})"
+    return [cpu, cell]
 
 
 def _client_cpu_cell(extra: Dict[str, Any]) -> str:
@@ -2203,9 +2631,28 @@ _CONCURRENCY_NOTES = (
         f"still the case to re-measure, and `Queries in service` beside it "
         f"is the column that was added to tell the two apart.\n",
         f"\n**Queries in service** is how many queries the pool actually had "
-        f"being answered on average, against how many clients it ran: the "
-        f"queries the window counted times their median latency, divided by "
-        f"the window. **Scaling efficiency divides an N-client throughput by "
+        f"in flight on average, against how many clients it ran, two ways. "
+        f"**(mean)** is the exact figure — every in-window query's duration "
+        f"summed over the window, Little's law with no estimator — and since "
+        f"`ops_measurement_version` 9 it is the one the refusal reads. "
+        f"**median est.** is the queries the window counted times their "
+        f"MEDIAN latency over the window, the figure the guard read before "
+        f"version 9; the two differ by exactly p50 ÷ mean, and where the "
+        f"median estimate is under half the mean the cell carries "
+        f"{TAIL_DOMINATED_MARK} (`tail_dominated`) — a note that the latency "
+        f"had a heavy tail, never a refusal. **What the version-9 refusal "
+        f"detects is client-side starvation** — the clients kept fewer than "
+        f"half their queries in flight — and the case where the median "
+        f"estimate and a credible efficiency are both under half. **It does "
+        f"not detect a server that answers one query at a time**: from the "
+        f"clients' clocks that looks exactly like a saturated server "
+        f"(in service ≈ N, efficiency ≈ 1/N) and is published with its low "
+        f"efficiency. Serialization and saturation inside the server are "
+        f"told apart, where they can be, by the Server CPU and Server CPU "
+        f"pressure columns, not by this one. The rule the rest of this "
+        f"paragraph describes is the PRE-version-9 one, still the verdict "
+        f"on any older record in this report. **Scaling efficiency divides "
+        f"an N-client throughput by "
         f"N times a one-client throughput, so it describes the engine only if "
         f"N queries were in flight** — and where this column says they were "
         f"not, the efficiency cell reads *{SCALING_REFUSED_CELL}* and no "
@@ -2222,15 +2669,28 @@ _CONCURRENCY_NOTES = (
         f"narrowed to it on purpose**: every calibration driver has a "
         f"deterministic per-query cost, so a server whose service time is "
         f"skewed enough to put its median well below its mean can still be "
-        f"refused here. A skew-triggered refusal is a known false positive "
-        f"and is being handled separately; this section does not claim the "
-        f"rule is sound. What a refusal no longer means is Python: until "
+        f"refused here. That skew-triggered refusal was this rule's known "
+        f"false positive, and it is why version 9 moved the refusal to the "
+        f"mean-based figure. What a refusal no longer means is Python: until "
         f"version 6 the clients shared one interpreter lock and a serializing "
         f"client library was the expected cause, and each client is now its "
         f"own process. An engine that answers one query at a time is the "
         f"cause that remains — read the Client CPU cell beside it, which "
         f"says whether the harness was busy while this column said it was "
-        f"not.\n",
+        f"not. Since version 9 an efficiency divided by a one-client "
+        f"baseline whose median was more than 1.4x slower than this point's "
+        f"is withheld too (`extra.efficiency_reliability: "
+        f"baseline_not_credible`): a warm baseline cannot get faster as "
+        f"clients are added, so that efficiency describes a cold baseline.\n",
+        "\n**Server CPU** is the server container's cgroup CPU over the "
+        "median window, in cores and as a share of its cpuset where the "
+        "manifest recorded one; **Server CPU pressure** is the share of the "
+        "window in which at least one of its runnable tasks waited for a CPU "
+        "(cgroup `cpu.pressure` some), with IO pressure beside it. Both are "
+        "differences of cumulative counters across the samples inside the "
+        "window, joined by the window's recorded wall-clock ends, so a dash "
+        "means a record from before ops measurement version 9 or a kernel "
+        "that publishes no pressure — never an idle server.\n",
 )
 
 
@@ -2578,7 +3038,19 @@ def _filtered_table(summary: Dict[str, Any]) -> str:
          "Recall near_fail", "pass/fail n", "QPS", "p99 (ms)", "Index used",
          "Short results", "Queries", "Iterative scan", "Tied with"],
         rows,
-    ) + TIE_COLUMN_NOTE
+    ) + TIE_COLUMN_NOTE + FILTERED_EF_NOTE
+
+
+#: Filtered search is not calibrated on its own. The harness substitutes the
+#: ef the UNFILTERED sweep chose and runs every predicate at it, so a filtered
+#: recall below the target is the predicate's cost at that ef, not a failed
+#: calibration -- and a reader who assumes each filtered point was tuned to
+#: the target reads the recall columns backwards.
+FILTERED_EF_NOTE = (
+    "\n_Filtered search reuses the unfiltered calibrated ef: every row here "
+    "ran at the ef_search the unfiltered sweep chose for its unit (§6), with "
+    "no calibration of its own, so a recall below the target is what the "
+    "predicate cost at that ef._\n")
 
 
 def _filter_column(record: Dict[str, Any]) -> str:
@@ -2723,6 +3195,7 @@ def _churn_table(summary: Dict[str, Any]) -> str:
     from report.churn_state import churn_measurements, maintenance_state
 
     measurements = list(churn_measurements(summary.get("churn", [])))
+    points = _operating_point_index(summary)
 
     # §5.1 item 6's comparison point for a churn row. The maintenance state
     # is in the key and that is the whole reason this table has a `Repair`
@@ -2787,15 +3260,57 @@ def _churn_table(summary: Dict[str, Any]) -> str:
             _fmt(extra.get("recall_drop_vs_baseline"), 4),
             _fmt(r.get("qps"), 0),
             _fmt_bytes(r.get("index_bytes")),
+            _reinsert_ratio_cell(r, summary.get("ingest") or []),
             tie_cells.get(id(r), TIE_ALONE_CELL),
+            *_operating_point_cells(r, points),
         ])
     return _md_table(
         ["Engine", "Dataset", "Pass", "M", "Build mode", "Storage", "Churn",
          "Repair", "Recall@k", "Recall drop vs baseline", "QPS", "Index size",
-         "Tied with"],
+         "Re-insert / load", "Tied with", "Calibrated ef",
+         "Calibration recall"],
         rows,
-    ) + BUILD_MODE_COLUMN_NOTE + TIE_COLUMN_NOTE + _churn_notes(summary) \
-        + _churn_during_writes_table(summary)
+    ) + BUILD_MODE_COLUMN_NOTE + TIE_COLUMN_NOTE + OPERATING_POINT_NOTE \
+        + REINSERT_RATIO_NOTE \
+        + _churn_notes(summary) + _churn_during_writes_table(summary)
+
+
+#: What the Re-insert / load column means and when it is withheld.
+REINSERT_RATIO_NOTE = (
+    "\n_**Re-insert / load** is the churn re-insert's accepted rate over the "
+    "same unit's ingest rate, printed only where both were written with the "
+    "same number of connections (`extra.reinsert_writers` = "
+    "`extra.ingest_threads`, ops measurement version 9). `full-20260825` "
+    "compared one re-insert writer with an eight-thread load, which measures "
+    "the thread pool rather than the index; a row that cannot show equal "
+    "counts says *withheld*. The load side is the WHOLE load's average rate: "
+    "the ingest record keeps no progress samples, so the rate over its last "
+    "10% of rows -- the honest comparison for an incremental graph, which "
+    "slows as it grows -- is not available, and for MHNSW, VIDX and "
+    "Percona's incremental build this ratio is therefore biased low._\n")
+
+
+def _reinsert_ratio_cell(row: Dict[str, Any],
+                         ingest: List[Dict[str, Any]]) -> str:
+    """The re-insert/load ratio, or why it is not printed (ops v9, F9)."""
+    extra = row.get("extra") or {}
+    rate = extra.get("reinsert_rows_per_s_accepted")
+    if rate is None:
+        return "—"
+    writers, threads = (extra.get("reinsert_writers"),
+                        extra.get("ingest_threads"))
+    if writers is None or threads is None or writers != threads:
+        return (f"withheld ({writers} vs {threads} writers)"
+                if writers is not None and threads is not None
+                else "withheld")
+    unit = ("engine", "dataset", "resource_pass", "m", "build_mode",
+            "storage_engine")
+    load = next((i.get("ingest_rows_per_s") for i in ingest
+                 if all(i.get(k) == row.get(k) for k in unit)
+                 and i.get("ingest_rows_per_s")), None)
+    if not load:
+        return "—"
+    return f"{rate / load:.2f}x"
 
 
 #: The order the churn states are measured in, which is the order they are
@@ -2864,6 +3379,7 @@ def _churn_during_writes_table(summary: Dict[str, Any]) -> str:
     rows_in = summary.get("churn_during_writes") or []
     if not rows_in:
         return ""
+    points = _operating_point_index(summary)
     parts = [
         "\n**Reads while the engine is taking writes.** Every number in this "
         "table comes from one pool of readers measured twice: for 30 s before "
@@ -2927,14 +3443,17 @@ def _churn_during_writes_table(summary: Dict[str, Any]) -> str:
                == SCALING_CONCURRENCY_NOT_ACHIEVED else ""),
             # What the readers actually had in service, against how many there
             # were. The evidence for both marks above, in the row that carries
-            # them.
-            (f"{s['served_concurrency']:,.2f} of {s.get('readers')}"
-             if s.get("served_concurrency") is not None else "—"),
+            # them -- mean-based first and the median estimate second since
+            # ops version 9, through the one cell function the concurrency
+            # table uses, so the two tables cannot read the pair differently.
+            _served_cell(s, s.get("readers")),
+            *_operating_point_cells(s, points),
         ])
     parts.append(_md_table(
         ["Engine", "Dataset", "Pass", "M", "Build mode", "Storage", "Churn",
          "Readers", "Reader p99", "p99 under writes", "Reader QPS",
-         "Writer rate", "Reads in service"],
+         "Writer rate", "Reads in service", "Calibrated ef",
+         "Calibration recall"],
         table_rows))
     if any(s.get("ratio_disagrees") for s in rows_in):
         parts.append(
@@ -2970,10 +3489,15 @@ def _churn_during_writes_table(summary: Dict[str, Any]) -> str:
             f"\n{SCALING_REFUSED_MARK} **The readers did not run "
             f"concurrently at {len(serialized)} of these points**, so neither "
             f"the p99 ratio nor the writer rate beside it is evidence about "
-            f"the engine. `Reads in service` is the queries each "
-            f"during-writes window counted times their median latency over "
-            f"the window; below half the reader count, the pool was answering "
-            f"about one read at a time whatever it was asked for. **The "
+            f"the engine. `Reads in service` is, first, the sum of every "
+            f"in-window read's duration over the window (mean) and, second, "
+            f"the reads counted times their median latency (median est.); "
+            f"since ops measurement version 9 the refusal reads the first, so "
+            f"below half the reader count the readers did not keep their reads "
+            f"in flight. A median estimate far below the mean is "
+            f"{TAIL_DOMINATED_MARK} `tail_dominated` -- a heavy-tailed read "
+            f"latency, not a refusal; records from before version 9 were "
+            f"judged on the median and keep that verdict. **The "
             f"writer rate was measured against those same reads**, so it is "
             f"not a figure about an engine under a known read load either; "
             f"the churn step record carries this status as "
@@ -3313,14 +3837,14 @@ def render_markdown(manifest: Dict[str, Any], summary: Dict[str, Any],
         "\n### Engines under test\n\n",
         _md_table(["Engine", "Tag", "Commit", "-march", "Build type"],
                   _engine_rows(manifest)),
+        _provenance.engine_budget_section(manifest),
         "\n---\n\n## 2. Validity\n\n",
         _validity_section(manifest, summary, records),
         "\n---\n\n## 3. Known asymmetries\n\n",
         _known_asymmetries(summary),
         "\n---\n\n## 4. Recall vs throughput\n\n",
-        "The headline comparison. Each engine's Pareto frontier is the best "
-        "throughput it achieved at each recall level across the whole parameter "
-        "sweep; the faint scatter behind it is every measured point.\n",
+        _frontier_intro(summary),
+        _provenance.section4_note(summary),
         _headline_tables(summary),
     ]
 
@@ -3398,7 +3922,9 @@ def render_markdown(manifest: Dict[str, Any], summary: Dict[str, Any],
         "Scaling efficiency of 1.0 is linear scaling. **Spread** is the range "
         "across repeated measurement windows at that point; a dash means the "
         "point was measured once and carries no error bar.\n\n",
-        (_concurrency_table(summary) if summary.get("concurrency")
+        (_concurrency_table(summary) + _peak_throughput_table(summary)
+         + _limiter_table(summary)
+         if summary.get("concurrency")
          else _not_measured("concurrency", profile, records)),
     ]
     for stem, paths in sorted(chart_paths.items()):
@@ -3492,7 +4018,7 @@ def render_markdown(manifest: Dict[str, Any], summary: Dict[str, Any],
             "the target.\n\n"
             "**Use it as a cross-check against §4.** Carry an engine's recall "
             "at some `ef_search` off this chart and find the same engine at the "
-            "same `ef_search` on the recall/throughput frontier. The two are "
+            "same `ef_search` and build on the §4 recall/throughput chart. The two are "
             "measured by different code in different containers over different "
             "query counts — ann-benchmarks computes its own recall, this sweep "
             "computes ours — so they are not plotted together and are not "
@@ -4019,6 +4545,10 @@ def _md_tables_to_html(markdown_fragment: str) -> str:
 
 def _inline_md(text: str) -> str:
     escaped = _html.escape(text)
+    # The one tag a Markdown table cell may carry, and the only way to put a
+    # second line in one: §4 prints each figure's build UNDER the number.
+    # GitHub's renderer honours `<br>` in a cell; this converter escaped it.
+    escaped = escaped.replace("&lt;br&gt;", "<br>")
     # Order matters: bold before italic, code before both.
     while "`" in escaped:
         first = escaped.find("`")
@@ -4034,6 +4564,10 @@ def _inline_md(text: str) -> str:
             break
         escaped = (escaped[:first] + "<strong>" + escaped[first + 2:second]
                    + "</strong>" + escaped[second + 2:])
+    # `[text](href)`, which the limiter table's profile column uses. After
+    # escaping, so the href is already attribute-safe.
+    escaped = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", r'<a href="\2">\1</a>',
+                     escaped)
     return escaped
 
 
@@ -4117,14 +4651,16 @@ def render_html(manifest: Dict[str, Any], summary: Dict[str, Any],
          _md_tables_to_html(_md_table(["Property", "Value"], _environment_rows(manifest)))
          + "<h3>Engines under test</h3>"
          + _md_tables_to_html(_md_table(
-             ["Engine", "Tag", "Commit", "-march", "Build type"], _engine_rows(manifest))),
+             ["Engine", "Tag", "Commit", "-march", "Build type"], _engine_rows(manifest)))
+         + _md_tables_to_html(_provenance.engine_budget_section(manifest)),
          ""),
         ("2. Validity",
          _md_tables_to_html(_validity_section(manifest, summary, records)), ""),
         ("3. Known asymmetries",
          _md_tables_to_html(_known_asymmetries(summary)), ""),
         ("4. Recall vs throughput",
-         _md_tables_to_html(_headline_tables(summary)),
+         _md_tables_to_html(_provenance.section4_note(summary)
+                            + _headline_tables(summary)),
          figures("pareto-") + figures("paretozoom-") + figures("qpsatrecall-") + figures("latency-")
          + _md_tables_to_html(_disclosures.structural_lines(records, _label))),
         ("5. Index build cost",
@@ -4143,7 +4679,10 @@ def render_html(manifest: Dict[str, Any], summary: Dict[str, Any],
         # markdown left the page a reader actually opens still saying
         # "No data." for a workload the profile never ran.
         ("7. Concurrency scaling",
-         _md_tables_to_html(_concurrency_table(summary) if summary.get("concurrency")
+         _md_tables_to_html(_concurrency_table(summary)
+                            + _peak_throughput_table(summary)
+                            + _limiter_table(summary)
+                            if summary.get("concurrency")
                             else _not_measured("concurrency", profile, records)),
          figures("concurrency-")
          + _md_tables_to_html(_disclosures.structural_lines(records, _label))),

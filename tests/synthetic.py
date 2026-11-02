@@ -676,6 +676,10 @@ def make_records(run_id: str) -> List[Dict[str, Any]]:
                     "grid_position": position,
                     "grid_size": len(GRID),
                     "warmup_queries": 20,
+                    # What an ops version-9 calibration record says; without
+                    # it the record is read as a pre-v9 ID overlap and the
+                    # cross-check declines to compare it.
+                    "recall_kind": "distance_threshold",
                     "recall_ci95": _ci(recall, half, n=1000),
                     "qps_ci95": _qps_ci(qps, n=1000),
                 },

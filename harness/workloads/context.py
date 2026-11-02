@@ -78,6 +78,11 @@ class RunContext:
             "m": index.m,
             "ef_construction": index.ef_construction,
             "build_mode": index.build_mode,
+            # Ops version 9: the last build axis the ops records lacked. The
+            # ann path's records carry it, `report/builds.py` keys reference
+            # builds on it, and an ops record without it had to be matched by
+            # guesswork.
+            "quantization": index.quantization,
             "k": self.k,
             "timestamp": utcnow(),
         }

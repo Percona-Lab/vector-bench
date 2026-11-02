@@ -102,6 +102,7 @@ an interrupted run can resume without recomputing points it already has.
 | `report` | Regenerate the report from an existing run directory | Runs → Report |
 | `export` | Package a run as a `.tar.gz` to send to someone | Runs → Report |
 | `render` | Regenerate the ann-benchmarks configs for a profile | — |
+| `select-builds` | Choose the full-size builds from a `frontier-explore` run (stage 2 of the two-stage frontier) | — |
 | `sources` | Export sources only, without building | — |
 | `web` | Serve the browser interface | — |
 | `clean` | Remove containers, networks and volumes left by a run | — |
@@ -129,6 +130,7 @@ only SSH'd into.
 | `--fail-fast` | off | Stop at the first failure instead of continuing |
 | `--no-report` | off | Skip report generation |
 | `--run-id` | timestamped | Reuse an id to add to an existing run directory |
+| `--overlay` | none | A `select-builds` overlay applied to `--profile`; tuned pass only, and a resume must pass the same one |
 
 **`--engines` and `--datasets` are not symmetrical, deliberately.** A profile's
 dataset list is a choice of corpus and `--datasets` replaces it outright. A
@@ -140,6 +142,35 @@ engine at another's grid. A profile that declares no `engines:` key is making no
 such claim, and `--engines` is free there. Omitting the key is also the only way
 to say "every engine": `engines: []` is refused as a half-finished edit, because
 reading it as "no restriction" is how a one-engine profile measured seven.
+
+### `select-builds` options — the two-stage frontier
+
+Stage 1 explores every build knob at 90,000 rows; this command keeps the
+builds worth measuring at 990,000; stage 2 measures them. The rule, its
+definition of "near" and the cost of each stage are in
+[07-planning-a-run.md §2a](07-planning-a-run.md#2a-exploring-the-whole-parameter-space-the-two-stage-frontier).
+
+```bash
+./run-benchmark.sh run --profile frontier-explore                    # stage 1
+./run-benchmark.sh select-builds --from results/<stage-1 run id> \
+    --out state/frontier-stage2.yml                                  # select
+./run-benchmark.sh run --profile tuned-complete --resource-pass tuned \
+    --overlay state/frontier-stage2.yml                              # stage 2
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--from` | required | The stage-1 run directory. Reads its `run-manifest.json` and `report/records.jsonl` (run `report --run-dir` first if the run skipped it) |
+| `--out` | required | The overlay to write. Generated — regenerate rather than edit it |
+| `--profile` | `tuned-complete` | The profile the overlay will be applied to; `run` refuses it on any other |
+| `--dataset` | the stage-1 corpus | Needed only when the stage-1 records hold more than one |
+
+It prints, per engine, how many builds it kept and pruned, the lists it wrote,
+any kept M at the edge of the explored grid and any floor stage 1 never
+reached. The overlay names the kept builds exactly, so none is added by
+multiplying the per-axis lists. It refuses to write an overlay whose rendered grid is not exactly the
+kept set. `render --profile tuned-complete --resource-pass tuned --overlay
+<file>` shows the ann configs it produces without running anything.
 
 ### `build` options
 
@@ -317,6 +348,23 @@ The knobs worth changing first:
 - `ops.client_counts` — how far the concurrency sweep goes. Push past your core
   count to find the saturation point.
 - `ops.subset_rows` — load only part of the training set, for faster iteration.
+- `ops.build_selection` — `reference` (default) or `frontier`. Which index the
+  ops pass (build cost, concurrency, filtered, churn) measures. `reference`
+  builds each engine's declared `runtime.reference_build` at every
+  `ops.m_values` entry. `frontier` waits for the ann phase of each engine and
+  dataset and builds the one swept build that is fastest at the ops calibration
+  target (`ops.target_recall`, 0.95 by default), so the ops numbers describe
+  the index the frontier headline comes from; `ops.m_values` is then used only
+  where the chosen build names no M (Percona Search). It needs the ann phase:
+  `run` refuses `frontier` with `ann.enabled: false`, and a unit whose ann
+  phase did not run in this run directory (`--phases ops`, a failed ann phase)
+  measures the reference build and says `fallback_reference` in a warning, the
+  manifest and every record. A resumed run reuses the build chosen before the
+  interruption while the ann attempt it came from is still the latest one,
+  and chooses again after an ann re-run. The cost estimate cannot know the
+  build ahead of time and charges the ops ingest at the largest M in the grid
+  instead (not for Percona Search, and not a bound on `ef_construction`). See
+  [05-methodology.md](05-methodology.md) §2.1.
 - `memory.server_limit_gb` in `config/resources/normalized.yml` — the single
   most consequential value, because an engine whose graph does not fit in cache
   behaves completely differently from one whose graph does.

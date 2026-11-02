@@ -262,6 +262,14 @@ capabilities:
   # pgvector 0.8 added iterative index scans, which materially change filtered
   # search behaviour. Recorded so the report can say which mode produced a number.
   iterative_scan_modes: [off, relaxed_order, strict_order]
+  # Postgres has no cumulative wait-event counters, so its per-window wait
+  # profile can only come from sampling pg_stat_activity DURING the window --
+  # an extra backend no other engine's window carries. Opt-in through
+  # `ops.server_wait_sampler`; this is the interval the driver samples at
+  # (`PostgresDriver.wait_sample_interval_s`, pinned against it by
+  # `tests/test_e27_server_wait_evidence.py`), recorded in `engines_resolved`
+  # when the sampler is on.
+  wait_sampler_interval_s: 1.0
 
 # Runtime facts the orchestrator needs to start and speak to this engine.
 #
@@ -300,3 +308,20 @@ runtime:
     linestyle: "-."
     label: "PostgreSQL (pgvector)"
   label: "PostgreSQL (pgvector)"
+  # The index the ops pass builds. §4's secondary table ("at the build the
+  # ops pass measured") is taken from it, and a headline floor figure from any
+  # other build is marked, because the load, build, concurrency, filtered and
+  # churn sections describe this index. `full-20260825` published Percona
+  # Search's floor figures from the unquantized sweep beside ops figures from
+  # the scalar index (which peaks at recall 0.892), and
+  # pgvector's and Valkey's from efC=400 beside ops figures at 200 and the
+  # server default. A value of `ops` is resolved per profile and
+  # pass from what `orchestrator/ops_pass.py` passes the harness
+  # (`orchestrator/reference_build.py`), and `cmd_run` refuses a build the ann grid
+  # does not contain rather than reporting "—" for a whole engine afterwards.
+  # `harness_args` passes `--ef-construction` from `ann.pgvector_ef_construction`
+  # (default 200) in BOTH passes, while the tuned grid sweeps 64/200/400 -- so
+  # `ops` and not a literal: a profile that pins another value builds that.
+  reference_build:
+    m: 16
+    ef_construction: ops

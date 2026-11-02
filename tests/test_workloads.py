@@ -305,6 +305,114 @@ class TestConcurrencyWorkload:
         assert len(row["extra"]["qps_samples"]) == 3
         assert row["extra"]["qps_spread_pct"] >= 0
 
+    def test_a_discarded_warm_up_window_precedes_each_client_count(
+            self, ctx, dataset, monkeypatch):
+        """Ops version 9 (F7): one window, same client count, same length,
+        before the first measured repeat -- recorded, never selected.
+
+        `full-20260825` spread +/-22-24% across repeats at one client from a
+        cold first repeat, and the one-client point is the baseline every
+        efficiency divides by. Staged by making the FIRST window of each
+        client count ten times slower: the warm-up must absorb it, so no
+        published sample and no median can carry it.
+
+        Mutant (the warm-up window appended to `samples`): `repeats` reads 4,
+        `qps_samples` holds the slow window and the spread explodes -- each
+        asserted below.
+        """
+        real = concurrency_workload._one_window
+        calls = []
+
+        scored = []
+
+        def staged(*args, **kwargs):
+            window = real(*args, **kwargs)
+            calls.append(args[2])
+            scored.append(kwargs.get("score", True))
+            if calls.count(args[2]) == 1:
+                # The warm-up window: never scored for recall (#78 review),
+                # and its recall fields say so.
+                assert window.recall is None and window.recall_queries == 0
+                assert window.recall_id_overlap is None
+                window = window._replace(qps=window.qps / 10.0)
+            return window
+
+        monkeypatch.setattr(concurrency_workload, "_one_window", staged)
+        driver = loaded_driver(dataset, ef_half=64.0, ef_search=32)
+        concurrency_workload.run(
+            ctx, driver.clone, dataset, index_spec(dataset), ef_search=32,
+            client_counts=(1, 2), duration_s=0.05, warmup=1,
+            max_queries=N_QUERIES, repeats=3)
+        rows = written(ctx)
+        # One extra window per client count, and it came first.
+        assert calls == [1, 1, 1, 1, 2, 2, 2, 2]
+        assert scored == [False, True, True, True] * 2
+        for row in rows:
+            extra = row["extra"]
+            assert extra["repeats"] == 3
+            assert len(extra["qps_samples"]) == 3
+            assert extra["warmup_window_s"] == 0.05
+            slow = extra["warmup_window_qps"]
+            # Recorded, and never a candidate: every published sample beats
+            # the slowed warm-up window by a wide margin.
+            assert slow > 0
+            assert min(extra["qps_samples"]) > slow * 3, extra
+            assert row["qps"] > slow * 3
+
+    def test_the_baseline_median_check_withholds_a_cold_efficiency(
+            self, ctx, dataset, monkeypatch):
+        """F2 item 3: `baseline_is_credible` wired in.
+
+        Staged by inflating the one-client window's median 3x -- a baseline
+        whose median got FASTER as clients were added, which a warm one
+        cannot do. Honest: the two-client record carries no
+        `scaling_efficiency`, says `baseline_not_credible`, and still carries
+        the ratio that decided it. Mutant (the verdict ignored): an efficiency
+        about 3x the truth is published.
+        """
+        real = concurrency_workload._one_window
+
+        def cold(*args, **kwargs):
+            window = real(*args, **kwargs)
+            if args[2] == 1:
+                merged = dict(window.merged)
+                merged["latency_p50_ms"] = merged["latency_p50_ms"] * 3.0
+                window = window._replace(merged=merged, qps=window.qps / 3.0)
+            return window
+
+        monkeypatch.setattr(concurrency_workload, "_one_window", cold)
+        driver = loaded_driver(dataset, ef_half=64.0, ef_search=32)
+        concurrency_workload.run(
+            ctx, driver.clone, dataset, index_spec(dataset), ef_search=32,
+            client_counts=(1, 2), duration_s=0.1, warmup=2,
+            max_queries=N_QUERIES)
+        one, two = written(ctx)
+        assert one["extra"]["scaling_efficiency"] == 1.0
+        assert two["extra"]["scaling_efficiency"] is None
+        assert (two["extra"]["efficiency_reliability"]
+                == concurrency_workload.EFFICIENCY_BASELINE_NOT_CREDIBLE)
+        assert two["extra"]["baseline_p50_ratio"] > 1.4
+
+    def test_every_point_says_which_recall_rule_it_carries(self, ctx,
+                                                           dataset):
+        """F8: `recall_at_k` is the distance threshold; the id overlap rides
+        beside it under its own name."""
+        driver = loaded_driver(dataset, ef_half=64.0, ef_search=32)
+        concurrency_workload.run(
+            ctx, driver.clone, dataset, index_spec(dataset), ef_search=32,
+            client_counts=(1,), duration_s=0.1, warmup=2,
+            max_queries=N_QUERIES)
+        row = written(ctx)[0]
+        assert row["extra"]["recall_kind"] == ds.RECALL_DISTANCE_THRESHOLD
+        assert row["extra"]["recall_id_overlap"] is not None
+        # No ties in a random float corpus, so the two rules agree here; the
+        # tie that separates them is `test_harness.py`'s.
+        assert row["recall_at_k"] == pytest.approx(
+            row["extra"]["recall_id_overlap"], abs=1e-6)
+        # And the window's wall-clock ends, for the server-sample join.
+        assert (row["extra"]["window_ended_at"]
+                > row["extra"]["window_started_at"] > 1e9)
+
     def test_a_client_count_above_the_query_count_is_skipped(self, ctx,
                                                              dataset):
         driver = loaded_driver(dataset, ef_half=64.0)
@@ -527,8 +635,11 @@ class TestConcurrencyCountsOnlyTheWindow:
                             merge_twice)
         clients = 4
         row = self._run(ctx, dataset, self._driver(dataset), clients, 0.3)
-        assert len(both) == 1, "one window, one merge"
-        trimmed, untrimmed = both[0]
+        # Two since ops version 9: the discarded warm-up window is merged by
+        # the same code and then thrown away, so the record's window is the
+        # LAST merge.
+        assert len(both) == 2, "one warm-up and one measured window"
+        trimmed, untrimmed = both[-1]
 
         dropped = (trimmed[latency.INFLIGHT_DISCARDED]
                    + trimmed[latency.PREWINDOW_DISCARDED])
@@ -963,9 +1074,10 @@ class TestConcurrencyRecordsRecall:
             with handed_out.get_lock():
                 handed_out.value += 1
                 mine = handed_out.value
-            # One for the metadata driver, one for the first window's client;
-            # everything after that is the second window.
-            if mine > 2:
+            # One for the metadata driver, one for the discarded warm-up
+            # window's client (ops version 9), one for the first measured
+            # window's; everything after that is the second window.
+            if mine > 3:
                 clone.ef_half = 400.0
             return clone
 
@@ -982,7 +1094,7 @@ class TestConcurrencyRecordsRecall:
         assert spread > concurrency_workload.RECALL_SPREAD_LIMIT, spread
         # The degradation crossed the fork: three drivers were handed out as
         # the PARENT counts them, so the second window really got the bad one.
-        assert handed_out.value >= 3, (
+        assert handed_out.value >= 4, (
             f"only {handed_out.value} drivers were counted in the parent, so "
             f"the second window was never degraded and the spread above is "
             f"not this fixture's doing")
@@ -1719,20 +1831,22 @@ class TestTheClientsOwnCpuIsRecorded:
                 mine = made.value
             sibling = base.clone()
             # Call 0 is `run`'s metadata driver, which issues no queries;
-            # calls 1..3 are the single client of each successive window.
-            if 1 <= mine <= len(latencies):
-                sibling.latency_s = latencies[mine - 1]
+            # call 1 is the discarded warm-up window's client (ops version
+            # 9) and calls 2..4 the single client of each measured window.
+            if 2 <= mine <= len(latencies) + 1:
+                sibling.latency_s = latencies[mine - 2]
             return sibling
 
         reads = {"n": -1}
 
         def window_cpu():
             # Twice per window: the open reads zero, the close reads that
-            # window's charge.
+            # window's charge. The first pair is the warm-up window's.
             reads["n"] += 1
-            if reads["n"] % 2 == 0:
+            n = reads["n"] - 2
+            if n < 0 or n % 2 == 0:
                 return 0
-            return int(charges[reads["n"] // 2] * 1e6)
+            return int(charges[n // 2] * 1e6)
 
         monkeypatch.setattr(concurrency_workload, "read_own_cpu_usec",
                             window_cpu)
@@ -1750,7 +1864,7 @@ class TestTheClientsOwnCpuIsRecorded:
         assert samples[-1] > samples[0] * 1.5, samples
         # And the staging crossed the fork: four calls, so each window's
         # client really was handed its own latency. A plain dict reads 0 here.
-        assert made.value == len(latencies), (
+        assert made.value == len(latencies) + 1, (
             f"the factory was called {made.value + 1} times as the PARENT "
             f"counts them; the three windows were therefore not staged and "
             f"the spread above is this box's noise")

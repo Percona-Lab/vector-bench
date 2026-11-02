@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy
 
+from .engine_waits import valkey_delta, valkey_snapshot
 from .base import (DATABASE, FILTER_COLUMNS, FILTER_TAG, TABLE,
                    ConnectionSpec, EngineDriver, IndexSpec, LoadResult,
                    RowAttrs, checked_filter_column)
@@ -1253,6 +1254,18 @@ class ValkeyDriver(EngineDriver):
         except Exception:
             version = "unknown"
         return f"Valkey {version} / valkey-search"
+
+    def wait_snapshot(self):
+        """INFO commandstats and LATENCY LATEST. Valkey's command thread is
+        single, so per-command service time is the closest thing it has to a
+        wait profile: a window dominated by one command's usec is that
+        command serializing everything behind it."""
+        if self._conn is None:
+            return None, "no connection"
+        return valkey_snapshot(self._conn)
+
+    def wait_delta(self, before, after):
+        return valkey_delta(before, after)
 
     def capabilities(self) -> Dict[str, Any]:
         caps = super().capabilities()

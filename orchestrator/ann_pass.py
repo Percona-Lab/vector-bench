@@ -15,11 +15,13 @@ import hashlib
 import os
 import shutil
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import docker_ctl
 from . import engines as engines_mod
-from .config import ResolvedResources, server_args
+from .ann_knobs import (efc_run_groups, excluded_builds, knob_problems,
+                        restrict_to_builds)
+from .config import ResolvedResources, server_args, server_env
 
 # Re-exported, not just imported: `cli.py` and a dozen tests reach these
 # through `ann_pass`, and the split that moved them into their own module is
@@ -31,6 +33,7 @@ from .ann_config import (  # noqa: F401
     config_path,
     expected_result_count,
     expected_results,
+    read_config,
     result_stem,
     result_stems,
     write_config,
@@ -48,10 +51,24 @@ MARIADB_ENGINES = ("mariadb", "mariadb123")
 
 
 # Bump when the measurement path itself changes in a way that makes older
-# numbers non-comparable, even at an identical resource configuration. Adding
-# the per-configuration warmup was such a change: without it the first
-# ef_search point paid for a cold cache and landed below the second.
-ANN_MEASUREMENT_VERSION = 2
+# numbers non-comparable, even at an identical resource configuration. It is
+# part of `ann_fingerprint`, so a bump moves EVERY pass's results tree and
+# forces every recall point of every engine to be measured again -- which is
+# the intent when it is bumped, and the reason it is not the remedy for a
+# single engine's re-pin (CLAUDE.md, the ann results tree invariant).
+#
+# History:
+#   2 -- the per-configuration `_warm_cache` (30 random-vector queries): without
+#        it the first ef_search point paid for a cold cache and landed below
+#        the second.
+#   3 -- the one-time index warm-up (overlay/.../vb_warmup.py): training-set
+#        queries before the first configuration on each built index until two
+#        consecutive 200-query batches agree within 5%, capped at 5,000. Thirty
+#        queries had not been enough: full-20260825 (tuned-complete, dbpedia
+#        1M x 1536) still measured ef_search 10 slower than 20 on all six
+#        MariaDB/AliSQL curves (1.69x-2.13x) and on both Percona Search curves
+#        (1.13x). A curve measured at 2 has that cold first point in it.
+ANN_MEASUREMENT_VERSION = 3
 
 
 def ann_fingerprint(resolved: Any) -> str:
@@ -160,6 +177,12 @@ def render_config(engine: str, profile: Dict[str, Any],
 
     run_groups: Dict[str, Any] = {}
 
+    # Refused, never clamped -- see orchestrator/ann_knobs.py. M is checked
+    # here for every engine; ef_construction in each branch that reads it.
+    problems = knob_problems(engine, m_values)
+    if problems:
+        raise ValueError("; ".join(problems))
+
     if engine in MARIADB_ENGINES + ("alisql",):
         if engine in MARIADB_ENGINES:
             storage_engines = list(
@@ -186,16 +209,13 @@ def render_config(engine: str, profile: Dict[str, Any],
             # hand pgvector a tuning axis the others lack.
             ef_constructions = [int(ann.get("pgvector_ef_construction", 200))]
 
+        _refuse_efc(engine, m_values, ef_constructions)
         for build_mode in ann.get("pgvector_build_modes", ["post"]):
-            run_groups[f"{build_mode}_build"] = {
-                "arg_groups": [{
-                    "M": m_values,
-                    "efConstruction": ef_constructions,
-                    "build_mode": build_mode,
-                }],
-                "args": {},
-                "query_args": query_args,
-            }
+            run_groups.update(efc_run_groups(f"{build_mode}_build", {
+                "M": m_values,
+                "efConstruction": ef_constructions,
+                "build_mode": build_mode,
+            }, engine, query_args))
     elif engine == "valkey":
         # The same two knobs pgvector has, so the same rule: pinned in the
         # normalized pass because MariaDB and AliSQL still lack ef_construction,
@@ -205,16 +225,13 @@ def render_config(engine: str, profile: Dict[str, Any],
         else:
             ef_constructions = [int(ann.get("valkey_ef_construction", 200))]
 
+        _refuse_efc(engine, m_values, ef_constructions)
         for build_mode in ann.get("valkey_build_modes", ["post"]):
-            run_groups[f"{build_mode}_build"] = {
-                "arg_groups": [{
-                    "M": m_values,
-                    "efConstruction": ef_constructions,
-                    "build_mode": build_mode,
-                }],
-                "args": {},
-                "query_args": query_args,
-            }
+            run_groups.update(efc_run_groups(f"{build_mode}_build", {
+                "M": m_values,
+                "efConstruction": ef_constructions,
+                "build_mode": build_mode,
+            }, engine, query_args))
 
     elif engine == "percona":
         # A branch of its own and NOT an addition to the MySQL-family
@@ -278,15 +295,12 @@ def render_config(engine: str, profile: Dict[str, Any],
         # storage engine to curve against. `engine` is still passed rather
         # than omitted, so a profile asking for something else gets a server
         # error naming the engine instead of silently getting InnoDB.
-        run_groups["innodb"] = {
-            "arg_groups": [{
-                "M": m_values,
-                "efConstruction": ef_constructions,
-                "engine": "InnoDB",
-            }],
-            "args": {},
-            "query_args": query_args,
-        }
+        _refuse_efc(engine, m_values, ef_constructions)
+        run_groups.update(efc_run_groups("innodb", {
+            "M": m_values,
+            "efConstruction": ef_constructions,
+            "engine": "InnoDB",
+        }, engine, query_args))
 
     elif engine == "myvector":
         # Percona's shape for the same reason: MyVector exposes a build-time
@@ -304,14 +318,11 @@ def render_config(engine: str, profile: Dict[str, Any],
         # both build after the load, which is the only build the engine has
         # on this server (see `INCREMENTAL_DECLINED` in
         # harness/drivers/myvector.py).
-        run_groups["innodb"] = {
-            "arg_groups": [{
-                "M": m_values,
-                "efConstruction": ef_constructions,
-            }],
-            "args": {},
-            "query_args": query_args,
-        }
+        _refuse_efc(engine, m_values, ef_constructions)
+        run_groups.update(efc_run_groups("innodb", {
+            "M": m_values,
+            "efConstruction": ef_constructions,
+        }, engine, query_args))
 
     elif engine == "villagesql":
         # MyVector's shape: a build-time knob (`ef_construction` in the index
@@ -359,6 +370,12 @@ def render_config(engine: str, profile: Dict[str, Any],
     else:
         raise ValueError(f"unknown engine: {engine}")
 
+    # A stage-2 selection names its builds exactly (`select-builds`); see
+    # `ann_knobs.restrict_to_builds` for why the lists alone were not enough.
+    selected = (extras.get("ann_builds_by_engine") or {}).get(engine)
+    if selected:
+        run_groups = restrict_to_builds(engine, run_groups, selected)
+
     return {
         "float": {
             "any": [{
@@ -372,6 +389,42 @@ def render_config(engine: str, profile: Dict[str, Any],
             }]
         }
     }
+
+
+def excluded_ann_builds(engine: str, profile: Dict[str, Any],
+                        resources: Dict[str, Any], resource_pass: str
+                        ) -> List[Tuple[int, int, str]]:
+    """(M, ef_construction, reason) for each build the profile's grid names
+    and `render_config` left out because the engine cannot build it.
+
+    Read back from the render rather than re-derived, so the list printed
+    before a run is the list the container will not be asked for.
+    """
+    body = render_config(engine, profile, resources, resource_pass)
+    m_values: List[int] = []
+    efcs: List[int] = []
+    for algorithm in body["float"]["any"]:
+        for run_group in algorithm["run_groups"].values():
+            for group in run_group["arg_groups"]:
+                if "efConstruction" not in group:
+                    return []
+                for m in group["M"]:
+                    if int(m) not in m_values:
+                        m_values.append(int(m))
+                for efc in group["efConstruction"]:
+                    if int(efc) not in efcs:
+                        efcs.append(int(efc))
+    return excluded_builds(engine, m_values, efcs)
+
+
+def _refuse_efc(engine: str, m_values: List[int],
+                ef_constructions: List[int]) -> None:
+    """`knob_problems` for ef_construction, raised as `render_config` does
+    for M. Combinations legal value-by-value but not together are dropped by
+    `efc_run_groups` instead, and named by `ann_knobs.excluded_builds`."""
+    problems = knob_problems(engine, (), ef_constructions)
+    if problems:
+        raise ValueError("; ".join(problems))
 
 
 # In the ann pass the database server and the ann-benchmarks client share one
@@ -481,11 +534,9 @@ def run_engine(engine: str, dataset: str, profile: Dict[str, Any],
             "VB_INSERT_THREADS": str(profile.get("ann", {}).get("insert_threads", 0)),
             "VB_RUN_ID": run_id,
             "VB_RESOURCE_PASS": resource_pass,
-            # See ops_pass: sized centrally so both measurement paths give
-            # mongot the same heap, and the single-process engines ignore it.
-            "VB_MONGOT_HEAP_GB": str(
-                max(1, resolved.mongot_heap_bytes // (1024 ** 3))),
-            "VB_MAXMEMORY_BYTES": str(resolved.maxmemory_bytes),
+            # Sized centrally so both measurement paths give mongot the same
+            # heap, and so `engines_resolved` records exactly this env.
+            **server_env(resolved),
             "PYTHONUNBUFFERED": "1",
         },
         volumes=[

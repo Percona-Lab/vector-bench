@@ -185,6 +185,7 @@ class MyVector(VBMySQLBase):
         self._ef_search = int(ef_search)
         if self._plan_verified is None:
             self._plan_verified = self._verify_plan()
+        self._warm_index_once()   # once per built index; see vb_warmup.py
         self._warm_cache()
 
     def _warm_cache(self) -> None:

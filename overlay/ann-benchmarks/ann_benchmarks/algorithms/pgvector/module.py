@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 import numpy
 
 from ..base.module import BaseANN
+from ...vb_warmup import IndexWarmupMixin
 
 try:  # pragma: no cover - exercised only inside the bench image
     import psycopg
@@ -60,7 +61,7 @@ OPERATOR = {"angular": "<=>", "euclidean": "<->"}
 WARMUP_QUERIES = int(os.environ.get("VB_WARMUP_QUERIES", "30"))
 
 
-class PGVector(BaseANN):
+class PGVector(IndexWarmupMixin, BaseANN):
     def __init__(self, metric: str, method_param: Dict[str, Any]):
         if psycopg is None:
             raise RuntimeError(
@@ -145,6 +146,7 @@ class PGVector(BaseANN):
     # ------------------------------------------------------------------
 
     def fit(self, X: numpy.ndarray) -> None:
+        self._keep_warmup_sample(X)
         dim = int(X.shape[1])
         self._dim = dim
         cur = self._cur
@@ -214,6 +216,7 @@ class PGVector(BaseANN):
         self._cur.execute(f"SET hnsw.ef_search = {self._ef_search}")
         if self._plan_verified is None:
             self._plan_verified = self._verify_plan()
+        self._warm_index_once()   # once per built index; see vb_warmup.py
         self._warm_cache()
 
     def _warm_cache(self) -> None:
@@ -332,6 +335,7 @@ class PGVector(BaseANN):
             "build_seconds": round(self._build_seconds, 3),
             "vector_index_used": self._plan_verified,
             "march": self._image_march(),
+            **self._warmup_attrs(),
         }
 
     def _server_version(self) -> str:

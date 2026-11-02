@@ -1822,3 +1822,108 @@ class TestTheResidueHoldsBothCausesAndCannotSeparateThem:
         assert mutant_tightened, (
             f"the min form refused nothing the old rule published, so this "
             f"mutation measured nothing\n{report(table)}")
+
+
+# ---------------------------------------------------------------------------
+# Ops version 9: `outstanding` is the primary figure
+# ---------------------------------------------------------------------------
+
+def regime_lognormal(sigma: float, cap: float) -> Callable[[], None]:
+    """A HEAVY continuous tail, the lock released for all of it.
+
+    The shape `full-20260825` measured on MariaDB 12.3 at 32 clients -- p50
+    34 ms, p99 1,043 ms -- rather than the two-mode cache-miss model above.
+    `exp(sigma**2 / 2)` is mean over median, 3.1 at sigma 1.5; capped so one
+    draw cannot outlast the window. Nothing is shared between clients, so
+    the pool MUST scale.
+    """
+    def spend() -> None:
+        draw = min(cap, _rng().lognormvariate(0.0, sigma))
+        time.sleep(QUERY_S * draw)
+    return spend
+
+
+class TestTheMeanBasedFigureIsThePrimaryOne:
+    """F2 item 1-2: `scaling_status(..., outstanding=)` refuses on the exact
+    mean-based occupancy, and a heavy tail is a NOTE (`tail_dominated`).
+
+    Measured through the real process pool, because the claim is that the
+    lock blindness that made the median necessary is gone from the pool
+    that ships.
+    """
+
+    @pytest.fixture(scope="class")
+    def lognormal(self, base, queries):
+        factory = factory_for(base, regime_lognormal(1.5, 60.0))
+        one = _best(_process_point, factory, queries, 1)
+        four = _best(_process_point, factory, queries, 4)
+        four["efficiency"] = four["qps"] / (4 * one["qps"])
+        return {1: one, 4: four}
+
+    def test_a_heavy_tail_at_full_concurrency_is_ok_and_noted(self,
+                                                              lognormal):
+        """Honest: `ok` + `tail_dominated`. Mutant (the pre-change rule, the
+        median alone): `concurrency_not_achieved` -- the false positive the
+        report published as "the clients serialized"."""
+        four = lognormal[4]
+        assert four["outstanding"] / 4 > 0.8, four
+        assert four["served"] / four["outstanding"] < 0.5, four
+        honest = scaling_status(four["served"], 4, four["efficiency"],
+                                outstanding=four["outstanding"])
+        assert honest == SCALING_OK, four
+        assert scaling_mod.scaling_note(four["served"], four["outstanding"]) \
+            == scaling_mod.SCALING_TAIL_DOMINATED
+        # Without an efficiency term too: a low median is never a refusal on
+        # its own under the version-9 rule.
+        assert scaling_status(four["served"], 4,
+                              outstanding=four["outstanding"]) == SCALING_OK
+        mutant = pre_change_scaling_status(four["served"], 4)
+        assert mutant == SCALING_CONCURRENCY_NOT_ACHIEVED, four
+
+    def test_the_note_is_not_a_status(self):
+        """A note never appears among the statuses a report treats as a
+        verdict, and a narrow window carries no note."""
+        assert (scaling_mod.SCALING_TAIL_DOMINATED
+                not in scaling_mod.SCALING_STATUSES)
+        assert scaling_mod.scaling_note(3.9, 4.0) is None
+        assert scaling_mod.scaling_note(None, 4.0) is None
+        assert scaling_mod.tail_dominated(1.0, 0.0) is None
+
+    @pytest.mark.parametrize("regime", ("held", "sat_skew30x20"))
+    def test_a_serialising_pool_is_still_refused(self, table, regime):
+        """The true positives survive the move to `outstanding`.
+
+        `held` is clients genuinely taking turns (the retired thread pool --
+        its `outstanding` stays at the client count, the lock wait sitting
+        inside the spans) and `sat_skew30x20` is ONE SERVER SLOT, a shared
+        FIFO, whose service time has a tail. Both deliver one client's
+        throughput and keep the median low, so both in-service estimators are
+        under the floor and the residue refusal holds.
+        """
+        point = table[regime][4]
+        status = scaling_status(point["served"], 4, point["efficiency"],
+                                outstanding=point["outstanding"])
+        assert status == SCALING_CONCURRENCY_NOT_ACHIEVED, report(table)
+
+    def test_a_pool_whose_clients_were_not_in_flight_is_refused(self):
+        """The case the client clock measures EXACTLY: hand-built spans
+        covering 1.2 of four clients' worth of the window. Refused whatever
+        the efficiency says."""
+        clients = []
+        for offset in range(4):
+            collector = LatencyCollector()
+            # Each client in flight 30% of a 1 s window.
+            collector.add_span(offset * 0.01, offset * 0.01 + 0.3)
+            clients.append(collector)
+        measured = window_concurrency(clients, 1.0)
+        assert measured.outstanding == pytest.approx(1.2)
+        assert scaling_status(measured.served, 4, 1.0,
+                              outstanding=measured.outstanding) \
+            == SCALING_CONCURRENCY_NOT_ACHIEVED
+
+    def test_a_saturated_server_is_still_published(self, table):
+        """The engine ceiling: outstanding at the client count, efficiency
+        about 1/n. Must stay `ok`."""
+        point = table["saturated"][4]
+        assert scaling_status(point["served"], 4, point["efficiency"],
+                              outstanding=point["outstanding"]) == SCALING_OK

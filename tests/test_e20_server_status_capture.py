@@ -794,9 +794,14 @@ class TestTheRecordIsAdditive:
         # `FakeDriver.capabilities()` declares exactly one key on purpose
         # (see its `_capabilities`), so this set is the fake's and not the
         # seven engines'. What it pins is that `build.py` added nothing.
+        # Ops measurement version 9 added the index-size provenance to every
+        # index_build record (`harness/workloads/index_size.py`); those four
+        # are named here so the set stays literal.
         assert set(built["extra"]) == {
             "incremental_index", "separable_build",
             records.OPS_MEASUREMENT_VERSION_KEY,
+            "size_read_at", "index_bytes_after_build",
+            "index_size_settle_s", "index_size_settle",
         }, built["extra"]
 
     def test_only_the_index_build_record_carries_it(self):
@@ -899,7 +904,9 @@ class TestNoMeasurementVersionBumpIsOwed:
     """
 
     def test_the_ops_version_is_unchanged(self):
-        assert records.OPS_MEASUREMENT_VERSION == 8
+        # `>= 8` since version 9 (ops v9 bumped for F2-F11, a later change):
+        # what this pins is that THIS change did not bump, not the value.
+        assert records.OPS_MEASUREMENT_VERSION >= 8
 
     def test_the_new_key_reaches_no_identity_component(self):
         from report import charts, generate, loaders
@@ -935,3 +942,222 @@ class TestNoMeasurementVersionBumpIsOwed:
 @pytest.fixture
 def dataset():
     return tiny_dataset()
+
+
+# ---------------------------------------------------------------------------
+# 6. Server WAIT snapshots around each concurrency window
+#
+# The status gauge above is one figure read after a build. The wait snapshots
+# apply the same no-op-default discipline per measured window:
+# `EngineDriver.wait_snapshot` / `wait_delta`, read on a SEPARATE connection
+# immediately before and after the window. The decision under test is that
+# they are OUTSIDE the timed span -- a performance_schema scan inside the
+# window would be charged to the engine as lost throughput.
+# ---------------------------------------------------------------------------
+
+from harness.drivers.engine_waits import (mysql_delta,          # noqa: E402
+                                          mysql_snapshot)
+from harness.drivers.mysql_family import MySQLFamilyDriver      # noqa: E402
+from harness.drivers.server_waits import (NOT_IMPLEMENTED,      # noqa: E402
+                                          counter_delta, event)
+from harness.workloads import concurrency as concurrency_workload  # noqa: E402
+
+#: Long enough that a snapshot taken inside a 0.2 s window would at least
+#: quintuple its wall and cut its QPS by the same factor.
+SNAPSHOT_SLEEP_S = 1.0
+WINDOW_S = 0.2
+MUTEX = "wait/synch/mutex/innodb/trx_sys_mutex"
+DATAFILE = "wait/io/file/innodb/innodb_data_file"
+
+
+class SlowWaits(FakeDriver):
+    """A fake whose every snapshot costs a second and advances a counter.
+
+    Class-level state, because the capture asks the factory for a driver of
+    its own and the clients are forked; only the parent ever snapshots.
+    """
+
+    calls: List[float] = []
+
+    def clone(self):
+        sibling = super().clone()
+        sibling.__class__ = type(self)
+        return sibling
+
+    def wait_snapshot(self):
+        import time as _time
+        _time.sleep(SNAPSHOT_SLEEP_S)
+        SlowWaits.calls.append(_time.time())
+        n = len(SlowWaits.calls)
+        return {"events": {MUTEX: event(10 * n, 0.25 * n),
+                           DATAFILE: event(3 * n, 0.5 * n)}}, None
+
+    def wait_delta(self, before, after):
+        return counter_delta(before, after, "fake")
+
+
+def _loaded(cls):
+    from tests.fake_driver import loaded_driver
+    driver = loaded_driver(tiny_dataset(), ef_half=64.0, ef_search=32)
+    driver.__class__ = cls
+    return driver
+
+
+def _concurrency(tmp_path, driver, clients=(1,)):
+    recorder = records.Recorder(str(tmp_path / "ops-waits.jsonl"))
+    ctx = RunContext(run_id="e20w", resource_pass="normalized",
+                     recorder=recorder, engine=driver.name, engine_tag="pin",
+                     march="x86-64-v3", k=K,
+                     cache_dir=str(tmp_path / "cache"))
+    dataset = tiny_dataset()
+    try:
+        concurrency_workload.run(
+            ctx, driver.clone, dataset, index_spec(dataset), ef_search=32,
+            client_counts=clients, duration_s=WINDOW_S, warmup=2,
+            max_queries=50)
+    finally:
+        recorder.close()
+    return list(records.read_records(recorder.path))
+
+
+class TestWaitSnapshotsAreOutsideTheWindow:
+    def test_a_one_second_snapshot_does_not_move_the_window(self, tmp_path):
+        """Honest: the window's wall and its QPS-implied wall stay ~0.2 s
+        although each snapshot sleeps 1 s.
+
+        Mutant (the capture's `begin()` moved to after `pool.start`, inside
+        the barrier-opened window): `window_ended_at - window_started_at`
+        and `queries_executed / qps` both grow past 1.2 s.
+        """
+        SlowWaits.calls = []
+        row = _concurrency(tmp_path, _loaded(SlowWaits))[0]
+        extra = row["extra"]
+        wall = extra["window_ended_at"] - extra["window_started_at"]
+        implied = row["queries_executed"] / row["qps"]
+        print(f"window wall {wall:.3f}s, implied {implied:.3f}s, "
+              f"snapshots {len(SlowWaits.calls)}")
+        assert len(SlowWaits.calls) == 2, "one snapshot each side"
+        assert wall < WINDOW_S + 0.5 * SNAPSHOT_SLEEP_S
+        assert implied < WINDOW_S * 1.5
+        # The two snapshots bracket the window rather than sit in it. The
+        # first returns before the window opens; the second only completes
+        # a full sleep after it closed.
+        before, after = SlowWaits.calls
+        assert before <= extra["window_started_at"]
+        assert after >= extra["window_ended_at"] + SNAPSHOT_SLEEP_S * 0.9
+
+    def test_the_delta_is_after_minus_before_ranked_by_time(self, tmp_path):
+        SlowWaits.calls = []
+        extra = _concurrency(tmp_path, _loaded(SlowWaits))[0]["extra"]
+        waits = extra["server_waits"]
+        assert extra["server_waits_reason"] is None
+        assert waits["ranked_by"] == "wait_s"
+        assert [e["event"] for e in waits["events"]] == [DATAFILE, MUTEX]
+        assert waits["events"][0] == {"event": DATAFILE, "count": 3,
+                                      "wait_s": 0.5}
+        assert waits["events"][1]["count"] == 10
+        assert waits["total_wait_s"] == 0.75
+        assert "warm-up" in waits["covers"]
+
+    def test_a_driver_that_overrides_nothing_records_null_and_why(
+            self, tmp_path):
+        """Absent is not zero: `server_waits` is None, never `{events: []}`."""
+        extra = _concurrency(tmp_path, _loaded(FakeDriver))[0]["extra"]
+        assert extra["server_waits"] is None
+        assert extra["server_waits_reason"] == NOT_IMPLEMENTED
+
+    def test_the_base_class_default_is_none_and_a_reason(self):
+        driver = FakeDriver()
+        assert driver.wait_snapshot() == (None, NOT_IMPLEMENTED)
+        assert driver.wait_delta({}, {}) == (None, NOT_IMPLEMENTED)
+        assert EngineDriver.wait_sample_interval_s is None
+
+
+class WaitCursor:
+    """Answers the four statements `mysql_snapshot` sends."""
+
+    def __init__(self, ps_on=True, timed=("wait/io/file/x",), rows=(),
+                 mutex_rows=()):
+        self.ps_on, self.timed = ps_on, list(timed)
+        self.rows, self.mutex_rows = list(rows), list(mutex_rows)
+        self.statements: List[str] = []
+        self._answer: List[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        upper = sql.upper()
+        if "@@PERFORMANCE_SCHEMA" in upper:
+            self._answer = [(1 if self.ps_on else 0,)]
+        elif "SETUP_INSTRUMENTS" in upper:
+            self._answer = [(n,) for n in self.timed]
+        elif "EVENTS_WAITS_SUMMARY" in upper:
+            self._answer = list(self.rows)
+        elif "INNODB MUTEX" in upper:
+            self._answer = list(self.mutex_rows)
+        else:
+            self._answer = []
+
+    def fetchone(self):
+        return self._answer[0] if self._answer else None
+
+    def fetchall(self):
+        return list(self._answer)
+
+
+class TestMySQLFamilyWaits:
+    def test_performance_schema_off_is_none_with_a_reason(self):
+        """MariaDB's default. Mutant (`return {"events": {}}, None` on OFF):
+        the record would claim a measured window in which nothing waited."""
+        driver = MariaDBDriver(ConnectionSpec(host="h", port=3306))
+        driver._cur = WaitCursor(ps_on=False)
+        snap, reason = driver.wait_snapshot()
+        assert snap is None
+        assert "performance_schema is OFF" in reason
+
+    def test_no_timed_wait_instrument_is_none_with_a_reason(self):
+        snap, reason = mysql_snapshot(WaitCursor(timed=()))
+        assert snap is None and "enabled and timed" in reason
+
+    def test_picoseconds_become_seconds_and_idle_is_excluded(self):
+        cur = WaitCursor(timed=("wait/io/file/x", MUTEX), rows=[
+            (MUTEX, 4, 2_000_000_000_000)],
+            mutex_rows=[("InnoDB", "trx_sys.cc:1", "waits=7")])
+        snap, reason = mysql_snapshot(cur)
+        assert reason is None
+        assert snap["events"][MUTEX] == {"count": 4, "wait_s": 2.0}
+        assert snap["synch_instruments_timed"] == 1
+        assert snap["innodb_mutex"] == {"trx_sys.cc:1": 7}
+        assert any("<> 'idle'" in s for s in cur.statements)
+
+    def test_the_family_delta_differences_mutexes_too(self):
+        before = {"events": {MUTEX: event(4, 2.0)},
+                  "innodb_mutex": {"a": 7}, "synch_instruments_timed": 3}
+        after = {"events": {MUTEX: event(9, 3.5), "new": event(1, 0.1)},
+                 "innodb_mutex": {"a": 10}, "synch_instruments_timed": 3}
+        waits, reason = mysql_delta(before, after)
+        assert reason is None
+        assert waits["events"][0] == {"event": MUTEX, "count": 5,
+                                      "wait_s": 1.5}
+        assert waits["events_total"] == 2
+        assert waits["innodb_mutex_waits"] == {"a": 3}
+
+    def test_a_counter_that_went_backwards_refuses_the_window(self):
+        waits, reason = counter_delta({"events": {MUTEX: event(9, 3.0)}},
+                                      {"events": {MUTEX: event(1, 0.1)}}, "s")
+        assert waits is None and "went backwards" in reason
+
+    def test_only_the_top_ten_are_kept_but_the_total_covers_all(self):
+        after = {"events": {f"e{i:02d}": event(1, float(i))
+                            for i in range(1, 16)}}
+        waits, _ = counter_delta({"events": {}}, after, "s")
+        assert len(waits["events"]) == 10
+        assert waits["events"][0]["event"] == "e15"
+        assert waits["events_total"] == 15
+        assert waits["total_wait_s"] == float(sum(range(1, 16)))
+
+    def test_every_mysql_family_driver_in_the_registry_reads_waits(self):
+        family = [cls for cls in _driver_classes().values()
+                  if issubclass(cls, MySQLFamilyDriver)]
+        assert len(family) >= 4, family
+        for cls in family:
+            assert cls.wait_snapshot is not EngineDriver.wait_snapshot, cls

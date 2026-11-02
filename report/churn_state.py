@@ -239,6 +239,9 @@ def during_writes_rows(records: List[Dict[str, Any]]
             "served_concurrency": extra.get("served_concurrency"),
             "outstanding_concurrency": extra.get("outstanding_concurrency"),
             "scaling_status": extra.get("scaling_status"),
+            # Ops measurement version 9: the heavy-tail note, beside the
+            # status rather than instead of it.
+            "scaling_note": extra.get("scaling_note"),
             "baseline_scaling_status": extra.get(
                 "reader_baseline_scaling_status"),
             "baseline_served_concurrency": extra.get(

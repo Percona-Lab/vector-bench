@@ -156,13 +156,14 @@ def baseline_is_credible(p50_one_client_ms: Optional[float],
                          ) -> Optional[bool]:
     """Whether the one-client baseline behind a `scaling_efficiency` was warm.
 
-    **NOTHING CALLS THIS YET, deliberately.** The caller it is for is
-    `harness/workloads/concurrency.py`, which already computes the
-    `efficiency` that `scaling_status` takes and already holds both medians --
-    `latency_p50_ms` is recorded at every point -- so wiring it up needs no
-    new recorded field. It is here and not there because it defends
-    `scaling_status`'s `efficiency` term, the argument
-    `SERVED_CONCURRENCY_FLOOR` sits here under.
+    **CALLED BY `harness/workloads/concurrency.py` SINCE OPS VERSION 9**,
+    which holds both medians -- `latency_p50_ms` is recorded at every point.
+    Where this returns False the efficiency is neither published nor passed to
+    `scaling_status`: the record carries `scaling_efficiency: null` and
+    `extra.efficiency_reliability: "baseline_not_credible"`, because a number
+    divided by a cold baseline is a number about the baseline. It is here and
+    not there because it defends `scaling_status`'s `efficiency` term, the
+    argument `SERVED_CONCURRENCY_FLOOR` sits here under.
 
     WHAT IT DEFENDS AGAINST: `warmup` in that workload is PER CLIENT, so the
     one-client baseline gets the fewest warmed queries of any point, reaches
@@ -221,6 +222,53 @@ SCALING_CONCURRENCY_NOT_ACHIEVED = "concurrency_not_achieved"
 #: every one. A tuple rather than a set so the order is the order they are
 #: documented in.
 SCALING_STATUSES = (SCALING_OK, SCALING_CONCURRENCY_NOT_ACHIEVED)
+
+#: A NOTE, never a status and never a refusal: the window's median query sat
+#: below half its mean, so the median-based "in service" figure undercounts
+#: the queries the pool really had in the engine. Recorded as
+#: `extra.scaling_note` beside an `ok` or a refusal, never instead of one.
+#:
+#: Ops version 9. The incident: `full-20260825` published MariaDB 12.3 at 32
+#: clients with p50 34 ms and p99 1,043 ms, so `queries x p50 / window` --
+#: the figure the report printed as Little's law -- counted a fraction of the
+#: queries that were outstanding, and the same median artefact printed "74-75%
+#: of the window inside the call" at ONE client where `qps x mean latency`
+#: is 1.00 for all six engines. The tail is a property of the engine worth
+#: printing; it is not evidence that the clients failed to keep their queries
+#: in flight, which is what a refusal claims.
+SCALING_TAIL_DOMINATED = "tail_dominated"
+
+#: Every note, for a report that wants to assert it has rendered each.
+SCALING_NOTES = (SCALING_TAIL_DOMINATED,)
+
+#: `served / outstanding` below which a window is `tail_dominated`. Equal to
+#: `p50 / mean` identically (both are sums over one kept span set -- see
+#: `latency.WindowConcurrency`), so this is "the median is under half the
+#: mean". Half for the reason the floor is half: the measured populations sit
+#: either side of it -- 0.16-0.19 for the skewed regimes the floor's table
+#: rebuilds, 0.95-0.99 for every narrow one.
+TAIL_DOMINATED_RATIO = 0.5
+
+
+def tail_dominated(served: Optional[float],
+                   outstanding: Optional[float]) -> Optional[bool]:
+    """Whether the median-span estimate sits under half the exact figure.
+
+    `None` when either is missing or `outstanding` is not positive: a window
+    that counted nothing has no tail to describe, and False would read as a
+    measured narrow distribution.
+    """
+    if served is None or outstanding is None or outstanding <= 0:
+        return None
+    return served / outstanding < TAIL_DOMINATED_RATIO
+
+
+def scaling_note(served: Optional[float],
+                 outstanding: Optional[float]) -> Optional[str]:
+    """`SCALING_TAIL_DOMINATED` or None -- the value `extra.scaling_note`
+    carries. One spelling for the harness and the report."""
+    return SCALING_TAIL_DOMINATED if tail_dominated(served, outstanding) \
+        else None
 
 
 def served_fraction(served: Optional[float],
@@ -336,8 +384,53 @@ def achieved_fraction(served: Optional[float], clients: int,
 
 def scaling_status(served: Optional[float],
                    clients: int,
-                   efficiency: Optional[float] = None) -> Optional[str]:
+                   efficiency: Optional[float] = None,
+                   *, outstanding: Optional[float] = None) -> Optional[str]:
     """Whether a scaling efficiency over this window is reportable.
+
+    **SINCE OPS VERSION 9 THE PRIMARY FIGURE IS `outstanding`, AND EVERY
+    LIVE CALLER PASSES IT.** The rule below this paragraph was built when the
+    clients were threads, and its reason for rejecting the exact mean-based
+    figure was the interpreter lock: a thread waiting for the lock is still
+    inside its span, so `outstanding` read the client count however little was
+    served (`latency.WindowConcurrency` has the five-driver table). The clients
+    have been separate OS processes since version 6, so that blindness has no
+    cause left in the measurement path, and keying the guard to the MEDIAN
+    kept only its cost: on `full-20260825` MariaDB 12.3 at 32 clients had p50
+    34 ms against p99 1,043 ms, and `queries x p50` counted a fraction of the
+    queries the engine actually held. Given `outstanding`:
+
+    * `outstanding / clients < SERVED_CONCURRENCY_FLOOR` refuses -- the
+      clients did not keep their queries in flight, which is the claim the
+      efficiency's denominator rests on and the one case a client clock
+      measures exactly.
+    * The residue still refuses: BOTH in-service estimators below the floor --
+      `served / clients` and a credible `throughput_fraction` -- is the
+      quadrant `TestTheResidueHoldsBothCausesAndCannotSeparateThem` measures,
+      where a pool neither scaled nor kept its median at its client count and
+      the cause cannot be attributed. Without an efficiency term (two clients,
+      no baseline, an incredible baseline, a NaN) a low `served` alone no
+      longer refuses: it is `tail_dominated` (`scaling_note`), a note.
+    * Otherwise `ok`, including a saturated server -- outstanding at the
+      client count, efficiency low, which is the engine ceiling this guard has
+      always had to publish.
+
+    **WHAT THIS GUARD DOES NOT DETECT, said plainly because the rule's name
+    invites the opposite reading.** A server that genuinely answers ONE query
+    at a time is, from the clients' clocks, indistinguishable from a
+    saturated one: every client waits inside its call, so `outstanding` is
+    about N; the queue raises the whole latency distribution, so `served` is
+    about N too; and the throughput is flat, so the efficiency is about 1/N.
+    It is published `ok`, with that low efficiency. What the guard detects is
+    CLIENT-SIDE starvation (`outstanding / N < 0.5`) and the both-low residue.
+    Server-side serialization versus saturation is not separated by any
+    figure computed here; the server's own CPU and pressure over the window
+    (`report/server_windows.py`, the report's Server CPU columns) are the
+    evidence for that, and they are beside the figure rather than in it.
+
+    `outstanding=None` is the pre-version-9 rule, byte for byte: kept so the
+    mutation probes and the archived-record recomputations that call it
+    without the keyword keep testing the arithmetic they were written about.
 
     Here rather than in `harness/workloads/clients.py`, where it was written
     and where `PoolWindow.scaling_status` still exposes it: this module owns
@@ -441,6 +534,8 @@ def scaling_status(served: Optional[float],
     in every profile. `None` still wins over this branch: a one-client window
     that counted no query is "nobody could look", not "the pool was fine".
     """
+    if outstanding is not None:
+        return _outstanding_rule(served, clients, efficiency, outstanding)
     fraction = achieved_fraction(served, clients, efficiency)
     if fraction is None:
         return None
@@ -453,6 +548,31 @@ def scaling_status(served: Optional[float],
         return SCALING_CONCURRENCY_NOT_ACHIEVED
     return SCALING_OK
 
+
+def _outstanding_rule(served: Optional[float], clients: int,
+                      efficiency: Optional[float],
+                      outstanding: float) -> Optional[str]:
+    """The version-9 rule `scaling_status` documents, given `outstanding`."""
+    occupied = served_fraction(outstanding, clients)
+    if occupied is None:
+        return None
+    if clients == 1:
+        return SCALING_OK
+    if occupied < SERVED_CONCURRENCY_FLOOR:
+        return SCALING_CONCURRENCY_NOT_ACHIEVED
+    in_service = served_fraction(served, clients)
+    throughput = throughput_fraction(efficiency, clients)
+    # `throughput == throughput` drops a NaN efficiency (a zero baseline) to
+    # "no efficiency term", which is the safe direction: without the term a
+    # low median is a note and not a refusal.
+    if (in_service is not None and throughput is not None
+            and throughput == throughput
+            and in_service < SERVED_CONCURRENCY_FLOOR
+            and throughput < SERVED_CONCURRENCY_FLOOR):
+        return SCALING_CONCURRENCY_NOT_ACHIEVED
+    return SCALING_OK
+
+
 __all__ = [
     "SERVED_CONCURRENCY_FLOOR",
     "CREDIBLE_EFFICIENCY_CEILING",
@@ -460,6 +580,11 @@ __all__ = [
     "SCALING_OK",
     "SCALING_CONCURRENCY_NOT_ACHIEVED",
     "SCALING_STATUSES",
+    "SCALING_TAIL_DOMINATED",
+    "SCALING_NOTES",
+    "TAIL_DOMINATED_RATIO",
+    "tail_dominated",
+    "scaling_note",
     "baseline_is_credible",
     "served_fraction",
     "throughput_fraction",

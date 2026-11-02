@@ -45,6 +45,13 @@ datasets:
 
 k: 10
 runs: 2
+# Publishable: a report is written from this profile, so it measures every
+# ann point at least twice (`runs: 2`). With one run, the first configuration
+# of every sweep was a single draw on a cold index -- full-20260825 (a
+# tuned-complete run at `runs: 1`) published
+# ef_search 10 slower than ef_search 20 on every MySQL-family curve -- and
+# tests/test_config.py refuses `runs < 2` on any profile marked publishable.
+publishable: true
 
 ann:
   enabled: true

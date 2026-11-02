@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy
 
@@ -198,10 +198,18 @@ def recall_per_query(returned: Sequence[Sequence[int]],
 
 def recall_at_k(returned: Sequence[Sequence[int]],
                 truth: numpy.ndarray, k: int) -> float:
-    """Mean fraction of the true top-k that each result set contains.
+    """Mean fraction of the true top-k IDS that each result set contains.
 
-    Matches ann-benchmarks' definition so the two measurement paths produce
-    directly comparable recall numbers.
+    **This is NOT ann-benchmarks' definition, and this docstring said it was
+    until ops measurement version 9.** ann-benchmarks counts a returned
+    neighbour as correct when its DISTANCE is within 1e-3 of the true k-th
+    distance (`report/loaders.py:knn_recall`); this counts it only when its
+    ID is one of the true k. The two agree on a corpus with no ties at the
+    k-th distance and part where there are: a returned row at exactly the
+    k-th distance under another id scores 1 there and 0 here. Since version 9
+    the ops workloads publish `recall_threshold` below as `recall_at_k` and
+    keep this one as `extra.recall_id_overlap`, so one name means one rule;
+    every ops record says which in `extra.recall_kind`.
 
     Derived from `recall_per_query` rather than computed beside it. The two
     were a loop each when §5.1 item 2 added the sibling, and "two paths that
@@ -238,6 +246,116 @@ def recall_at_k(returned: Sequence[Sequence[int]],
     if len(returned) == 0:
         return float("nan")
     return sum(recall_per_query(returned, truth, k)) / len(returned)
+
+
+#: `extra.recall_kind` values. Every ops record that carries a recall says
+#: which rule produced it; `report/` reads an ops record from before ops
+#: version 9 as `RECALL_ID_OVERLAP`, which is what those workloads computed.
+RECALL_DISTANCE_THRESHOLD = "distance_threshold"
+RECALL_ID_OVERLAP = "id_overlap"
+
+#: ann-benchmarks' `knn_threshold` epsilon (`plotting/metrics.py`), and
+#: `report/loaders.py:knn_recall`'s default. One constant, not a second 1e-3.
+RECALL_EPSILON = 1e-3
+
+
+def _distances(query: numpy.ndarray, rows: numpy.ndarray,
+               metric: str) -> numpy.ndarray:
+    """ann-benchmarks' distance from `query` to each of `rows`.
+
+    The two metrics this repository runs, spelled as
+    `ann_benchmarks/distance.py` spells them -- euclidean is the L2 norm of
+    the difference (not its square), angular is `1 - cos` -- because the
+    threshold below is compared against distances in THAT unit, and 1e-3 of
+    a squared distance is a different tolerance. In float64: the stored
+    vectors are float32, and doing the subtraction at the higher precision
+    cannot move a distance by anything near the epsilon.
+    """
+    q = numpy.asarray(query, dtype=numpy.float64)
+    r = numpy.asarray(rows, dtype=numpy.float64)
+    if len(r) == 0:
+        return numpy.zeros(0)
+    if metric == ANGULAR:
+        norms = numpy.linalg.norm(r, axis=1) * numpy.linalg.norm(q)
+        with numpy.errstate(divide="ignore", invalid="ignore"):
+            out = 1.0 - (r @ q) / norms
+        return numpy.where(norms > 0, out, numpy.inf)
+    return numpy.linalg.norm(r - q, axis=1)
+
+
+def recall_threshold_per_query(returned: Sequence[Sequence[int]],
+                               truth: numpy.ndarray,
+                               queries: numpy.ndarray,
+                               corpus: numpy.ndarray, metric: str, k: int,
+                               row_of: Optional[Dict[int, int]] = None
+                               ) -> List[float]:
+    """Per-query recall by ann-benchmarks' distance-threshold rule.
+
+    Exactly `report/loaders.py:knn_recall`'s rule, per query: a returned
+    neighbour counts when its distance to the query is at most the k-th true
+    distance plus `RECALL_EPSILON`, over the first k returned, divided by k.
+    So a short answer scores what it found over k, a duplicated id counts
+    twice (ann-benchmarks' loop does the same), and a row at exactly the k-th
+    distance under a DIFFERENT id counts -- the one place this and
+    `recall_at_k`'s id overlap disagree.
+
+    WHY RECOMPUTED FROM THE CORPUS: no driver returns distances
+    (`EngineDriver.query` returns ids), and ann-benchmarks itself recomputes
+    the run distances from `X_train` (`runner.run_individual_query`) rather
+    than trusting the engine's. The true k-th distance is recomputed from the
+    truth ids the same way, because the subset and filtered ground truths
+    this harness computes are ids only; for a full-corpus run it equals the
+    HDF5 `distances` column to float precision.
+
+    `row_of` maps an id the engine holds to the corpus row whose vector it
+    has -- churn re-inserts rows under fresh ids. An id with no row (absent
+    from the map and outside the corpus, or negative) is at infinite
+    distance: an answer that names nothing in the corpus is not a neighbour.
+
+    `k` is the denominator, as in `knn_recall`, except where a truth row is
+    narrower than k: a filtered predicate that qualifies fewer than k rows
+    has only that many correct answers, so the denominator is the truth
+    width and the threshold is its last distance.
+    """
+    n_corpus = len(corpus)
+    out: List[float] = []
+
+    def row(ident: Any) -> int:
+        ident = int(ident)
+        if row_of is not None and ident in row_of:
+            return int(row_of[ident])
+        return ident
+
+    for index, got in enumerate(returned):
+        if index >= len(truth) or len(truth[index]) == 0:
+            out.append(0.0)
+            continue
+        wanted = [row(t) for t in list(truth[index])[:k]]
+        count = len(wanted)
+        query = queries[index]
+        kth = _distances(query, corpus[[wanted[-1]]], metric)[0]
+        threshold = kth + RECALL_EPSILON
+        rows = [row(g) for g in list(got)[:count]]
+        valid = [r for r in rows if 0 <= r < n_corpus]
+        hits = 0
+        if valid:
+            dist = _distances(query, corpus[valid], metric)
+            hits = int(numpy.count_nonzero(dist <= threshold))
+        out.append(hits / count)
+    return out
+
+
+def recall_threshold(returned: Sequence[Sequence[int]],
+                     truth: numpy.ndarray, queries: numpy.ndarray,
+                     corpus: numpy.ndarray, metric: str, k: int,
+                     row_of: Optional[Dict[int, int]] = None) -> float:
+    """Mean of `recall_threshold_per_query`; NaN for no result sets, as
+    `recall_at_k` and `knn_recall` both return."""
+    if len(returned) == 0:
+        return float("nan")
+    per = recall_threshold_per_query(returned, truth, queries, corpus,
+                                     metric, k, row_of=row_of)
+    return sum(per) / len(returned)
 
 
 # ---------------------------------------------------------------------------

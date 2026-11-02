@@ -44,8 +44,12 @@ def _duration_s(manifest: Dict[str, Any]) -> Optional[float]:
 
 
 def _phase_tally(manifest: Dict[str, Any]) -> Dict[str, int]:
+    """Statuses of each unit's LAST attempt: `add_phase` keeps them all now,
+    and a failure a re-run fixed is not a failed unit."""
+    from report.provenance import latest_attempts
+
     tally: Dict[str, int] = {}
-    for phase in manifest.get("phases") or []:
+    for phase in latest_attempts(manifest.get("phases")):
         status = str(phase.get("status") or "unknown")
         tally = {**tally, status: tally.get(status, 0) + 1}
     return tally

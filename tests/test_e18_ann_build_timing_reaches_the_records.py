@@ -1105,11 +1105,18 @@ class TestTheCoercersMovedWithoutLoss:
         tripping this is a prompt and not a breach: raise it by a line or two
         with a reason, or take the next extraction, and do not quietly widen
         it to 800.
+
+        **Raised to 781, by one line, deliberately.** The index warm-up
+        (ANN_MEASUREMENT_VERSION 3) needs its three result attributes on the
+        ann record so `summarize` can stop calling a first-step inversion on a
+        warmed index "warm-up". The reading went to `disclosures.warmup_extra`
+        beside `query_path_extra`, so what `loaders.py` pays is the one call
+        line -- the file stood at 780 when that change began, not 779.
         """
         path = os.path.join(VB_ROOT, "report", "loaders.py")
         lines = len(open(path).read().splitlines())
-        assert lines <= 780, (
-            f"report/loaders.py is at {lines} lines against this unit's 780 "
+        assert lines <= 781, (
+            f"report/loaders.py is at {lines} lines against this unit's 781 "
             f"tripwire; the repo ceiling is 800 and is enforced elsewhere. "
             f"This is a prompt, not a breach: raise it deliberately with a "
             f"reason, or take the next extraction the way coercers.py was.")

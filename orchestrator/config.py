@@ -236,6 +236,10 @@ class ResolvedResources:
     #: results tree by engine.
     pass_signature: str = ""
     warnings: List[str] = field(default_factory=list)
+    #: mongod's WiredTiger cache. Zero for every engine that is not mongodb.
+    #: Set explicitly since ops measurement version 9 -- see the mongodb
+    #: branch of `resolve_resources` for the run that made it necessary.
+    wiredtiger_cache_bytes: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -250,6 +254,7 @@ class ResolvedResources:
             "maintenance_bytes": self.maintenance_bytes,
             "mongot_heap_bytes": self.mongot_heap_bytes,
             "maxmemory_bytes": self.maxmemory_bytes,
+            "wiredtiger_cache_bytes": self.wiredtiger_cache_bytes,
             "io_threads": self.io_threads,
             "pass_signature": self.pass_signature,
             "build_threads": self.build_threads,
@@ -261,9 +266,46 @@ class ResolvedResources:
         }
 
 
+#: The fewest client CPUs `client_cpus: auto` resolves to. The pass default is
+#: 4, and a one-client sweep needs no fewer than it already gets.
+AUTO_CLIENT_CPUS_FLOOR = 4
+
+
+def auto_client_cpus(max_clients: int) -> int:
+    """What `client_cpus: auto` resolves to for a sweep up to `max_clients`.
+
+    One client CPU per two clients, never fewer than four. Each client is a
+    forked OS process that spends most of a query waiting on the server, so
+    two share a CPU without becoming the ceiling; one per client would take
+    from the server the cores the comparison is about. `tuned-complete`
+    pinned 16 by hand for its 32-client sweep, which is this rule.
+    """
+    return max(AUTO_CLIENT_CPUS_FLOOR, -(-int(max_clients) // 2))
+
+
+def _is_auto(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() == "auto"
+
+
+def profile_max_clients(profile: Dict[str, Any]) -> Optional[int]:
+    """The largest client count the profile's concurrency sweep asks for."""
+    counts = ((profile or {}).get("ops", {}) or {}).get("client_counts") or [1]
+    try:
+        return max(int(c) for c in counts)
+    except (TypeError, ValueError):
+        return None
+
+
 def resolve_resources(resources: Dict[str, Any], engine: str,
-                      sysinfo: Any) -> ResolvedResources:
-    """Turn a resource profile plus the detected hardware into concrete limits."""
+                      sysinfo: Any,
+                      max_clients: Optional[int] = None) -> ResolvedResources:
+    """Turn a resource profile plus the detected hardware into concrete limits.
+
+    `max_clients` is the largest client count of the run's concurrency sweep,
+    which `client_cpus: auto` sizes the client cpuset from. Only a caller that
+    knows the profile can supply it, so auto without it is refused rather
+    than guessed.
+    """
     from harness.metrics.sysinfo import format_cpuset, recommended_cpuset
 
     cpu_cfg = resources.get("cpu", {}) or {}
@@ -278,7 +320,21 @@ def resolve_resources(resources: Dict[str, Any], engine: str,
     allow_smt = bool(cpu_cfg.get("allow_smt", False))
 
     want_server = int(cpu_cfg.get("server_cpus", 0) or 0)
-    want_client = int(cpu_cfg.get("client_cpus", 2) or 2)
+    # `auto` sizes the client set from the sweep instead of a hand-kept pin.
+    # A 32-client sweep from the pass default of 4 client CPUs measures the
+    # clients' ceiling and publishes it as the engine's, which is why
+    # `tuned-complete` pinned 16 by hand -- and nothing kept that number in
+    # step with its `client_counts`.
+    auto_client = _is_auto(cpu_cfg.get("client_cpus"))
+    if auto_client:
+        if not max_clients:
+            raise ValueError(
+                "resources.cpu.client_cpus is `auto`, which is sized from the "
+                "largest concurrency client count, and none was given to "
+                "resolve it against")
+        want_client = auto_client_cpus(max_clients)
+    else:
+        want_client = int(cpu_cfg.get("client_cpus", 2) or 2)
 
     # Resolve against the topology we were handed, not the live machine. In a
     # run they are the same host; in anything that passes a topology in, they
@@ -293,6 +349,23 @@ def resolve_resources(resources: Dict[str, Any], engine: str,
     if want_server <= 0:
         # "all available", minus what the client needs.
         want_server = max(1, len(pool) - want_client)
+
+    if auto_client and want_server + want_client > len(pool):
+        # A FAILURE, not the warning a numeric pin gets below. A pin is an
+        # operator's explicit choice and sharing cores is a visible trade they
+        # made; `auto` is a promise that the clients will not be the ceiling,
+        # and quietly shrinking the set breaks it in exactly the runs -- the
+        # big sweeps -- where it matters. Taken after the server set, so the
+        # server keeps the cores the pass gave it.
+        left = max(0, len(pool) - want_server)
+        raise ValueError(
+            f"resources.cpu.client_cpus: auto needs {want_client} client "
+            f"CPU(s) for a sweep up to {max_clients} clients, but the "
+            f"{len(pool)}-CPU pool (prefer_cores={prefer}, "
+            f"allow_smt={allow_smt}) has only {left} left after the "
+            f"{want_server}-CPU server set. Lower the largest client count, "
+            f"give the server fewer CPUs, or pin client_cpus to a number to "
+            f"accept shared cores.")
 
     if want_server + want_client > len(pool):
         warnings.append(
@@ -351,7 +424,13 @@ def resolve_resources(resources: Dict[str, Any], engine: str,
         mem_cfg.get("server_limit_gb", ""), mem_cfg.get("host_fraction", ""),
         mem_cfg.get("buffer_fraction", ""), mem_cfg.get("graph_cache_fraction", ""),
         mem_cfg.get("maintenance_fraction", ""),
-        cpu_cfg.get("server_cpus", ""), cpu_cfg.get("client_cpus", ""),
+        # The RESOLVED count for `auto`, the declared one otherwise. The
+        # signature keys the shared ann tree, and `auto` over a 1-32 sweep is
+        # the same 16 CPUs `tuned-complete` used to pin -- hashing the word
+        # would move that profile's tree and re-measure every recall point
+        # for nothing.
+        cpu_cfg.get("server_cpus", ""),
+        want_client if auto_client else cpu_cfg.get("client_cpus", ""),
         build_cfg.get("threads", ""), build_cfg.get("max_threads", ""),
     ))
 
@@ -464,6 +543,17 @@ def resolve_resources(resources: Dict[str, Any], engine: str,
     graph_cache_bytes = int(server_bytes * graph_fraction)
     maintenance_bytes = int(server_bytes * maint_fraction)
 
+    # mongod's WiredTiger cache IS this engine's buffer pool, so it is given
+    # the buffer share every other engine's main cache gets, rather than a
+    # number of its own. Until ops measurement version 9 the framework never
+    # set it: `config/engines/mongodb.yml` declared a
+    # `wiredtiger_cache_fraction: 0.6` that nothing read, and on
+    # `full-20260825` MongoDB ran on the server's own default (57-64 GB, from
+    # the server log) beside a 42.3 GB InnoDB buffer pool -- the one engine
+    # whose main cache was sized by its vendor's heuristic rather than by the
+    # resource pass. The flag takes GB; `server_args` renders this in GB.
+    wiredtiger_cache_bytes = buffer_bytes if engine == "mongodb" else 0
+
     total_allocated = (buffer_bytes + graph_cache_bytes + maintenance_bytes
                        + mongot_heap_bytes)
     if total_allocated > server_bytes * 0.9:
@@ -554,6 +644,7 @@ def resolve_resources(resources: Dict[str, Any], engine: str,
         maintenance_bytes=maintenance_bytes,
         mongot_heap_bytes=mongot_heap_bytes,
         maxmemory_bytes=maxmemory_bytes,
+        wiredtiger_cache_bytes=wiredtiger_cache_bytes,
         io_threads=io_threads,
         pass_signature=pass_signature,
         build_threads=build_threads,
@@ -570,16 +661,134 @@ def resolve_resources(resources: Dict[str, Any], engine: str,
 SERVER_ARG_KEYS = (
     "buffer_bytes", "graph_cache_bytes", "maintenance_bytes", "build_threads",
     "server_cpu_count", "maxmemory_bytes", "mongot_heap_bytes",
-    "server_memory_bytes", "io_threads",
+    "server_memory_bytes", "io_threads", "wiredtiger_cache_gb",
 )
 
 
+def wiredtiger_cache_gb(resolved: "ResolvedResources") -> str:
+    """`--wiredTigerCacheSizeGB`'s value: GB with two decimals.
+
+    The flag takes a float in GB (mongod's floor is 0.25), and the resolved
+    figure is bytes like every other one here. Two decimals is 10 MB of
+    resolution against a cache measured in tens of GB, so nothing is lost
+    that a reader of `engines_resolved` would want back.
+    """
+    # `getattr`: several callers hand `server_args` a hand-built stand-in for
+    # `ResolvedResources` that predates the field, and only mongodb renders it.
+    cache = getattr(resolved, "wiredtiger_cache_bytes", 0) or 0
+    return f"{max(0.25, cache / GB):.2f}"
+
+
+#: The profile key that turns the MySQL-family wait instruments on.
+WAIT_INSTRUMENTS_KEY = "server_wait_instruments"
+
+
+def ops_wait_instruments(profile: Dict[str, Any]) -> bool:
+    """`ops.server_wait_instruments`, default False, refused unless boolean.
+
+    **Default off because turning it on changes the server being measured.**
+    performance_schema's mutex and rwlock instruments put a timer read on
+    every latch acquisition, which is the hot path of exactly the
+    concurrency windows they are meant to explain, and on MariaDB they also
+    switch performance_schema itself on (its default is OFF) and with it the
+    memory that allocates. Measure the overhead in a `smoke` run -- the same
+    unit with the key off and on -- before turning it on for a profile whose
+    numbers are published; while it is on, `engines_resolved` and every
+    record say so (`extra.server_wait_instruments`).
+
+    Refused rather than coerced: YAML's `"false"` is a non-empty string and
+    would be truthy, which is a server flag nobody asked for.
+    """
+    value = (profile.get("ops") or {}).get(WAIT_INSTRUMENTS_KEY, False)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError(f"ops.{WAIT_INSTRUMENTS_KEY} must be true or false, "
+                         f"not {value!r}")
+    return value
+
+
+#: The profile key naming the concurrency client count to profile with perf.
+PROFILE_WINDOW_KEY = "profile_window_clients"
+
+
+def profile_window_clients(profile: Dict[str, Any]) -> Optional[int]:
+    """`ops.profile_window_clients`: None (off, the default) or a client count
+    the profile actually measures.
+
+    Refused when it names a count not in `ops.client_counts`: the harness
+    would never reach that window, perf would never start, and the run
+    would end with no profile and nothing saying why.
+    """
+    ops = profile.get("ops") or {}
+    value = ops.get(PROFILE_WINDOW_KEY)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"ops.{PROFILE_WINDOW_KEY} must be a client count "
+                         f"or null, not {value!r}")
+    counts = [int(c) for c in ops.get("client_counts", [1])]
+    if value not in counts:
+        raise ValueError(f"ops.{PROFILE_WINDOW_KEY} is {value}, which is not "
+                         f"one of ops.client_counts {counts}")
+    return value
+
+
+#: The profile key that lets a sampling engine sample during the window.
+WAIT_SAMPLER_KEY = "server_wait_sampler"
+
+
+def ops_wait_sampler(profile: Dict[str, Any]) -> bool:
+    """`ops.server_wait_sampler`, default False, refused unless boolean.
+
+    **Default off because it is the one wait collector that runs INSIDE the
+    measured window.** Every other engine's wait profile is two snapshots at
+    the window's edges; pgvector has no cumulative wait-event counters, so its
+    only profile is `pg_stat_activity` sampled once a second while the clients
+    run -- an extra backend and a query whose cost grows with the client
+    count. On by default it would have measured pgvector under load no other
+    engine's window carries. When on, `engines_resolved` and every pgvector
+    record say so (`server_wait_sampler: {interval_s, concurrent: true}`).
+    """
+    value = (profile.get("ops") or {}).get(WAIT_SAMPLER_KEY, False)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError(f"ops.{WAIT_SAMPLER_KEY} must be true or false, "
+                         f"not {value!r}")
+    return value
+
+
+def engine_wait_sampler_interval(engine_cfg: Dict[str, Any]
+                                 ) -> Optional[float]:
+    """`capabilities.wait_sampler_interval_s`, or None for a snapshot engine."""
+    caps = engine_cfg.get("capabilities") or {}
+    value = caps.get("wait_sampler_interval_s")
+    return float(value) if value else None
+
+
+def engine_wait_instruments(engine_cfg: Dict[str, Any]) -> List[str]:
+    """The flags an engine declares under `server.wait_instruments`."""
+    server = engine_cfg.get("server", {}) or {}
+    return [str(a) for a in (server.get("wait_instruments") or [])]
+
+
 def server_args(engine_cfg: Dict[str, Any], resource_pass: str,
-                resolved: ResolvedResources) -> List[str]:
-    """Render an engine's server flags with the resolved values substituted."""
+                resolved: ResolvedResources,
+                wait_instruments: bool = False) -> List[str]:
+    """Render an engine's server flags with the resolved values substituted.
+
+    `wait_instruments` appends the engine's `server.wait_instruments` flags
+    (`ops_wait_instruments`). Only the ops path passes it: the waits are read
+    around ops windows, and the ann results tree is shared across runs and
+    keyed without it, so an instrumented recall curve would be reused later
+    under a manifest that says the server was not instrumented.
+    """
     server = engine_cfg.get("server", {}) or {}
     args: List[str] = list(server.get("common", []) or [])
     args += list(server.get(resource_pass, []) or [])
+    if wait_instruments:
+        args += engine_wait_instruments(engine_cfg)
 
     substitutions = {
         "buffer_bytes": resolved.buffer_bytes,
@@ -595,6 +804,7 @@ def server_args(engine_cfg: Dict[str, Any], resource_pass: str,
         "io_threads": resolved.io_threads,
         "mongot_heap_bytes": resolved.mongot_heap_bytes,
         "server_memory_bytes": resolved.server_memory_bytes,
+        "wiredtiger_cache_gb": wiredtiger_cache_gb(resolved),
     }
 
     rendered: List[str] = []
@@ -615,3 +825,98 @@ def server_args(engine_cfg: Dict[str, Any], resource_pass: str,
             continue
         rendered.append(text)
     return rendered
+
+
+def server_env(resolved: ResolvedResources) -> Dict[str, str]:
+    """The size-carrying env vars every server container is started with.
+
+    One function for both measurement paths and for the manifest, so what
+    `engines_resolved` records is the env the container got rather than a
+    second spelling of it. `ann_pass.run_engine` and `ops_pass._start_server`
+    used to build these two entries inline, each with its own copy of the
+    `max(1, ...)` floor; a third copy here, for the manifest, would be the
+    one nobody noticed drifting.
+    """
+    return {
+        # Sized by resolve_resources and passed through, so a tuned run
+        # cannot silently fall back to the image default. Harmless for the
+        # single-process engines, which never read it.
+        "VB_MONGOT_HEAP_GB": str(max(1, resolved.mongot_heap_bytes // GB)),
+        "VB_MAXMEMORY_BYTES": str(resolved.maxmemory_bytes),
+    }
+
+
+def engine_resolution(engine_cfg: Dict[str, Any], resource_pass: str,
+                      resolved: ResolvedResources,
+                      wait_instruments: bool = False,
+                      wait_sampler: bool = False) -> Dict[str, Any]:
+    """What one engine was given under one pass, for `engines_resolved`.
+
+    WHY THIS IS PER ENGINE. `full-20260825` published "all six got the same
+    budget", and the budgets were not the same: InnoDB got a 42.3 GB buffer
+    pool, pgvector 72.5 GB of shared_buffers, Valkey 108.7 GB of maxmemory,
+    and MongoDB ran on its default WiredTiger cache (57-64 GB). That is
+    `resolve_resources` working as designed -- pgvector's buffer absorbs the
+    graph cache's share, an in-memory engine gets maxmemory instead of a
+    buffer -- but the manifest held one `config.resolved_resources`, written by
+    whichever engine `set_config` saw LAST. Snapshot 1 of that run, written
+    after mongodb, shows graph_cache 0 and shm 8g; snapshot 9, written after an
+    AliSQL rerun, shows 30.2 GB and 13g. The per-engine figures could only be
+    recovered from server logs.
+
+    Built from the same `engine_cfg` and `resolved` objects `cmd_run` hands to
+    `_run_unit`, through the same `server_args` and `server_env` the two
+    container launchers call, so the record and the container cannot disagree
+    without one of those functions changing for both.
+
+    `mem_limit_bytes` is the SERVER's limit. The ann container adds the
+    client's in-RAM corpus on top (`ann_pass.client_memory_bytes`), because
+    that is the benchmark's memory and not the engine's; it is per dataset,
+    and this record is per (engine, pass).
+    """
+    # Which resolved figures a server flag actually carries, read off the
+    # templates rather than inferred from the rendered values: MyVector's
+    # graph cache and buffer resolve to the same byte count, so "is the
+    # number in the args" said MyVector had a graph cache it has no flag for.
+    server = engine_cfg.get("server", {}) or {}
+    templates = " ".join(str(a) for a in list(server.get("common", []) or [])
+                         + list(server.get(resource_pass, []) or []))
+    applied = [key for key in SERVER_ARG_KEYS if "{" + key + "}" in templates]
+    if resolved.graph_cache_bytes == 0 and "graph_cache_bytes" in applied:
+        # `server_args` drops a zero cache-size flag; so does this record.
+        applied.remove("graph_cache_bytes")
+    entry = {
+        "resolved": resolved.as_dict(),
+        "server_args": server_args(engine_cfg, resource_pass, resolved),
+        "applied": applied,
+        "container": {
+            "cpuset": resolved.server_cpuset,
+            "mem_limit_bytes": resolved.server_memory_bytes,
+            "shm_size": resolved.shm_size,
+            "env": server_env(resolved),
+        },
+    }
+    # Only when ON and only for an engine that declares instruments, so a
+    # default run's entry is byte-identical to one written before the key
+    # existed -- `record_engine_resolution` refuses a resume whose entry
+    # differs, and an always-present `false` would refuse every resume of
+    # every run recorded before it.
+    flags = engine_wait_instruments(engine_cfg) if wait_instruments else []
+    if flags:
+        entry["applied"] = applied + [WAIT_INSTRUMENTS_KEY]
+        entry[WAIT_INSTRUMENTS_KEY] = {
+            "enabled": True,
+            "flags": flags,
+            # `server_args` above is what the ann path starts; the ops server
+            # gets these appended (see `server_args`).
+            "applies_to": ["ops"],
+        }
+    # Same rule for the sampler: present only when on, and only for an engine
+    # that samples, so every default entry stays byte-identical.
+    interval = engine_wait_sampler_interval(engine_cfg) if wait_sampler \
+        else None
+    if interval:
+        entry["applied"] = entry["applied"] + [WAIT_SAMPLER_KEY]
+        entry[WAIT_SAMPLER_KEY] = {"interval_s": interval, "concurrent": True,
+                                   "applies_to": ["ops"]}
+    return entry

@@ -253,6 +253,72 @@ def _accumulate_datasets(prior: Dict[str, Any], phases: Any,
     return out
 
 
+class ResolutionChanged(Exception):
+    """A resume resolved an engine differently from what it was measured
+    under. Carries both values, so the refusal can show which knob moved."""
+
+    def __init__(self, engine: str, resource_pass: str,
+                 recorded: Dict[str, Any], now: Dict[str, Any]):
+        self.engine = engine
+        self.resource_pass = resource_pass
+        self.recorded = recorded
+        self.now = now
+        super().__init__(
+            f"{engine} / {resource_pass}: recorded resolution differs from "
+            f"this run's")
+
+    def differences(self) -> List[str]:
+        """`key: recorded -> now` for every leaf that moved."""
+        out: List[str] = []
+        _diff(_without_timestamp(self.recorded), _without_timestamp(self.now),
+              "", out)
+        return out
+
+
+class SelectionChanged(Exception):
+    """A resume would apply a different build selection from the one the run
+    directory recorded. `recorded` or `now` is None when that side had none."""
+
+    def __init__(self, recorded: Optional[Dict[str, Any]],
+                 now: Optional[Dict[str, Any]]):
+        self.recorded = recorded
+        self.now = now
+        super().__init__(
+            f"this run directory was measured under {_spell_selection(recorded)}"
+            f", and this invocation applies {_spell_selection(now)}. Resuming "
+            f"would put two grids under one manifest; start a fresh --run-id, "
+            f"or pass the overlay the run started with.")
+
+
+def _spell_selection(block: Optional[Dict[str, Any]]) -> str:
+    if not block:
+        return "no build selection"
+    stage1 = (block.get("stage1") or {}).get("run_id")
+    return f"the build selection made from stage-1 run {stage1!r}"
+
+
+def _without_timestamp(entry: Dict[str, Any]) -> Any:
+    """The entry as it would read back from disk, minus `recorded_at`.
+
+    Round-tripped through JSON because one side of every comparison came off
+    disk: a tuple in the fresh entry is a list in the recorded one, and the
+    two must compare equal or every resume is refused.
+    """
+    trimmed = {k: v for k, v in (entry or {}).items() if k != "recorded_at"}
+    return json.loads(json.dumps(trimmed, sort_keys=True, default=str))
+
+
+def _diff(old: Any, new: Any, prefix: str, out: List[str]) -> None:
+    if isinstance(old, dict) and isinstance(new, dict):
+        for key in sorted(set(old) | set(new)):
+            _diff(old.get(key), new.get(key),
+                  f"{prefix}.{key}" if prefix else str(key), out)
+        return
+    if old != new:
+        out.append(f"{prefix}: {json.dumps(old)} (recorded) -> "
+                   f"{json.dumps(new)} (now)")
+
+
 class Manifest:
     def __init__(self, run_dir: str, run_id: str):
         self.run_dir = run_dir
@@ -485,25 +551,121 @@ class Manifest:
     def add_phase(self, name: str, engine: str, dataset: str,
                   status: str, started_at: str, finished_at: str,
                   detail: Optional[Dict[str, Any]] = None) -> None:
-        # A repeated unit replaces its earlier attempt rather than sitting
-        # beside it. Otherwise a re-run that fixes a failure leaves the failure
-        # in the manifest, and the report keeps reporting it.
-        self.data["phases"] = [
-            p for p in self.data["phases"]
-            if not (p.get("phase") == name and p.get("engine") == engine
-                    and p.get("dataset") == dataset
-                    and p.get("resource_pass") == (detail or {}).get("resource_pass"))
-        ]
-        self.data["phases"].append({
+        """Append one attempt of a unit, numbered within that unit.
+
+        **Appended, never replaced.** A repeated unit used to replace its
+        earlier attempt, so that a re-run which fixed a failure would not
+        leave the failure in the report. The price was provenance:
+        `full-20260825`'s manifest listed only the 08-31 MySQL-family ann
+        attempts, which rendered M=6 and wrote M=6 files, while the M=16
+        files its recall table was built from came from the 08-26/27 attempts
+        this method had erased. Nothing could then tie a published number to
+        the attempt that measured it.
+
+        The failure-keeps-being-reported concern is answered on the reading
+        side instead: `report/scope.py::latest_attempts` gives the readers
+        that ask "how did this unit end" the last attempt per unit, and the
+        provenance check reads them all, because an earlier attempt's files
+        are still on disk and may be what a later attempt skipped onto.
+        """
+        detail = dict(detail or {})
+        unit = (name, engine, dataset, detail.get("resource_pass"))
+        attempt = 1 + sum(
+            1 for p in self.data["phases"]
+            if (p.get("phase"), p.get("engine"), p.get("dataset"),
+                p.get("resource_pass")) == unit)
+        # `attempt` after the splat so a caller cannot renumber history.
+        self.data["phases"] = self.data["phases"] + [{
             "phase": name,
             "engine": engine,
             "dataset": dataset,
             "status": status,
             "started_at": started_at,
             "finished_at": finished_at,
-            **(detail or {}),
-        })
+            **detail,
+            "attempt": attempt,
+        }]
         self.save()
+
+    def record_engine_resolution(self, engine: str, resource_pass: str,
+                                 entry: Dict[str, Any]) -> str:
+        """Record what `engine` was given under `resource_pass`, once.
+
+        `engines_resolved[<engine>][<pass>]` -- see
+        `config.engine_resolution` for the incident it exists for. Returns
+        what happened, for the caller's log line:
+
+        * ``"recorded"`` -- first writer for this (engine, pass).
+        * ``"unchanged"`` -- already recorded, and identical apart from
+          `recorded_at`. Nothing is rewritten, so `recorded_at` stays the
+          time the measurement's budget was decided.
+        * ``"archived"`` -- no entry, but the phase log already holds a unit
+          of this (engine, pass): it was measured by code that did not record
+          one. Stamping today's resolution there would be the re-stamp
+          `_accumulate_passes` refuses for the pass block, and for the same
+          reason -- a resume may run on another machine or after a config
+          change, and the archive's units were not measured under it. Absent
+          stays absent; the report says it cannot show that engine's budget.
+
+        Raises `ResolutionChanged` when an entry exists and differs. Whether
+        that refuses the run is the caller's decision, because only the caller
+        knows whether anything is left to measure.
+        """
+        block = self.data.get("engines_resolved") or {}
+        recorded = (block.get(engine) or {}).get(resource_pass)
+        if recorded is not None:
+            if _without_timestamp(recorded) != _without_timestamp(entry):
+                raise ResolutionChanged(engine, resource_pass, recorded, entry)
+            return "unchanged"
+        if any(p.get("engine") == engine
+               and p.get("resource_pass") == resource_pass
+               for p in self.data.get("phases") or []
+               if isinstance(p, dict)):
+            return "archived"
+        self.data["engines_resolved"] = {
+            **block,
+            engine: {**(block.get(engine) or {}),
+                     resource_pass: {**entry, "recorded_at": utcnow()}},
+        }
+        self.save()
+        return "recorded"
+
+    def set_build_selection(self, selection: Optional[Dict[str, Any]]) -> str:
+        """Record which stage-1 run chose this run's builds, once.
+
+        `build_selection` is written by `select-builds` into the overlay that
+        `run --overlay` applies, and recorded here verbatim: the stage-1 run
+        id and path, the full grid that run explored, every build kept with
+        its reasons, every build pruned with its reason, and the stage-1
+        recall at each kept (build, ef_search) for the transfer check a later
+        report makes. See `orchestrator/build_selection.py`.
+
+        `record_engine_resolution`'s rule, for the same reason: the grid a
+        run measures is part of what its directory means, and a resume that
+        applies a different selection -- or none -- would put two grids under
+        one manifest. Returns "recorded", "unchanged" or "none"; raises
+        `SelectionChanged` when the directory already holds a different one,
+        or when units were measured here before any selection was recorded.
+        Whether that refuses the run is the caller's decision.
+        """
+        recorded = self.data.get("build_selection")
+        if recorded is None and selection is None:
+            return "none"
+        if recorded is not None:
+            if _without_timestamp(recorded) != _without_timestamp(
+                    selection or {}) or selection is None:
+                raise SelectionChanged(recorded, selection)
+            return "unchanged"
+        if any(isinstance(p, dict) for p in self.data.get("phases") or []) \
+                or self.data.get("engines_resolved"):
+            # Units were measured -- or a run was resolved and may have died
+            # mid-unit, leaving ann results in the shared tree with no phase
+            # entry -- without a selection; recording one now would claim it
+            # chose builds it never saw.
+            raise SelectionChanged(None, selection)
+        self.data["build_selection"] = {**selection, "recorded_at": utcnow()}
+        self.save()
+        return "recorded"
 
     def add_warning(self, message: str) -> None:
         if message not in self.data["warnings"]:
