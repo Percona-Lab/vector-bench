@@ -1,0 +1,163 @@
+# Stage 1 of the two-stage frontier: every build knob, every engine, 90k rows.
+#
+# WHY THIS EXISTS
+#
+# A reviewer of full-20260825 (tuned-complete, dbpedia-openai 990k x 1536,
+# M=16 only) wrote: "A Pareto frontier means you explore the whole space of
+# parameter values and select the best. I personally test M=4, 6, 8, 12, 16,
+# 32, 48." He is right about what the headline run did not do. tuned-complete
+# pins M=16, the tuned pass adds M=6 for the three MySQL-family engines whose
+# only build knob is M, pgvector and Valkey sweep ef_construction, and Percona
+# Search sweeps quantization -- so each engine's "frontier" is the envelope of
+# a different, hand-picked handful of builds.
+#
+# Doing it at full size is not affordable. An InnoDB-engine index build at
+# 990,000 rows is three to six hours per M value, so seven M values on three
+# engines is about four days of builds before a query runs. Doing it at 90,000
+# rows is: the same builds take minutes. So the frontier is found in two
+# stages.
+#
+#   Stage 1 (this profile): the whole grid below, at 90,000 rows.
+#   Stage 2: `select-builds` reads stage 1's records, keeps the builds that
+#            make the frontier at or near the recall floors 0.90/0.95/0.99
+#            plus the M either side of each, and writes an overlay that
+#            `run --profile tuned-complete --overlay <file>` measures at
+#            990,000 rows. The stage-2 manifest records this run, the grid
+#            explored here, what was kept and what was pruned and why.
+#
+# WHY IT TRANSFERS. Recall at fixed M barely moves with corpus size: M=16
+# differs by at most 0.014 between 90,000 and 990,000 rows (the m-sweep of
+# 2026-08-28 against full-20260825). Throughput does not transfer -- every
+# engine is faster on a smaller graph -- which is why stage 2 re-measures the
+# chosen builds at full size rather than publishing these numbers as the
+# headline, and why it keeps the neighbouring M values: if the winner moves
+# by one step at 990,000 rows, stage 2 has measured the step it moved to.
+# The stage-2 manifest carries every stage-1 (build, ef_search, recall) it
+# was chosen from, so a report can flag any pair whose recall moved by more
+# than 0.02.
+#
+# WHY A NEW PROFILE AND NOT m-sweep. m-sweep answers a different question and
+# answers it on purpose: M as the ONLY axis, ef_construction and quantization
+# pinned, so the shape of each engine's M response is read without a second
+# knob moving underneath it. Its 2026-08-28 results are what the tuned pass's
+# M=6 decision cites (config/resources/tuned.yml). Widening it in place would
+# change what that name measured, and a rerun of it would no longer reproduce
+# the run it is cited for. This profile is the full space; m-sweep is one
+# slice of it.
+#
+# THE GRID, PER ENGINE, and why each value is or is not there:
+#
+#   mariadb, mariadb123, alisql   M 4..48 (7 builds). M is their only build
+#                                 knob. Legal range 3..200 on both
+#                                 (vector_mhnsw.cc `default_m`,
+#                                 vidx_common.h `M_MIN`/`M_MAX`).
+#   pgvector                      M 4..48 x ef_construction 64/200/400 = 20
+#                                 builds, not 21: pgvector refuses
+#                                 ef_construction < 2*m, so M=48 at 64 is
+#                                 dropped by `render_config` and named before
+#                                 the run (orchestrator/ann_knobs.py). It is
+#                                 not clamped and M=48 is still built at 200
+#                                 and 400.
+#   valkey, percona, myvector     M 4..48 x ef_construction 64/200/400 = 21
+#                                 builds each. All legal (hnswlib's floor is
+#                                 M=2, Percona's 2..200 with ef_construction
+#                                 1..4096).
+#   mongodb (Percona Search)      quantization scalar and none = 2 builds. mongot
+#                                 exposes no graph degree to this framework, so
+#                                 M is pinned to one label (16) below rather
+#                                 than swept into seven identical curves.
+#                                 Atlas documents an hnswOptions.maxEdges (16..64)
+#                                 for its own mongot; nothing in this checkout
+#                                 shows the Percona package at its pin honours
+#                                 it, the overlay module does not send it, and
+#                                 an option silently ignored would produce
+#                                 exactly the identical-curves-under-different-
+#                                 labels failure. Four of the seven values
+#                                 (4, 6, 8, 12) would be below that documented
+#                                 floor anyway.
+#
+# Quantization here is a sweep, not the vendor recommendation it is at 990k:
+# 90,000 x 1536 float32 is ~0.55 GB, below the 3 GB MongoDB advises
+# quantizing above. Both are measured so stage 2 can choose between them.
+#
+# RUNS. Two, and the profile is publishable. Selection is made on QPS as well
+# as recall, and full-20260825 at `runs: 1` measured ef_search 10 slower than
+# 20 on every MySQL-family curve -- a single cold draw can move a point off
+# the frontier and prune the build that should have been kept. The second run
+# repeats queries, not builds, so at 90,000 rows it adds minutes to a run whose
+# cost is index builds. And the stage-1 frontier is the one place the whole
+# space is measured, so it is the figure that answers the reviewer directly --
+# labelled as 90,000 rows, never set beside the 990,000-row headline.
+#
+# COST. `run` prints a per-engine estimate before it starts, with a second
+# per-engine line counting every build the rendered grid asks for (the
+# ingest total charges ann.m_values once per engine, which undercounts any
+# engine with ef_construction or quantization). docs/07-planning-a-run.md
+# carries the figures: roughly 15 h of ann loads -- AliSQL ~6.0, Percona
+# Server ~3.6, MariaDB 12.3 ~3.0, MariaDB 11.8 ~2.2, all building the graph
+# on INSERT -- plus the queries, which no measured rate prices. The same grid
+# at 990,000 rows is ~267 h of loads; that difference is what stage 2 buys.
+#
+#   ./scripts/generate-dataset.sh dbpedia-openai-100k-angular
+#   ./run-benchmark.sh run --profile frontier-explore
+#   ./run-benchmark.sh select-builds --from results/<that run id> \
+#       --out state/frontier-stage2.yml
+#   ./run-benchmark.sh run --profile tuned-complete \
+#       --resource-pass tuned --overlay state/frontier-stage2.yml
+name: frontier-explore
+description: Stage 1 of the two-stage frontier - every build knob at 90k rows (~15 h of loads)
+
+datasets:
+  - dbpedia-openai-100k-angular
+
+k: 10
+runs: 2
+publishable: true
+default_resource_pass: tuned
+
+resources:
+  cpu:
+    client_cpus: 16
+  extras:
+    mariadb_storage_engines: [InnoDB]
+    # Cleared with null, not {}: the profile override merges dict-into-dict,
+    # so {} would leave the tuned pass's M=[6,16] for the MySQL-family engines
+    # in place and cut their seven values to two -- which is exactly what it
+    # once did to m-sweep (CLAUDE.md, the deep-merge invariant).
+    m_values_by_engine: null
+    # The whole ef_construction axis on every engine that has one. At 90,000
+    # rows each build costs minutes, which is the whole reason this stage
+    # exists.
+    pgvector_ef_construction: [64, 200, 400]
+    valkey_ef_construction: [64, 200, 400]
+    percona_ef_construction: [64, 200, 400]
+    myvector_ef_construction: [64, 200, 400]
+    # scalar first, as in the tuned pass: the ops pass and the reference build
+    # take the head of this list, and the report's headline build must stay
+    # the one tuned-complete measures.
+    mongodb_quantization: [scalar, none]
+
+ann:
+  enabled: true
+  # The reviewer's grid, verbatim.
+  m_values: [4, 6, 8, 12, 16, 32, 48]
+  # mongot exposes no graph degree; see the header. One label, the one every
+  # other profile carries, so its result files are named as they are there.
+  m_values_by_engine:
+    mongodb: [16]
+  ef_search: [10, 20, 40, 80, 120, 200, 400, 800]
+  insert_threads: 8
+  mariadb_storage_engines: [InnoDB]
+  # Normalized-pass fallbacks. This profile defaults to the tuned pass, where
+  # resources.extras above supplies the swept lists.
+  pgvector_ef_construction: 200
+  valkey_ef_construction: 200
+  mongodb_quantization: none
+  pgvector_build_modes: [post]
+  valkey_build_modes: [post]
+
+ops:
+  # Off, as in m-sweep: build cost, concurrency, filtered search and churn are
+  # answered by tuned-complete at full scale, and 90,000-row ops figures would
+  # be a second set of numbers for the same questions.
+  enabled: false

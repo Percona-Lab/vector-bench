@@ -17,6 +17,26 @@
 # tens of minutes and makes five values of M affordable on every engine that
 # exposes one.
 #
+# ONE SLICE OF THE SPACE, NOT THE WHOLE OF IT
+#
+# M is the only build knob that moves here, deliberately: ef_construction and
+# quantization are pinned below so each engine's M response is read without
+# a second axis moving underneath it. The full parameter space -- the
+# reviewer's M = 4, 6, 8, 12, 16, 32, 48 crossed with ef_construction
+# 64/200/400 and both quantizations, at the same 90,000 rows -- is
+# `frontier-explore`, stage 1 of the two-stage frontier:
+#
+#   ./run-benchmark.sh run --profile frontier-explore            # ~15 h of loads
+#   ./run-benchmark.sh select-builds --from results/<that run> \
+#       --out state/frontier-stage2.yml
+#   ./run-benchmark.sh run --profile tuned-complete --resource-pass tuned \
+#       --overlay state/frontier-stage2.yml                      # 990,000 rows
+#
+# docs/07-planning-a-run.md §2a has the selection rule and what each stage
+# costs. This profile stays as it is so the 2026-08-28 results the tuned
+# pass's M=6 decision cites (config/resources/tuned.yml) remain reproducible
+# under the name they were measured under.
+#
 # WHAT IT DOES NOT DO
 #
 # It does not replace the headline numbers. HNSW insert cost and search cost
