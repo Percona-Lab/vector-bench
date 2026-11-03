@@ -1,0 +1,60 @@
+# Percona Server's two build modes side by side, now that the bulk one builds.
+#
+#   post         load with no vector index, then one
+#                ALTER TABLE ... ADD VECTOR KEY ... ALGORITHM=INPLACE
+#   incremental  the index exists from CREATE TABLE and every INSERT grows it
+#
+# WHY THIS EXISTS. `capabilities.bulk_vector_index_build: false` in
+# config/engines/percona.yml took `post` out of every profile after the ALTER
+# killed the server on 2026-10-15 at the previous pin. At the current pin
+# config/profiles/percona-bulk-repro.yml built it 25 times out of 25 on
+# fashion-mnist (20,000 rows, 3.4-5.8 s per ALTER) and nothing crashed. That
+# answers "does it survive", not "is the index it builds as good". This
+# profile answers the second before the capability is flipped: build cost,
+# recall at the calibrated operating point, single-client latency and filtered
+# search for each mode, on the same corpus, M and ef_construction.
+#
+# `config/profiles/percona.yml` is the profile meant to run both modes and
+# cannot while the capability is false -- it pins `[incremental]` and says to
+# restore `[post, incremental]` when the server is fixed. This one asks for
+# `post` explicitly, which the framework honours with a warning, and leaves
+# that profile alone until the decision is made.
+#
+# The whole training set (60,000 rows), not the 20,000 the crash was seen on:
+# a bigger graph is a fairer test of a one-pass build and still takes minutes.
+# One load thread, as in the repro, so the `post` load is the same load.
+#
+# `churn` is out for the reason `config/profiles/percona.yml` gives: it
+# measures neither build mode, and its repair (the same ALTER) is withdrawn
+# while the capability is false. The ann phase is off because the ann overlay
+# module has no build_mode -- it would draw one curve, incremental, twice.
+#
+# Concurrency stops at 4 clients. On a laptop the normalized pass falls back
+# to a single client CPU (a hybrid CPU has too few performance cores for
+# 8 + 4), so counts above that measure the client, not the server.
+name: percona-build-modes
+description: Percona Server post (load, then ALTER TABLE ADD VECTOR KEY) vs incremental build, fashion-mnist 60k
+engines: [percona]
+datasets:
+  - fashion-mnist-784-euclidean
+default_resource_pass: normalized
+
+k: 10
+runs: 1
+
+ann:
+  enabled: false
+  m_values: [16]
+
+ops:
+  enabled: true
+  workloads: [build, concurrency, filtered]
+  m_values: [16]
+  ef_search: 100
+  subset_rows: null
+  load_threads: 1
+  max_queries: 500
+  client_counts: [1, 4]
+  concurrency_duration_s: 15
+  selectivities: [0.10, 0.01]
+  percona_build_modes: [post, incremental]

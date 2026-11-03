@@ -136,6 +136,19 @@ CREATE TABLE t1 (
 ALTER TABLE t1 ADD VECTOR KEY vi (v) TYPE hnsw (M = 16, ef_construction = 200, metric = euclidean), ALGORITHM=INPLACE;
 ```
 
+## Comparing the two build modes
+
+Surviving the ALTER is not the same as building a good index.
+`config/profiles/percona-build-modes.yml` runs both modes on all 60,000
+fashion-mnist rows with queries: build cost, recall at the calibrated
+operating point, 1 and 4 clients, and filtered search at 10% and 1%.
+
+```bash
+./run-benchmark.sh run --profile percona-build-modes --engines percona
+```
+
+The report's tables carry one row per build mode.
+
 ## When it is fixed
 
 Set `capabilities.bulk_vector_index_build: true` in
