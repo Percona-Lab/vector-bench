@@ -41,11 +41,17 @@ python3 -c 'import yaml' 2>/dev/null || die "python3 with PyYAML is required (ap
 
 old_pattern=$(cat /proc/sys/kernel/core_pattern)
 tmp_profile=
+restore_pattern() {
+    [ "$(cat /proc/sys/kernel/core_pattern)" = "$old_pattern" ] && return 0
+    echo "restoring kernel.core_pattern to: $old_pattern"
+    printf '%s\n' "$old_pattern" | sudo tee /proc/sys/kernel/core_pattern >/dev/null && return 0
+    echo "WARNING: kernel.core_pattern is still '$(cat /proc/sys/kernel/core_pattern)'. Put it back with:" >&2
+    echo "  echo '$old_pattern' | sudo tee /proc/sys/kernel/core_pattern" >&2
+    return 1
+}
 cleanup() {
     [ -n "$tmp_profile" ] && rm -f "$tmp_profile"
-    [ "$(cat /proc/sys/kernel/core_pattern)" = "$old_pattern" ] && return
-    echo "restoring kernel.core_pattern to: $old_pattern"
-    printf '%s\n' "$old_pattern" | sudo tee /proc/sys/kernel/core_pattern >/dev/null
+    restore_pattern
 }
 trap cleanup EXIT
 
@@ -56,12 +62,6 @@ if [ "$ROWS" != 20000 ]; then
     tmp_profile=config/profiles/$PROFILE.yml
     sed "s/subset_rows: 20000/subset_rows: $ROWS/;s/^name: .*/name: $PROFILE/" \
         config/profiles/percona-bulk-repro.yml > "$tmp_profile"
-fi
-
-if [ -z "${NO_CORE:-}" ] && [ "$old_pattern" != "$CORE_PATTERN" ]; then
-    echo "kernel.core_pattern is '$old_pattern'; setting it to '$CORE_PATTERN' for this script (sudo)"
-    printf '%s\n' "$CORE_PATTERN" | sudo tee /proc/sys/kernel/core_pattern >/dev/null \
-        || die "could not set kernel.core_pattern; rerun with NO_CORE=1 to go without cores"
 fi
 
 [ -e "datasets/$DATASET.hdf5" ] \
@@ -78,9 +78,18 @@ mkdir -p "$OUT"
         echo "$image: $(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null)"
     done
     echo "host: $(uname -srm), $(nproc) cpus"
-    echo "rows: $ROWS, attempts: $ATTEMPTS, core_pattern: $(cat /proc/sys/kernel/core_pattern)"
+    echo "rows: $ROWS, attempts: $ATTEMPTS"
 } > "$OUT/versions.txt"
 cat "$OUT/versions.txt"
+
+# Only now, after the build: the build can outlast sudo's credential cache, and
+# a restore that has to prompt at exit is one that gets missed.
+if [ -z "${NO_CORE:-}" ] && [ "$old_pattern" != "$CORE_PATTERN" ]; then
+    echo "kernel.core_pattern is '$old_pattern'; setting it to '$CORE_PATTERN' for this script (sudo)"
+    printf '%s\n' "$CORE_PATTERN" | sudo tee /proc/sys/kernel/core_pattern >/dev/null \
+        || die "could not set kernel.core_pattern; rerun with NO_CORE=1 to go without cores"
+fi
+echo "core_pattern during the attempts: $(cat /proc/sys/kernel/core_pattern)" | tee -a "$OUT/versions.txt"
 
 crashed=0
 for i in $(seq 1 "$ATTEMPTS"); do
@@ -110,6 +119,8 @@ for i in $(seq 1 "$ATTEMPTS"); do
     echo "attempt $i: $verdict" | tee -a "$OUT/summary.txt"
     cp -r "$run" "$OUT/"
 done
+
+restore_pattern
 
 # The core is only readable against the exact binary that wrote it.
 if [ "$crashed" -gt 0 ]; then

@@ -85,9 +85,11 @@ The framework already does three of the four things a core needs:
 
 The fourth is the host's `kernel.core_pattern`, which the framework never
 changes. On stock Ubuntu it pipes cores to apport, which writes no file. The
-script sets it to `core.%p` with sudo and restores the old value when it
-exits, including on Ctrl-C. While the script runs, the setting applies to the
-whole host. `NO_CORE=1` leaves it alone, and you get the logs without a core.
+script sets it to `core.%p` with sudo after the image build, right before the
+attempts, and puts the old value back as soon as they finish (or on Ctrl-C).
+It applies to the whole host while it is set. If sudo asks for a password
+again at the restore and does not get it, the script prints the command that
+puts the old value back. `NO_CORE=1` leaves it alone, and you get the logs without a core.
 
 The image strips debug sections (`strip --strip-debug`) and keeps the symbol
 table. So the backtrace has function names on every thread, but no line
