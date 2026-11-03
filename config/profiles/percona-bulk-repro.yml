@@ -1,0 +1,47 @@
+# Reproduction of Percona Server's bulk vector-index build crash. Not a
+# measurement: driven by scripts/repro-percona-bulk-build.sh, which repeats it
+# and collects the error log, the core and a backtrace from every attempt.
+# docs/repro-percona-bulk-build.md is the procedure from a clean machine.
+#
+# One ops unit, the build workload only, in the one mode that crashes:
+# `post` loads the rows with no vector index and then runs
+#
+#     ALTER TABLE t1 ADD VECTOR KEY vi (v) TYPE hnsw (M = 16,
+#         ef_construction = 200, metric = euclidean), ALGORITHM=INPLACE
+#
+# `config/engines/percona.yml` declares `capabilities.bulk_vector_index_build:
+# false`, so every other profile runs `incremental` for this engine; an
+# explicit `post` here is honoured with a warning, which is the opt-in that
+# declaration leaves open for exactly this.
+#
+# THE SHAPE IS THE ONE THAT CRASHED, NOT A CHOICE: fashion-mnist, 20,000
+# rows, one load thread, M=16, normalized pass. Seen on 2026-10-15 at the old
+# pin (9.7.1-1, -march=native): run percona-20261015-183321 built the
+# index in 7.6 s, and percona-20261015-203911, the same profile, lost the
+# server inside the ALTER. Intermittent, so one passing attempt proves nothing.
+#
+# The other workloads are left out because they come after the ALTER and say
+# nothing about it; when the ALTER succeeds the unit ends there.
+name: percona-bulk-repro
+description: Percona bulk vector-index build (load, then ALTER TABLE ADD VECTOR KEY) crash reproduction
+engines: [percona]
+datasets:
+  - fashion-mnist-784-euclidean
+default_resource_pass: normalized
+
+k: 10
+runs: 1
+
+ann:
+  enabled: false
+  m_values: [16]
+
+ops:
+  enabled: true
+  workloads: [build]
+  m_values: [16]
+  ef_search: 100
+  subset_rows: 20000
+  load_threads: 1
+  max_queries: 200
+  percona_build_modes: [post]
