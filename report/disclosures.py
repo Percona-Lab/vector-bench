@@ -27,6 +27,20 @@ from typing import Any, Callable, Dict, Iterable, List
 #: `extra.distance_impl` values that mean "no SIMD on this path".
 SCALAR_DISTANCE = "scalar"
 
+#: `extra.vector_binding` values that mean the vector crosses the wire as text
+#: and is parsed by the server -- every other MySQL-family engine binds packed
+#: float32 (VillageSQL's SVECTOR has no binary input).
+TEXT_BINDING = "text"
+
+#: `extra.extension_status` values that mean the vector support is a preview
+#: feature the vendor does not call stable (VillageSQL's custom indexes).
+PREVIEW_STATUS = "preview"
+
+#: The free-text query-path facts copied off ann HDF5 attributes as well as
+#: `distance_impl`. Absent for every engine that does not declare them, so
+#: their records are unchanged.
+_TEXT_FACTS = ("vector_binding", "extension_status")
+
 
 def query_path_extra(attrs: Dict[str, Any]) -> Dict[str, Any]:
     """The query-path facts an ann overlay module set, for a record's `extra`.
@@ -43,11 +57,12 @@ def query_path_extra(attrs: Dict[str, Any]) -> Dict[str, Any]:
             out["round_trips_per_query"] = int(trips)
         except (TypeError, ValueError):
             pass
-    impl = attrs.get("distance_impl")
-    if isinstance(impl, (bytes, bytearray)):
-        impl = impl.decode("utf-8", "replace")
-    if isinstance(impl, str) and impl:
-        out["distance_impl"] = impl
+    for key in ("distance_impl",) + _TEXT_FACTS:
+        value = attrs.get(key)
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", "replace")
+        if isinstance(value, str) and value:
+            out[key] = value
     return out
 
 
@@ -206,6 +221,12 @@ def structural_facts(records: Iterable[Dict[str, Any]]
         if isinstance(impl, str) and impl.startswith(SCALAR_DISTANCE):
             entry = out.setdefault(engine, {})
             entry.setdefault("distance_impl", set()).add(impl)
+        binding = extra.get("vector_binding")
+        if isinstance(binding, str) and binding.startswith(TEXT_BINDING):
+            out.setdefault(engine, {})["vector_binding"] = binding
+        status = extra.get("extension_status")
+        if isinstance(status, str) and status.startswith(PREVIEW_STATUS):
+            out.setdefault(engine, {})["extension_status"] = status
     return out
 
 
@@ -286,6 +307,23 @@ def structural_lines(records: Iterable[Dict[str, Any]],
                 f"{impl} implementation (`extra.distance_impl`); its other "
                 f"metric uses SIMD kernels, so its throughput on this metric "
                 f"is not a statement about its SIMD path.")
+        binding = fact.get("vector_binding")
+        if binding:
+            lines.append(
+                f"- **{name}** receives every vector as a text literal "
+                f"(`extra.vector_binding`: {binding}): the client formats "
+                f"each element and the server parses it on every INSERT and "
+                f"inside every timed query. The other MySQL-family engines "
+                f"bind packed float32, so part of this engine's load time and "
+                f"latency is that conversion.")
+        status = fact.get("extension_status")
+        if status:
+            lines.append(
+                f"- **{name}**'s vector type and index are a preview feature "
+                f"of the vendor's extension framework "
+                f"(`extra.extension_status`: {status}), not a release the "
+                f"vendor calls stable; its figures describe a build under "
+                f"active development.")
         stale = fact.get("stale_ann")
         if stale:
             lines.append(

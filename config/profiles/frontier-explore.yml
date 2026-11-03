@@ -62,6 +62,28 @@
 #                                 builds each. All legal (hnswlib's floor is
 #                                 M=2, Percona's 2..200 with ef_construction
 #                                 1..4096).
+#   villagesql                    M 4..48 x ef_construction 64/200/400 = 15
+#                                 builds, not 21: vsql_vector refuses
+#                                 ef_construction < M and > 32 x M
+#                                 (storage.cc Options::validate), so 200 and
+#                                 400 at M=4 and 6 and 400 at M=8 and 12 are
+#                                 dropped by `render_config` and named before
+#                                 the run -- never clamped, which is what the
+#                                 engine's first version did. Every M keeps
+#                                 64. AT THIS PIN ITS ANN PHASE PRODUCES NO
+#                                 POINT: no query reaches the index, and the
+#                                 module refuses to time the full scan the
+#                                 server runs instead (config/engines/
+#                                 villagesql.yml), so the 15 builds would be
+#                                 paid for and the phase would then fail
+#                                 loudly. That is why it is OPT-IN
+#                                 (`runtime.default_selected: false`): a bare
+#                                 `run --profile frontier-explore` leaves it
+#                                 out and says so, and only
+#                                 `--engines ...,villagesql` measures it. It
+#                                 stays in the grid so that the first pin
+#                                 whose index is used is explored with
+#                                 everything else, not added by hand.
 #   mongodb (Percona Search)      quantization scalar and none = 2 builds. mongot
 #                                 exposes no graph degree to this framework, so
 #                                 M is pinned to one label (16) below rather
@@ -132,6 +154,7 @@ resources:
     valkey_ef_construction: [64, 200, 400]
     percona_ef_construction: [64, 200, 400]
     myvector_ef_construction: [64, 200, 400]
+    villagesql_ef_construction: [64, 200, 400]
     # scalar first, as in the tuned pass: the ops pass and the reference build
     # take the head of this list, and the report's headline build must stay
     # the one tuned-complete measures.
@@ -152,6 +175,13 @@ ann:
   # resources.extras above supplies the swept lists.
   pgvector_ef_construction: 200
   valkey_ef_construction: 200
+  # 64, not 200: in the normalized pass this one value meets every M in the
+  # grid, and vsql_vector refuses ef_construction outside [M, 32 x M] -- 200
+  # is unbuildable at M=4 and 6, and only 48..128 fits all seven. The same key
+  # is what `ops_pass.ops_ef_construction` reads, so VillageSQL's reference
+  # build in this profile is M=16 at 64 in both passes (64 is in the tuned
+  # sweep too). Ops is off here, so that build is a label, never an index.
+  villagesql_ef_construction: 64
   mongodb_quantization: none
   pgvector_build_modes: [post]
   valkey_build_modes: [post]

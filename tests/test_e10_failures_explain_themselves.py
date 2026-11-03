@@ -83,6 +83,7 @@ FILE_LOGGING = {
     "alisql": ("alisql", "/var/lib/vbench/alisql.err"),
     "mongodb": ("mongodb", "/var/lib/vbench/mongot/mongot.log"),
     "myvector": ("myvector", "/var/lib/vbench/myvector.err"),
+    "villagesql": ("villagesql", "/var/lib/vbench/villagesql.err"),
 }
 
 #: Engines whose every log reaches the container's stdout, so `docker logs`
@@ -2013,12 +2014,13 @@ class TestSection410StillDescribesRenderConfig:
         body = _render_config_body()
         at = [m.start() for m in
               re.finditer(r'"efConstruction": ef_constructions', body)]
-        # Four since MyVector's branch, which has the same two knobs.
-        assert len(at) == 4, at
-        assert re.search(r"occurs four times", section, re.I), (
+        # Five since VillageSQL's branch, which has the same two knobs.
+        assert len(at) == 5, at
+        assert re.search(r"occurs five times", section, re.I), (
             "§4.10 must state how many there are; the count is the thing "
             "that went stale when Percona's branch added the third")
-        for engine in ("pgvector", "valkey", "percona", "myvector"):
+        for engine in ("pgvector", "valkey", "percona", "myvector",
+                       "villagesql"):
             start, end = _branch_span(body, engine)
             inside = [n for n in at if start < n < end]
             assert len(inside) == 1, (engine, inside)

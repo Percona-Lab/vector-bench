@@ -99,6 +99,15 @@ ann:
   # thirty-two the build cost stops being worth the recall on every engine
   # measured so far.
   m_values: [6, 8, 16, 24, 32]
+  # VillageSQL without M=6: ef_construction is pinned at 200 here so M is the
+  # only knob that moves, and vsql_vector refuses ef_construction > 32 x M
+  # (storage.cc Options::validate; 192 at M=6). Its first version clamped
+  # that build to 192 under a result file labelled 200; `ann_knobs` now
+  # refuses an M buildable at none of the pinned values, and the remedy it
+  # names is this per-engine list. Moving its ef_construction instead would
+  # put a second knob under the M response this profile isolates.
+  m_values_by_engine:
+    villagesql: [8, 16, 24, 32]
   ef_search: [10, 20, 40, 80, 120, 200, 400, 800]
   insert_threads: 8
   mariadb_storage_engines: [InnoDB]

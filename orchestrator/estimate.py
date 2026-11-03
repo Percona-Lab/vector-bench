@@ -738,6 +738,22 @@ def _runs_filtered_search(engine: str) -> bool:
     printed estimate is then built on an assumption about that engine.
     Anything else is a bug here and propagates.
     """
+    return _runs_declared(engine, "filtered_search", "filtered-search")
+
+
+def _runs_churn(engine: str) -> bool:
+    """False only for an engine whose config declares `churn: false`.
+
+    `_runs_filtered_search`'s rule for the churn terms: VillageSQL 0.0.7
+    rejects DELETE on a table with a custom index, so its driver declines the
+    workload and nothing of it runs. Every other engine declares nothing and
+    is charged exactly as before.
+    """
+    return _runs_declared(engine, "churn", "churn")
+
+
+def _runs_declared(engine: str, key: str, what: str) -> bool:
+    """`capabilities.<key>` is not false in the engine config (see above)."""
     from . import config as config_mod
     try:
         caps = (config_mod.load_engine(engine) or {}).get("capabilities") or {}
@@ -745,10 +761,10 @@ def _runs_filtered_search(engine: str) -> bool:
         return True
     except (OSError, yaml.YAMLError) as exc:
         print(f"[estimate] WARNING: could not read config/engines/{engine}.yml "
-              f"({exc}); charging its filtered-search term as if the engine "
+              f"({exc}); charging its {what} term as if the engine "
               f"ran it", file=sys.stderr)
         return True
-    return caps.get("filtered_search", True) is not False
+    return caps.get(key, True) is not False
 
 
 def _filtered_search(plan: _QueryPlan) -> Optional[_QueryTerm]:
@@ -949,6 +965,8 @@ def _churn_reinsert(plan: _QueryPlan) -> Optional[_QueryTerm]:
     """
     if "churn" not in plan.workloads or plan.rows <= 0:
         return None
+    if not _runs_churn(plan.engine):
+        return None
     fractions = [float(f) for f in plan.ops.get("churn_fractions", [0.1])]
     # `or 0.0` so a key present with value null means "no cap" rather than a
     # TypeError, matching `_filtered_search` and `ops_pass`'s `_budget_arg`.
@@ -1038,6 +1056,8 @@ def _churn_reader_baseline(plan: _QueryPlan) -> Optional[_QueryTerm]:
     `dev` runs: no readers, no baseline window, no cost.
     """
     if "churn" not in plan.workloads or plan.rows <= 0:
+        return None
+    if not _runs_churn(plan.engine):
         return None
     readers = _churn_readers_declared(plan.ops)
     if readers <= 0:

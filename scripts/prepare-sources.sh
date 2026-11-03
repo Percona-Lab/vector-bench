@@ -19,7 +19,7 @@
 #     a branch rather than to a tag -- see prepare_percona.
 #
 # Usage:
-#   scripts/prepare-sources.sh [--engine mariadb|alisql|pgvector|percona|all]
+#   scripts/prepare-sources.sh [--engine mariadb|alisql|pgvector|percona|myvector|villagesql|all]
 #                              [--force]
 
 set -euo pipefail
@@ -452,17 +452,95 @@ PY
   stage_context myvector "$tar"
 }
 
+# ---------------------------------------------------------------------------
+# VillageSQL -- TWO pinned sources in one context: the vsql_vector extension
+# at a commit, and the villagesql-server tree it is compiled against, at a tag.
+# ---------------------------------------------------------------------------
+#
+# MyVector's shape (prepare_myvector), and for the same reason: the extension
+# is built against the server's own build tree, so the context tarball carries
+# the server as `source/` and the extension beside it as `vsql-vector/`. The
+# extension is pinned to a SHA on `main` because the HNSW index it is being
+# measured for is not in any vsql-vector release (its only tag, 0.0.1,
+# predates it). Both are shallow fetches into sources/ -- nothing here touches
+# a vendor checkout. The manifest's `engines.villagesql.source` is this
+# function's JSON, so the server tag and commit are recorded beside the
+# extension commit.
+prepare_villagesql() {
+  local cfg="$VB_CONFIG/engines/villagesql.yml"
+  local sha; sha="$(yq_get "$cfg" source.tag "")"
+  [[ -n "$sha" ]] || die "villagesql: $cfg has no source.tag"
+  local upstream; upstream="$(yq_get "$cfg" source.upstream https://github.com/villagesql/vsql-vector.git)"
+  local server_tag; server_tag="$(yq_get "$cfg" source.server_tag "")"
+  [[ -n "$server_tag" ]] || die "villagesql: $cfg has no source.server_tag"
+  local server_pin; server_pin="$(yq_get "$cfg" source.server_commit "")"
+  [[ -n "$server_pin" ]] || die "villagesql: $cfg has no source.server_commit"
+  local server_up; server_up="$(yq_get "$cfg" source.server_upstream https://github.com/villagesql/villagesql-server.git)"
+
+  local ext_repo="$VB_SOURCES/vsql-vector-git"
+  if [[ ! -d "$ext_repo/.git" ]]; then
+    info "villagesql: fetching vsql-vector commit ${sha:0:12} from $upstream"
+    git init --quiet "$ext_repo"
+    git -C "$ext_repo" remote add origin "$upstream"
+  fi
+  git -C "$ext_repo" cat-file -e "${sha}^{commit}" 2>/dev/null \
+    || git -C "$ext_repo" fetch --quiet --depth 1 origin "$sha" \
+    || die "villagesql: cannot fetch commit $sha from $upstream"
+  local resolved; resolved="$(git -C "$ext_repo" rev-parse "${sha}^{commit}")"
+  [[ "$resolved" == "$sha" ]] \
+    || die "villagesql: source.tag $sha resolved to $resolved -- not the pinned commit"
+
+  # The tag contains a slash, so the checkout name flattens it.
+  local server_repo="$VB_SOURCES/villagesql-server-${server_tag//\//-}"
+  if [[ ! -d "$server_repo/.git" ]]; then
+    info "villagesql: cloning server $server_tag from $server_up (shallow)"
+    git clone --quiet --depth 1 --branch "$server_tag" "$server_up" "$server_repo" \
+      || die "villagesql: cannot clone $server_tag from $server_up"
+  fi
+  local server_sha; server_sha="$(git -C "$server_repo" rev-parse "refs/tags/${server_tag}^{commit}" 2>/dev/null \
+                                  || git -C "$server_repo" rev-parse HEAD)"
+  [[ "$server_sha" == "$server_pin" ]] \
+    || die "villagesql: server tag $server_tag resolved to $server_sha -- not the pinned $server_pin"
+
+  local tar="$VB_SOURCES/villagesql-${sha}-${server_sha}.tar"
+  if [[ $FORCE -eq 0 && -f "$tar" ]]; then
+    ok "villagesql: source tarball up to date ($(human_bytes "$(stat -c%s "$tar")"))"
+  else
+    info "villagesql: exporting server $server_tag and vsql-vector ${sha:0:12}"
+    git -C "$server_repo" archive --format=tar --prefix=source/ "$server_sha" > "$tar.tmp"
+    git -C "$ext_repo" archive --format=tar --prefix=vsql-vector/ "$resolved" > "$tar.ext"
+    tar --concatenate --file="$tar.tmp" "$tar.ext"
+    rm -f "$tar.ext"
+    mv "$tar.tmp" "$tar"
+  fi
+
+  python3 - "$VB_SOURCES/villagesql.source.json" "$sha" "$resolved" \
+           "$upstream" "$server_tag" "$server_sha" "$server_up" <<'PY'
+import json, sys
+out, tag, commit, origin, server_tag, server_commit, server_origin = sys.argv[1:8]
+with open(out, "w") as fh:
+    json.dump({"engine": "villagesql", "tag": tag, "commit": commit,
+               "origin": origin, "server_tag": server_tag,
+               "server_commit": server_commit, "server_origin": server_origin},
+              fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+  ok "villagesql: vsql-vector commit=${resolved:0:12}, server ${server_tag} commit=${server_sha:0:12}"
+  stage_context villagesql "$tar"
+}
+
 case "$ENGINE" in
   all)        prepare_mariadb mariadb; prepare_alisql; prepare_pgvector ;;
   percona)    prepare_percona ;;
   myvector)   prepare_myvector ;;
+  villagesql) prepare_villagesql ;;
   mariadb)    prepare_mariadb mariadb ;;
   mariadb123) prepare_mariadb mariadb123 ;;
   alisql)     prepare_alisql ;;
   pgvector)   prepare_pgvector ;;
   mongodb)    prepare_mongodb ;;
   valkey)     prepare_valkey ;;
-  *) die "unknown engine: $ENGINE (expected mariadb|mariadb123|alisql|pgvector|mongodb|valkey|percona|myvector|all)" ;;
+  *) die "unknown engine: $ENGINE (expected mariadb|mariadb123|alisql|pgvector|mongodb|valkey|percona|myvector|villagesql|all)" ;;
 esac
 
 ok "sources prepared"

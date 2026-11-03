@@ -96,6 +96,29 @@ PROSE_CLAIMS = {
             "all seven engines, which is what that command measures",
             "every one of the seven engines",
         ]),
+    "the engine count is nine": dict(
+        pattern=r"\b(all|every one of|each of)\b[^.]{0,24}?"
+                r"\b(nine|9)\b[^.]{0,24}?\bengines?\b",
+        accepts=[
+            "all nine engines, which is what that command measures",
+            "all nine of the engines",
+            "all 9 engines",
+        ],
+        rejects=[
+            "all eight engines, which is what that command measures",
+            "every one of the eight engines",
+        ]),
+    "the ingest figure covers seven of the nine": dict(
+        pattern=r"\bingest\b[^.]{0,80}?\bseven\b[^.]{0,40}?"
+                r"\b(measured rate|rate)\b",
+        accepts=[
+            "the ingest figure covers the seven with a measured rate",
+            "the ingest total is over the seven engines that have a rate",
+        ],
+        rejects=[
+            "the ingest figure covers all nine",
+            "Both figures cover all nine engines.",
+        ]),
     "the ingest figure covers seven of the eight": dict(
         pattern=r"\bingest\b[^.]{0,80}?\bseven\b[^.]{0,40}?"
                 r"\b(measured rate|rate)\b",
@@ -1620,8 +1643,8 @@ class TestAnUnmeasuredIngestRateIsNamedAndNotModelled:
         out = buf.getvalue()
         # MyVector is the registry's own unmeasured engine now, so the probe is
         # named beside it, in registry order, on the one disclosure line.
-        assert (f"No measured ingest rate for myvector, {self.UNMEASURED}"
-                in _flat(out))
+        assert (f"No measured ingest rate for myvector, villagesql, "
+                f"{self.UNMEASURED}" in _flat(out))
         # The engine that gained a rate is on the per-engine line instead of
         # in the disclosure, which is the whole difference this change makes
         # to what an operator reads.
@@ -2088,6 +2111,18 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
         "scans the whole tree for 40-hex commits, so a second engine pinned "
         "by SHA has to be declared here or it reads as a half-finished "
         "Percona re-pin."),
+    "bac885dd2bf43347c80dc9d9c4fa86ca0a596957": (
+        ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
+         "docs/04-engine-notes.md", SELF_REL),
+        "a different engine's pin, not a copy of Percona's: vsql-vector "
+        "`main` at bac885d (villagesql/vsql-vector), which "
+        "config/engines/villagesql.yml carries as its own `source.tag`."),
+    "533ab4b58d2744b79bb45e41f44fa928f190a655": (
+        ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
+         "docs/04-engine-notes.md", SELF_REL),
+        "VillageSQL's publish/mysql-9.7_0.0.7 tag, the server tree vsql-vector "
+        "is compiled against. Pinned by commit as well as by tag so "
+        "prepare_villagesql can refuse a moved tag."),
     "008e09c2834b98143a8c067d4d225c90953050cf": (
         ("config/engines/myvector.yml", "tests/test_e24_myvector_disclosures.py",
          SELF_REL),

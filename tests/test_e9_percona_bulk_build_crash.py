@@ -115,7 +115,10 @@ class TestTheEngineDeclaresWhatItCannotDo:
             caps = (load_engine(engine).get("capabilities", {}) or {})
             if CAPABILITY in caps:
                 declared[engine] = caps[CAPABILITY]
-        assert declared == {"percona": False}, declared
+        # VillageSQL is the second: its bulk CREATE INDEX intermittently
+        # deadlocks and aborts the server at its pin (config/engines/
+        # villagesql.yml), pinned in tests/test_e26_villagesql_engine.py.
+        assert declared == {"percona": False, "villagesql": False}, declared
 
 
 # ---------------------------------------------------------------------------

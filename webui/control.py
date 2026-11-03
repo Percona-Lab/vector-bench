@@ -265,7 +265,8 @@ def put_profile(api: Api, match, _q, body=None) -> Response:
 # -- estimate ----------------------------------------------------------------
 
 def estimate(api: Api, _m, _q, body=None) -> Response:
-    from orchestrator.cli import KNOWN_ENGINES, estimate_load_hours
+    from orchestrator.cli import (DEFAULT_ENGINES, KNOWN_ENGINES,
+                                  estimate_load_hours)
     from orchestrator.config import load_profile, profile_engines
 
     spec = body or {}
@@ -284,8 +285,10 @@ def estimate(api: Api, _m, _q, body=None) -> Response:
     # `plan.engines: []` -- nothing checked. So picking the percona profile
     # here previewed a seven-engine estimate for a job that `cmd_run` now runs
     # on one, which is the same figure being wrong in a new direction.
+    # DEFAULT_ENGINES, not KNOWN_ENGINES, for the same reason: `cmd_run`
+    # leaves the opt-in engines out of a run that names none.
     engines = [e for e in (spec.get("engines") or profile_engines(profile)
-                           or KNOWN_ENGINES)
+                           or DEFAULT_ENGINES)
                if e in KNOWN_ENGINES]
     datasets = [d for d in (spec.get("datasets") or profile.get("datasets") or [])
                 if DATASET_RE.match(str(d))]

@@ -380,9 +380,11 @@ class TestFilteredDeclined:
         assert not any("MYVECTOR_IS_ANN" in s for s in d._cur.statements)
 
     def test_no_other_driver_declines_anything(self):
+        # VillageSQL declines its own two, pinned in
+        # tests/test_e26_villagesql_engine.py.
         from harness.drivers.postgres import _driver_classes
         for name, cls in _driver_classes().items():
-            if name != "MyVectorDriver":
+            if name not in ("MyVectorDriver", "VillageSQLDriver"):
                 assert tuple(cls.declined_workloads) == (), name
 
     def test_config_capability_agrees(self):

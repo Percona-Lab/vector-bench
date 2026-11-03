@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repository.
 
 ## What this is
 
-`vector-bench` benchmarks **built-in vector search across eight database engines**, all
+`vector-bench` benchmarks **built-in vector search across nine database engines**, all
 running HNSW, so the comparison isolates implementation quality rather than algorithm
 choice. It is a measurement instrument: the most damaging bugs here do not crash — they
 quietly hand one engine a different budget, grid or dataset and produce a credible-looking
@@ -22,6 +22,7 @@ The repo root is `vector-bench/` (git repo, branch `master`). All commands below
 | `valkey` | Valkey + valkey-search | Percona repo `valkey-91` |
 | `percona` | Percona Server, InnoDB HNSW | `9.7` series, commit `56124b03` |
 | `myvector` | MyVector plugin (hnswlib) on MySQL 9.7.2 | release v1.26.9, commit `384d9df7` |
+| `villagesql` | VillageSQL 0.0.7 + vsql_vector extension (HNSW custom index), MySQL 9.7.2 base | server `publish/mysql-9.7_0.0.7` (`533ab4b5`), vsql-vector `main` at `bac885dd` |
 
 `KNOWN_ENGINES` is whatever `config/engines/*.yml` holds — there is no list in Python to keep
 in step with it. `orchestrator/engines.py` is the registry everything derives from.
@@ -156,9 +157,10 @@ reports the first's recall — this is why `mariadb123` exists) and a duplicate 
 
 These are the reasons the code looks over-defensive. Do not relax them.
 
-- **Never mix `-march` between engines.** The six built from source compile SIMD distance
+- **Never mix `-march` between engines.** The seven built from source compile SIMD distance
   kernels — `mariadb`, `mariadb123`, `alisql`, `pgvector`, `percona`, `myvector` (whose
-  kernels are hnswlib's, inside the plugin), all at `x86-64-v3`;
+  kernels are hnswlib's, inside the plugin) and `villagesql` (whose kernels are in the
+  `vsql_vector.veb` extension, compiled Release and checked for -O3), all at `x86-64-v3`;
   `mongodb` and `valkey` are installed from packages and declare `march: none`. A different
   flag on one turns the benchmark into a comparison of compiler flags.
 - **`harness/` and `report/` must not import `orchestrator`.** Each runs in a container that
@@ -251,14 +253,35 @@ These are the reasons the code looks over-defensive. Do not relax them.
   workload (`EngineDriver.declined_workloads`); churn re-inserts reach its graph through an
   explicit `myvector_index_refresh`, and deleted rows never leave it until a full rebuild —
   see `docs/04-engine-notes.md`.
+- **VillageSQL at its pin cannot be measured as ANN search, and the code refuses to.** Server
+  0.0.7 drives its KNN distance scan only from a custom index that stores row references
+  (HAS_ROW_REF); vsql_vector's HNSW stores column references, so every `ORDER BY
+  L2_DISTANCE(v, '[..]') LIMIT k` is a filesort over a full scan, in both optimizers, with
+  recall 1.000 at every ef_search. `VillageSQLDriver` and the ann module check EXPLAIN FORMAT=TREE
+  for "Custom index distance scan on vi" and raise rather than time the query, so the build
+  workload is the only one that produces records. DELETE is rejected on a table with a custom
+  index (churn declined), filtered search cannot be verified (declined), vectors are text
+  literals (no binary input), and the bulk `CREATE INDEX` intermittently deadlocks and aborts
+  the server, so `capabilities.bulk_vector_index_build: false` makes `incremental` its build
+  mode. vsql_vector refuses `ef_construction` outside `[M, 32 x M]`, so 200 is unbuildable at
+  M=6: the combination is dropped from the render by name (`ann_knobs.excluded_builds`), never
+  clamped under a label it was not built with, and `m-sweep` gives it M 8..32. It is
+  **opt-in** (`runtime.default_selected: false`, read through the registry as
+  `cli.DEFAULT_ENGINES`): a run that names no engines leaves it out and prints so, because the
+  plan check runs only after the corpus is loaded and every default run would pay those loads
+  for no points. See `docs/04-engine-notes.md`.
 
 ## Cost awareness
 
 Ingest dominates everything. MHNSW and VIDX build their graph on every INSERT (~150 and ~55
 rows/s on 1M rows), and **every M value reloads the whole corpus**. `--profile full
 --resource-pass both` is ~796 h of ingest before a single query runs, and ~1,824 h of run time
-in the worst case once querying is counted — all eight engines, which is what that command
-measures when `--engines` is omitted. **The two figures do not cover the same engines.** The
+in the worst case once querying is counted — all eight default engines, which is what that
+command measures when `--engines` is omitted. VillageSQL, the ninth, is **opt-in**
+(`runtime.default_selected: false`): a run that names no engines leaves it out and says so,
+because at its pin every ann build would load a corpus only to refuse every query. Named with
+`--engines` it adds ~4 h (its concurrency windows; it declines filtered search and churn) and
+no ingest figure. **The two figures do not cover the same engines.** The
 run-time figure covers all eight; the ingest figure covers the seven with a measured rate.
 MyVector, the eighth, has none: the estimator names it in `engines_without_ingest_rate` and
 prints that the ingest total is a floor, and its query terms (concurrency windows, churn) are

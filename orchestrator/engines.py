@@ -89,6 +89,14 @@ class EngineRuntime:
     #: tuple of pairs for the reason `ulimits` is one. Empty for an engine
     #: that declares none, and `reference_build_problem` refuses that.
     reference_build: Tuple[Tuple[str, Any], ...] = ()
+    #: Whether a run that names no engines measures this one
+    #: (`runtime.default_selected`, default true). False makes the engine
+    #: OPT-IN: `run` without `--engines` -- and a profile with no `engines:`
+    #: list -- leaves it out and says so, and naming it in `--engines` runs
+    #: it. For an engine that cannot yet produce the numbers a default run
+    #: exists for, so that every default run does not pay its loads to learn
+    #: that again. See `default_engines` and config/engines/villagesql.yml.
+    default_selected: bool = True
 
     @property
     def credentials(self) -> Tuple[str, str]:
@@ -150,7 +158,19 @@ def _build(name: str, config: Dict[str, Any], fallback_index: int) -> EngineRunt
             (str(key), str(value))
             for key, value in (runtime.get("ulimits") or {}).items())),
         reference_build=_reference_build(name, runtime.get("reference_build")),
+        default_selected=_default_selected(name, runtime),
     )
+
+
+def _default_selected(name: str, runtime: Dict[str, Any]) -> bool:
+    """`runtime.default_selected`, refused unless a YAML boolean: the string
+    "false" is truthy, and reading it as true would put an opt-in engine
+    straight back into every default run."""
+    value = runtime.get("default_selected", True)
+    if not isinstance(value, bool):
+        raise ValueError(f"config/engines/{name}.yml: runtime.default_selected "
+                         f"must be true or false, got {value!r}")
+    return value
 
 
 #: The axes a reference build may name: the ones `report/loaders.build_params`
@@ -208,6 +228,19 @@ def registry(refresh: bool = False) -> Dict[str, EngineRuntime]:
 
 def known_engines(refresh: bool = False) -> Tuple[str, ...]:
     return tuple(registry(refresh))
+
+
+def default_engines(refresh: bool = False) -> Tuple[str, ...]:
+    """The engines a run measures when nobody names any: every registered
+    engine except the opt-in ones (`EngineRuntime.default_selected`)."""
+    return tuple(name for name, engine in registry(refresh).items()
+                 if engine.default_selected)
+
+
+def opt_in_engines(refresh: bool = False) -> Tuple[str, ...]:
+    """Registered engines that run only when named, in registry order."""
+    return tuple(name for name, engine in registry(refresh).items()
+                 if not engine.default_selected)
 
 
 def engines_in_group(group: str) -> Tuple[str, ...]:

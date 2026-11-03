@@ -141,6 +141,11 @@ build_engine() {
     myvector) bargs+=(--build-arg "MYVECTOR_TAG=${tag}"
                       --build-arg "MYSQL_SERVER_TAG=$(yq_get "$cfg" source.server_tag unknown)") ;;
     # Nothing compiled: the module is copied out of its own published image.
+    # The vsql_vector commit (the value of `source.tag`) plus the
+    # villagesql-server tag it is compiled against; docker/villagesql/
+    # Dockerfile declares both.
+    villagesql) bargs+=(--build-arg "VILLAGESQL_TAG=${tag}"
+                        --build-arg "VILLAGESQL_SERVER_TAG=$(yq_get "$cfg" source.server_tag unknown)") ;;
     mongodb)  bargs+=(--build-arg "MONGOT_IMAGE=$(yq_get "$cfg" source.mongot_image "")") ;;
     # Nothing compiled: installed from a Percona repository. The package list
     # comes from the config, so a name that does not resolve is one edit away
@@ -219,6 +224,9 @@ case "$ENGINE" in
   # MySQL 9.7 compiled from source with the MyVector plugin in-tree. Opt-in
   # for the same reason percona is: another full MySQL build.
   myvector)   build_engine myvector ;;
+  # VillageSQL compiled from source plus the vsql_vector extension. Opt-in
+  # for the same reason: another full MySQL-sized build.
+  villagesql) build_engine villagesql ;;
   mariadb|alisql|pgvector) build_engine "$ENGINE" ;;
   *) die "unknown engine: $ENGINE" ;;
 esac

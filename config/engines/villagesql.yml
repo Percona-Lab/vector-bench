@@ -1,0 +1,203 @@
+# VillageSQL engine definition.
+#
+# Vector support: the vsql_vector EXTENSION (villagesql/vsql-vector, GPL-2.0)
+# on VillageSQL Server, a MySQL 9.7.2 fork with an extension framework. The
+# column is a custom type, `SVECTOR(n)`, stored by the extension in its own
+# InnoDB pages inside the table's tablespace; the index is a custom index,
+# `INDEX vi (v hnsw_<metric>) USING EXTENDED(hnsw) WITH (M = .., ef_construction
+# = ..)`, whose graph also lives in InnoDB pages of `t1.ibd`. Both are
+# PREVIEW features at this pin: custom index DDL is refused unless
+# `vsql_allow_preview_extensions=ON` ("Extended Index feature not yet
+# implemented"), and the extension links VillageSQL's dev/unstable ABI.
+# Every statement is built in harness/drivers/villagesql.py; docs/04-engine-
+# notes.md carries the list of traps. With the extension installed, a server
+# started without that flag refuses to start at all ("extension requires
+# preview capabilities but vsql_allow_preview_extensions is OFF").
+#
+# WHAT THIS PIN CAN AND CANNOT DO, measured on the pinned build (2026-10-30,
+# a 5,000 x 32 synthetic corpus, both optimizers):
+#
+#   * build, incremental -- CREATE TABLE ... INDEX vi (...) USING EXTENDED(hnsw)
+#     then INSERT: works, the graph is maintained on every INSERT.
+#   * build, post -- CREATE INDEX vi ON t1 (v hnsw_l2) USING EXTENDED(hnsw)
+#     WITH (M = 16, ef_construction = 200) over a loaded table: works, and
+#     intermittently deadlocks and aborts the server (see
+#     `capabilities.bulk_vector_index_build`), so it is not the default.
+#   * SEARCH DOES NOT USE THE INDEX. `SELECT id FROM t1 ORDER BY
+#     L2_DISTANCE(v, '[..]') LIMIT 10` plans as `Sort` over a table scan
+#     (EXPLAIN: type ALL, "Using temporary; Using filesort"), with the vector
+#     inlined or bound, under the classic and the hypergraph optimizer alike,
+#     and recall is 1.000 at every ef_search -- exact brute force. The server's
+#     KNN recognition (`FindCustomKnnIndexOnField` in villagesql/sql/
+#     custom_index_knn_recognition.cc, gate added by server PR #1269) only
+#     accepts an index whose storage props include HAS_ROW_REF, and
+#     vsql_vector's HNSW declares HAS_COLUMN_REF | REF_LOOKUP. No vsql-vector
+#     branch declares HAS_ROW_REF either. The driver and the ann module
+#     therefore REFUSE to time a query whose plan lacks "Custom index distance
+#     scan" rather than publish a full scan as ANN search.
+#   * DELETE is rejected: "DELETE on a table with a custom index (USING
+#     EXTENDED) is not supported yet." -- churn is declined.
+#   * UPDATE of any indexed column (tag included) is rejected: "UPDATE that
+#     changes an indexed column on a table with a custom index (USING
+#     EXTENDED) is not supported yet." Nothing here issues one.
+#   * filtered search cannot be verified while no query reaches the index,
+#     and VillageSQL's own August adapter measured ~0.1 recall for a WHERE
+#     beside the KNN ORDER BY -- declined until it can be.
+name: villagesql
+display_name: VillageSQL (vsql_vector)
+family: mysql
+
+source:
+  # The vsql-vector commit, under the key every other engine uses
+  # (`orchestrator/engines.py:_source_tag`, `ops_pass` -> VB_ENGINE_TAG).
+  # `main` at "update OWNERS and prow (#84)": it carries the HNSW index, the
+  # DML interface and the `vsql_vector.ef_search` session variable (#76). Its
+  # only tag, 0.0.1, predates the index.
+  tag: bac885dd2bf43347c80dc9d9c4fa86ca0a596957
+  upstream: https://github.com/villagesql/vsql-vector.git
+  # The server the extension is compiled against, from source -- VillageSQL
+  # 0.0.7 on its MySQL 9.7.2 base, the same upstream server line and point
+  # as Percona Server and MyVector here. The extension links the server's
+  # build tree, so both come out of one build.
+  server_tag: publish/mysql-9.7_0.0.7
+  # Asserted by `prepare_villagesql`: a moved tag is a different server under
+  # the same label.
+  server_commit: 533ab4b58d2744b79bb45e41f44fa928f190a655
+  server_upstream: https://github.com/villagesql/villagesql-server.git
+
+image:
+  runtime: vector-bench/villagesql-runtime
+  bench: vector-bench/villagesql-bench
+  base: ubuntu:24.04
+
+build:
+  # The server's build type. The EXTENSION -- where the distance kernels
+  # live -- is always compiled Release (-O3) and the Dockerfile fails the
+  # build if no optimisation flag reaches it.
+  type: RelWithDebInfo
+  march: x86-64-v3
+  # docker/myvector/Dockerfile's list, the other MySQL 9.7.2 tree built here.
+  cmake_flags:
+    - -DWITH_PACKAGE_FLAGS=OFF
+    - -DWITH_ROUTER=OFF
+    - -DWITH_MYSQLX=OFF
+    - -DWITH_NDB=OFF
+    - -DWITH_NDBCLUSTER=OFF
+    - -DWITH_RAPID=OFF
+    - -DWITH_UNIT_TESTS=OFF
+    - -DWITH_SSL=system
+    - -DWITH_ZLIB=bundled
+    - -DWITH_ZSTD=bundled
+  extra_cxxflags: ""
+
+# There is deliberately no `sql:` block -- see config/engines/mariadb.yml and
+# tests/test_c1_engine_sql.py. Every statement is built in
+# harness/drivers/villagesql.py.
+
+server:
+  common:
+    - --skip-name-resolve
+    # The preview gate. Also passed by the entrypoint so a by-hand start works;
+    # stated here so the run's server flags record it.
+    - --vsql-allow-preview-extensions=ON
+  normalized:
+    - --innodb-buffer-pool-size={buffer_bytes}
+    - --innodb-flush-log-at-trx-commit=2
+    - --innodb-doublewrite=0
+  tuned:
+    - --innodb-buffer-pool-size={buffer_bytes}
+    - --innodb-flush-log-at-trx-commit=0
+    - --innodb-doublewrite=0
+    - --innodb-flush-method=O_DIRECT
+    - --skip-log-bin
+  # Opt-in, ops path only, exactly as config/engines/myvector.yml (the other
+  # MySQL 9.7.2 tree here): rendered after the pass's flags when a profile
+  # sets `ops.server_wait_instruments: true`, and recorded in
+  # `engines_resolved` and on every record when it is. The driver's wait
+  # snapshot is MySQLFamilyDriver's performance_schema read, unchanged; the
+  # extension's own page latches are taken through InnoDB's buffer pool
+  # (`storage_abi.cc` `buf_page_get`), so they show up under InnoDB's
+  # instruments rather than under any of the extension's. Not yet observed
+  # on a live VillageSQL server.
+  wait_instruments:
+    - --performance-schema=ON
+    - --performance-schema-instrument=wait/synch/mutex/%=ON
+    - --performance-schema-instrument=wait/synch/rwlock/%=ON
+    - --performance-schema-instrument=wait/synch/sxlock/%=ON
+
+storage_engines:
+  normalized: [InnoDB]
+  tuned: [InnoDB]
+
+capabilities:
+  ef_construction_tunable: true
+  m_per_index: true
+  requires_read_committed: false
+  # FALSE, and the driver declines the workload: see the header. Read by the
+  # estimator (`estimate._runs_filtered_search`) so no hours are charged for it.
+  filtered_search: false
+  # FALSE, and the driver declines the workload: DELETE is rejected on a
+  # table carrying a custom index at this pin. Read by the estimator.
+  churn: false
+  # FALSE: the bulk build (`CREATE INDEX vi ON t1 ... USING EXTENDED(hnsw)`
+  # over a loaded table) works and is fast -- 2,000-5,000 rows in 1-2 s on the
+  # laptop -- but intermittently KILLS THE SERVER. Two connections' worth of
+  # X-latches on extension pages, both taken at the storage ABI's page get
+  # (storage/innobase/villagesql/storage_abi.cc, `buf_page_get` under
+  # `vef_storage` page access), wait on each other; InnoDB's error monitor
+  # reports "DEADLOCK of threads detected!" and aborts with
+  # `[FATAL] ... sync0arr.cc:678` (signal 6). Measured 2026-10-30: 3 aborts in
+  # roughly 20 bulk builds (after 1-, 2- and 4-thread loads alike), 0 in 12
+  # incremental builds (1 and 4 loader threads). So the default build mode is
+  # `incremental` (`cli._ops_build_modes` reads this key), the ann module
+  # declares the index in CREATE TABLE, and a profile can still ask for
+  # `post` explicitly to re-test a newer pin.
+  bulk_vector_index_build: false
+
+runtime:
+  order: 90
+  # OPT-IN: a run that names no engines leaves VillageSQL out and prints so;
+  # `--engines villagesql` (alone or in a list) runs it. At this pin no query
+  # reaches the HNSW index (see the header), and the ann module and the
+  # driver check the plan only after fit() has loaded the corpus (moving the
+  # check onto a probe batch is not done: an EXPLAIN over an empty or tiny
+  # table is not verified to plan like the loaded one), so every default run
+  # would pay a full load per
+  # build (15 in frontier-explore, 3 per pass in main and full, at an
+  # unmeasured but >1 h rate on the large corpora) to end in "no points".
+  # Flip this to true, and drop the line, once a pin's EXPLAIN shows
+  # "Custom index distance scan on vi": the server needs an index declaring
+  # HAS_ROW_REF, or vsql_vector's HNSW needs to declare it.
+  default_selected: false
+  driver: VillageSQLDriver
+  ann_constructor: VillageSQL
+  port: 3306
+  data_mount: /var/lib/vbench
+  server_data_mount: /server-data/data
+  # Must equal LOG_FILE's default in docker/villagesql/entrypoint-villagesql.sh.
+  error_log: /var/lib/vbench/villagesql.err
+  credentials:
+    user: "bench"
+    password: "bench"
+  group: extra
+  probe:
+    - "sh"
+    - "-c"
+    - "/opt/villagesql/bin/mysql -ubench -pbench --socket=/var/run/vbench/villagesql.sock -e 'SELECT 1' >/dev/null 2>&1"
+  chart:
+    color: "#8c564b"
+    marker: "h"
+    linestyle: "--"
+    label: "VillageSQL 0.0.7 (vsql_vector HNSW)"
+  label: "VillageSQL 0.0.7 (vsql_vector HNSW)"
+  # The index the ops pass builds, and the fallback under
+  # `ops.build_selection: frontier` when the ann phase gives no usable point
+  # -- which at this pin is always: the module refuses every query because
+  # none reaches the index (see the header). `ef_construction: ops` resolves
+  # through `ops_pass.ops_ef_construction` to
+  # `ann.villagesql_ef_construction` (default 200), the key the ann render
+  # reads in the normalized pass. M=16 at 200 is inside vsql_vector's
+  # M <= ef_construction <= 32 x M (`orchestrator/ann_knobs.py`).
+  reference_build:
+    m: 16
+    ef_construction: ops

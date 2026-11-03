@@ -32,7 +32,7 @@
 #    `ann.percona_build_modes` is refused at render time rather than producing
 #    two identical curves. See orchestrator/ann_pass.py's percona branch.
 name: smoke
-description: End-to-end pipeline validation, all eight engines, all charts (~45 min/pass)
+description: End-to-end pipeline validation, all eight default engines (villagesql is opt-in), all charts (~45 min/pass)
 
 datasets:
   - fashion-mnist-784-euclidean

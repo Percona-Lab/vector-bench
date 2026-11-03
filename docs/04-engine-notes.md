@@ -509,6 +509,81 @@ its graph has the same headroom.
 
 ---
 
+## VillageSQL 0.0.7 — vsql_vector (SVECTOR + HNSW custom index)
+
+Server `villagesql/villagesql-server` tag `publish/mysql-9.7_0.0.7`
+(`533ab4b58d2744b79bb45e41f44fa928f190a655`, MySQL 9.7.2 base) with the
+`villagesql/vsql-vector` extension at `main` `bac885dd2bf43347c80dc9d9c4fa86ca0a596957`
+— the first vsql-vector commit with the HNSW index, the DML interface and the
+`vsql_vector.ef_search` session variable; its only tag, 0.0.1, has no index.
+`bac885d` builds cleanly against the 0.0.7 build tree (`VillageSQL_BUILD_DIR`),
+-O3, at `x86-64-v3`. Everything below was measured on that build on
+2026-10-30, with the SQL and the server's own error text.
+
+| | VillageSQL 0.0.7 + vsql_vector |
+| --- | --- |
+| Enable | `INSTALL EXTENSION vsql_vector` once (the entrypoint's bootstrap), and `--vsql-allow-preview-extensions=ON` on every start: once the extension is installed a server started without it **refuses to start** (`Failed to load VEF extension 'vsql_vector': extension requires preview capabilities but vsql_allow_preview_extensions is OFF`, then `Aborting`), and `SET GLOBAL` of it is refused (`must be set with SET PERSIST`) |
+| Column type | `SVECTOR(N)`, N ≤ 3072, stored by the extension in its own InnoDB pages |
+| Value input | **text only**, `'[a,b,…]'`, parsed with `strtof` per element — no binary path |
+| Index DDL | `INDEX vi (v hnsw_l2) USING EXTENDED(hnsw) WITH (M = 16, ef_construction = 200)` inline, or `CREATE INDEX vi ON t1 (…)` |
+| Metric | chosen by the key part's profile: `hnsw_l2`, `hnsw_cosine`, `hnsw_l1`, `hnsw_inner_product` |
+| **ef_construction** | `WITH (ef_construction = …)`, default 200, **rejected above 32 × M** with only `InnoDB: Custom type operation failed. See server error log for details.` (M=4: 128 accepted, 129 refused), and below M (`Options::validate`, src/index/hnsw/storage.cc; M itself is 2..128). So 200 is not buildable at M=6 or below. The engine's first version clamped to 192 and recorded both values, but the result file and every label downstream still said 200; the combination is now dropped from the render by name (`orchestrator/ann_knobs.py`), and the driver and module refuse it if anything bypasses that. m-sweep gives VillageSQL M 8..32 for this reason |
+| Search width | `SET SESSION vsql_vector.ef_search = n` (default 40, 1..65536); the scan searches at `max(k, ef)` |
+| Distance fn | `L2_DISTANCE`, `COSINE_DISTANCE`, `L1_DISTANCE`, `INNER_PRODUCT` |
+| Graph location | extension segments inside `t1.ibd`; the catalog reports one page for `vi` |
+| Build timing | incremental on INSERT, or bulk `CREATE INDEX` — see the third trap |
+
+### The traps
+
+1. **No query reaches the index.** `SELECT id FROM t1 ORDER BY
+   L2_DISTANCE(v, '[…]') LIMIT 10` plans as `Sort` over `Table scan on t1`
+   (TRADITIONAL: `type ALL`, `Using temporary; Using filesort`), with the
+   vector inlined or bound, under `hypergraph_optimizer=off` and `=on`, and
+   recall is 1.000 at ef_search 10, 40, 160 and 400 alike — exact brute
+   force. The server only drives a distance scan ("Custom index distance
+   scan on vi" in EXPLAIN FORMAT=TREE) from an index whose storage props
+   include `HAS_ROW_REF` (`FindCustomKnnIndexOnField` in
+   `villagesql/sql/custom_index_knn_recognition.cc`, gate from server PR
+   #1269); vsql_vector's HNSW declares `HAS_COLUMN_REF | REF_LOOKUP`, and no
+   vsql-vector branch declares `HAS_ROW_REF`. The release notes' "KNN scan
+   works in both optimizers" is true of an index that stores row references
+   (the server's own `vsql_knn_index_test` extension), not of this one.
+   `VillageSQLDriver` and the ann module therefore check the plan and
+   **raise instead of timing the query**: the build workload produces
+   records, and every query workload fails loudly into the report's failed
+   phases rather than publishing brute force as ANN search.
+2. **DELETE is rejected.** `DELETE FROM t1 WHERE id IN (1,2,3)` →
+   `DELETE on a table with a custom index (USING EXTENDED) is not supported
+   yet.` Churn is declined (`declined_workloads`, `capabilities.churn: false`).
+   `UPDATE t1 SET tag = 5 WHERE id = 10` and an UPDATE of `v` are both
+   rejected too: `UPDATE that changes an indexed column on a table with a
+   custom index (USING EXTENDED) is not supported yet.` — any indexed column,
+   not only the vector. Nothing here issues an UPDATE.
+3. **The bulk build can kill the server.** `CREATE INDEX vi ON t1 (v hnsw_…)
+   USING EXTENDED(hnsw)` over a loaded table works and is fast, and in about
+   one build in seven it deadlocks: two threads X-latch extension pages at
+   the storage ABI's page get (`storage/innobase/villagesql/storage_abi.cc`)
+   and wait on each other, InnoDB's monitor prints `DEADLOCK of threads
+   detected!` and aborts (`[FATAL]`, `sync0arr.cc`, signal 6). Seen after
+   1-, 2- and 4-thread loads; never in 12 incremental builds. So
+   `capabilities.bulk_vector_index_build: false` and the build mode is
+   `incremental`; a profile may still ask for `post` to re-test a new pin.
+4. **Filtered search is unverifiable**, because of trap 1, and VillageSQL's
+   own August adapter measured ~0.1 recall for a `WHERE` beside the KNN
+   `ORDER BY`. Declined until a build where the index is used shows it
+   returns the filtered nearest neighbours.
+5. **Text binding is a cost only this engine pays**, on the load and inside
+   every timed query; `extra.vector_binding` carries it and the report states
+   it. The shortest float32 repr per element round-trips exactly through
+   `strtof`, so the stored vectors are bit-identical to the dataset's.
+6. **Ingest slows within one server lifetime.** Repeated drop-and-reload
+   cycles of a 3,000 × 16 incremental build on one server ran at ~290, ~330,
+   ~330, ~150, ~120, ~125 rows/s; a restarted server starts fast again.
+   Unexplained; the framework restarts the server per configuration, so it
+   does not reach a measurement, but a hand-run loop will see it.
+
+---
+
 ## Things that are true of all of them
 
 - **The optimizer can always decline the index.** Every one of them will fall

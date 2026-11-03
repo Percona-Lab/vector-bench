@@ -228,7 +228,7 @@ class TestNoEngineConfigDeclaresSQL:
             f"scanned {sorted(configs)} but the orchestrator loads {loaded}")
         family = sql_family(configs)
         assert family == ["alisql", "mariadb", "mariadb123", "myvector",
-                          "percona", "pgvector"], (
+                          "percona", "pgvector", "villagesql"], (
             f"the configs the blocks lived in are {family}")
         # And every one of them parsed to something, so `"sql" in config` was
         # asked of a real mapping rather than of an empty one.

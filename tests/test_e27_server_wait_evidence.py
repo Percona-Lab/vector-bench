@@ -53,7 +53,8 @@ from report import render                                          # noqa: E402
 from tests.fake_driver import (K, FakeDriver, index_spec,           # noqa: E402
                                loaded_driver, tiny_dataset)
 
-MYSQL_FAMILY = ("mariadb", "mariadb123", "alisql", "percona", "myvector")
+MYSQL_FAMILY = ("mariadb", "mariadb123", "alisql", "percona", "myvector",
+                "villagesql")
 
 
 # ---------------------------------------------------------------------------

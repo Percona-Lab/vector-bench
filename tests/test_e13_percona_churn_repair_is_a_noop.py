@@ -98,7 +98,10 @@ def _other_engines():
     been silently exempt from "nothing else moved".
     """
     from orchestrator.cli import KNOWN_ENGINES
-    return tuple(sorted(set(KNOWN_ENGINES) - {"percona"}))
+    # VillageSQL declares its bulk build broken too (an intermittent latch
+    # deadlock aborts the server); its flag is pinned in
+    # tests/test_e26_villagesql_engine.py.
+    return tuple(sorted(set(KNOWN_ENGINES) - {"percona", "villagesql"}))
 
 
 OTHER_ENGINES = _other_engines()
@@ -647,7 +650,7 @@ class TestTheDecisionIsPassedInAndNotImported:
                 actionable.append(engine)
         print(f"engines declaring {CAPABILITY}: false = {declaring}")
         print(f"of those, drivers carrying {HOOK}() = {actionable}")
-        assert declaring == ["percona"], declaring
+        assert declaring == ["percona", "villagesql"], declaring
         assert actionable == declaring, (
             f"{sorted(set(declaring) - set(actionable))} declare the bulk "
             f"build broken but their driver cannot act on it, so the "

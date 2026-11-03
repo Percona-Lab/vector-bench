@@ -193,8 +193,10 @@ class TestStructuralAsymmetriesAreRendered:
     def test_no_other_driver_declares_any(self):
         from harness.drivers.postgres import _driver_classes
         spec = IndexSpec(dim=4, m=16, metric="angular")
+        # VillageSQL declares its text binding and preview status, pinned in
+        # tests/test_e26_villagesql_engine.py.
         for name, cls in _driver_classes().items():
-            if name != "MyVectorDriver":
+            if name not in ("MyVectorDriver", "VillageSQLDriver"):
                 assert cls(ConnectionSpec(host="h", port=1)) \
                     .query_path_facts(spec) == {}, name
 

@@ -718,6 +718,7 @@ def _driver_classes() -> Dict[str, Any]:
     from .mongo import MongoDriver
     from .mysql_family import AliSQLDriver, MariaDBDriver, PerconaDriver
     from .myvector import MyVectorDriver
+    from .villagesql import VillageSQLDriver
     from .valkey import ValkeyDriver
 
     return {
@@ -738,6 +739,11 @@ def _driver_classes() -> Dict[str, Any]:
         # and brought up to date by an explicit refresh procedure. See
         # harness/drivers/myvector.py.
         "MyVectorDriver": MyVectorDriver,
+        # An architecture of its own: an extension's custom type and custom
+        # index, text-only vector input, an inlined query literal, and a plan
+        # guard that refuses to time a full scan. See
+        # harness/drivers/villagesql.py.
+        "VillageSQLDriver": VillageSQLDriver,
     }
 
 
@@ -763,6 +769,7 @@ def _driver_table() -> Dict[str, Any]:
         "valkey": classes["ValkeyDriver"],
         "percona": classes["PerconaDriver"],
         "myvector": classes["MyVectorDriver"],
+        "villagesql": classes["VillageSQLDriver"],
     }
 
 

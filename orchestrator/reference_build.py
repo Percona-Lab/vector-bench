@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from . import engines as engines_mod
+from .ann_knobs import excluded_builds, knob_problems
 from .ann_pass import render_config
 from .ops_pass import _quantization, ops_ef_construction
 
@@ -150,3 +151,44 @@ def reference_build_problem(engine: str, profile: Dict[str, Any],
                     f"M={build['m']}, which the ops pass does not build "
                     f"(ops.m_values {m_values})")
     return None
+
+
+def ops_build_problems(engine: str, profile: Dict[str, Any]) -> List[str]:
+    """Each ops build (`ops.m_values` x the ops ef_construction) the engine
+    cannot take, as one sentence each; [] when every one is buildable.
+
+    The ann grid has had this check since `ann_knobs`; the ops grid is a
+    second, independent list (`ops.m_values` with `ops_ef_construction`) and
+    had none, so `ops.m_values: [6]` with VillageSQL's ef_construction 200 --
+    a build vsql_vector refuses -- would start the server, load the corpus
+    and only then fail inside the harness. Refused before any container
+    starts instead, by the same `knob_problems` / `excluded_builds` rules the
+    render uses, naming the combination.
+
+    Not applied under `ops.build_selection: frontier`, where the ops pass
+    builds a build the ann render already admitted (or the reference build,
+    which `reference_build_problem` holds to that grid), nor when ops is off
+    or the engine has no ops ef_construction (the driver's default then, and
+    `ann_knobs` bounds M alone).
+    """
+    ops = profile.get("ops", {}) or {}
+    if ops.get("enabled", True) is False:
+        return []
+    from .ops_build_selection import MODE_FRONTIER, build_selection_mode
+    try:
+        if build_selection_mode(profile) == MODE_FRONTIER:
+            return []
+    except ValueError:
+        return []   # reported by `reference_build_problem`
+    m_values = [int(m) for m in (ops.get("m_values") or [16])]
+    efc = ops_ef_construction(engine, profile)
+    problems = [f"ops.m_values: {p}" for p in knob_problems(
+        engine, m_values, [efc] if efc is not None else [])]
+    if efc is not None:
+        problems += [f"{engine}: the ops pass would build M={m} at "
+                     f"ef_construction={e} (ops.m_values x the ops "
+                     f"ef_construction), which the engine cannot build: "
+                     f"{reason}"
+                     for m, e, reason in excluded_builds(engine, m_values,
+                                                         [efc])]
+    return problems

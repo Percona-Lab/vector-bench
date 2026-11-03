@@ -358,7 +358,7 @@ ENGINES = _engine_dirs()
 
 def test_every_engine_the_overlay_ships_is_covered():
     assert {"mariadb", "mariadb123", "alisql", "percona", "myvector",
-            "pgvector", "mongodb", "valkey"} <= set(ENGINES)
+            "pgvector", "mongodb", "valkey", "villagesql"} <= set(ENGINES)
 
 
 @pytest.mark.parametrize("engine", ENGINES)

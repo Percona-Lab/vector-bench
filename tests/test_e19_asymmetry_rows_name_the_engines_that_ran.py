@@ -237,7 +237,8 @@ def _configured_tunable_engines() -> List[str]:
 #: is nothing to derive it from -- and the assertion is what makes a fourth
 #: tunable engine fail this file instead of being silently unchecked.
 DOC_NAME = {"pgvector": "pgvector", "valkey": "Valkey",
-            "percona": "Percona", "myvector": "MyVector"}
+            "percona": "Percona", "myvector": "MyVector",
+            "villagesql": "VillageSQL"}
 
 
 class TestAPerconaRunIsNotToldTheKnobBelongsToPgvector:

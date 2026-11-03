@@ -54,7 +54,7 @@ EXPLORE = "frontier-explore"
 REVIEWER_GRID = [4, 6, 8, 12, 16, 32, 48]
 EFC = [64, 200, 400]
 M_ENGINES = ("mariadb", "mariadb123", "alisql", "pgvector", "valkey",
-             "percona", "myvector")
+             "percona", "myvector", "villagesql")
 DATASET = "dbpedia-openai-100k-angular"
 
 
@@ -204,13 +204,17 @@ class TestTheExploreProfile:
 
     @pytest.mark.parametrize("engine,count", [
         ("mariadb", 7), ("mariadb123", 7), ("alisql", 7), ("pgvector", 20),
-        ("valkey", 21), ("percona", 21), ("myvector", 21), ("mongodb", 2)])
+        ("valkey", 21), ("percona", 21), ("myvector", 21),
+        # 21 less vsql_vector's six out-of-range combinations
+        # (ef_construction > 32 x M at M=4, 6, 8, 12).
+        ("villagesql", 15), ("mongodb", 2)])
     def test_build_count_per_engine_is_the_headers(self, engine, count):
         assert len(_builds(engine, load_profile(EXPLORE))) == count
 
     def test_ef_construction_engines_sweep_all_three(self):
         extras = _resources(load_profile(EXPLORE))["extras"]
-        for engine in ("pgvector", "valkey", "percona", "myvector"):
+        for engine in ("pgvector", "valkey", "percona", "myvector",
+                       "villagesql"):
             assert extras[f"{engine}_ef_construction"] == EFC
 
     def test_percona_search_sweeps_both_quantizations_at_one_m_label(self):

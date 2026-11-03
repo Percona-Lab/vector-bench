@@ -334,7 +334,8 @@ def _detect_march() -> str:
     """
     for path in ("/opt/mariadb/.march", "/opt/alisql/.march",
                  "/opt/pgvector-artifacts/.march",
-                 "/opt/percona/.march", "/opt/myvector/.march"):
+                 "/opt/percona/.march", "/opt/myvector/.march",
+                 "/opt/villagesql/.march"):
         try:
             with open(path) as fh:
                 return fh.read().strip()
