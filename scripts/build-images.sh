@@ -98,6 +98,23 @@ build_engine() {
       || die "build context for $engine has no source.tar — run: scripts/prepare-sources.sh --engine $engine"
   fi
 
+  # Re-stage the auxiliary files (entrypoint, init.sql, confs) on every build,
+  # in the order and with the alias lookup `stage_context` in prepare-sources.sh
+  # uses: _shared first, then the engine's own directory, which may override a
+  # shared file. The source tarball is the expensive, commit-pinned part and
+  # stays prepare-sources' job; the aux files are cheap, and without this a
+  # build used whatever prepare-sources last staged, so an entrypoint fix did
+  # not reach the image until prepare-sources was run again -- and nothing
+  # said so. The Dockerfile is excluded because the build reads it from
+  # docker/ directly (`-f` below), never from the context.
+  local aux; aux="$(yq_get "$cfg" alias_of "$engine")"
+  if [[ -d "$VB_DOCKER/$aux" ]]; then
+    find "$VB_DOCKER/_shared" -maxdepth 1 -type f \
+         -exec cp {} "$ctx/" \; 2>/dev/null || true
+    find "$VB_DOCKER/$aux" -maxdepth 1 -type f ! -name 'Dockerfile' \
+         -exec cp {} "$ctx/" \; 2>/dev/null || true
+  fi
+
   # Engines we compile carry a git tag. Percona Search is a published image and
   # Valkey is a package set, so they carry a version instead and their images
   # would otherwise all be tagged ":unknown".

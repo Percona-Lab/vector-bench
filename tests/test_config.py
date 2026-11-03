@@ -2595,6 +2595,17 @@ class TestBuildScriptHandlesEveryEngineItAccepts:
             "the source.tar gate is unconditional again; engines installed "
             "from images or packages have no tarball to check for")
 
+    def test_aux_files_are_restaged_before_every_build(self):
+        """An entrypoint fix did not reach the image until prepare-sources was
+        rerun, because the build used whatever aux files it had last staged.
+        The re-stage must come before `docker build` and skip the Dockerfile,
+        which the build reads from docker/ with `-f`."""
+        script = open(self.SCRIPT).read()
+        body = script.split("build_engine() {")[1]
+        restage = body.index('find "$VB_DOCKER/$aux"')
+        assert restage < body.index("docker build")
+        assert "! -name 'Dockerfile'" in body[restage:restage + 120]
+
     def test_the_dispatch_accepts_every_known_engine(self):
         from orchestrator.cli import KNOWN_ENGINES
         script = open(self.SCRIPT).read()
