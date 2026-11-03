@@ -32,6 +32,17 @@ succeeded perfectly reported a bare `[FAIL] ... (exit 1)` naming neither. It
 cost a real diagnosis -- the crash was first read as a failure of the unit
 that had just succeeded.
 
+SINCE THEN, 2026-11-03: at the current pin (9.7.2-2, x86-64-v3) the same
+shape built 25 times out of 25 (ALTER 3.4-5.8 s, nothing in the error log, no
+core), and a 60,000-row post/incremental comparison gave the same index
+quality. So the capability is now TRUE for Percona: profiles that name no mode
+get `post` again, and `config/profiles/percona.yml` runs both modes. What this
+file still protects is the mechanism -- the default comes from the engine and
+not from a literal, an engine that declares the build broken (VillageSQL)
+still gets `incremental`, and an explicit `post` against a false declaration
+is honoured with a warning. The churn repair is NOT restored by this flip; it
+is a separate key, pinned by `tests/test_e13_percona_churn_repair_is_a_noop.py`.
+
 Probe style, per the suite's convention: every decision test reports its
 HONEST and MUTANT value rather than a bare pass/fail, and an identical pair
 is called out as a dead probe. No file on disk is patched here -- the inputs
@@ -76,13 +87,17 @@ def _with_capability(cfg, value):
 
 class TestTheEngineDeclaresWhatItCannotDo:
 
-    def test_the_capability_is_declared_false(self):
+    def test_the_capability_is_declared_true_at_the_current_pin(self):
         caps = _percona_cfg().get("capabilities", {}) or {}
         assert CAPABILITY in caps, (
-            f"{CAPABILITY} is the engine's declaration that its bulk vector "
-            f"index build is unusable at this pin; the ops loop reads it to "
-            f"pick the default build mode")
-        assert caps[CAPABILITY] is False
+            f"{CAPABILITY} is the engine's declaration of whether its bulk "
+            f"vector index build works at this pin; the ops loop reads it to "
+            f"pick the default build mode, and it is declared explicitly "
+            f"rather than left to the absent-reads-true default so the "
+            f"history beside it has a key to sit next to")
+        assert caps[CAPABILITY] is True
+        # And the repair, a different statement, is NOT restored with it.
+        assert caps.get("vector_index_replace") is False
 
     def test_the_reason_is_recorded_next_to_the_declaration(self):
         """R7: the claim in the comment is part of the deliverable.
@@ -95,9 +110,12 @@ class TestTheEngineDeclaresWhatItCannotDo:
             text = fh.read()
         head = text.index(CAPABILITY + ":")
         # The note sits above the key; take a generous window back.
-        window = text[max(0, head - 2600):head]
+        window = text[max(0, head - 4500):head]
         for needle in ("ADD VECTOR KEY", "ALGORITHM=", "Lost connection",
-                       "incremental"):
+                       "incremental", "percona-20261015-203911",
+                       "9.7.1-1", "9.7.2-2", "ATTEMPTS BUILT", "3.4-5.8 s",
+                       "core.%p", "percona-build-modes", "0.9714",
+                       "ann phase"):
             assert needle in window, (
                 f"{needle!r} is missing from the note above {CAPABILITY}; "
                 f"without it the declaration cannot be audited or retired")
@@ -118,7 +136,7 @@ class TestTheEngineDeclaresWhatItCannotDo:
         # VillageSQL is the second: its bulk CREATE INDEX intermittently
         # deadlocks and aborts the server at its pin (config/engines/
         # villagesql.yml), pinned in tests/test_e26_villagesql_engine.py.
-        assert declared == {"percona": False, "villagesql": False}, declared
+        assert declared == {"percona": True, "villagesql": False}, declared
 
 
 # ---------------------------------------------------------------------------
@@ -132,34 +150,40 @@ class TestTheDefaultComesFromTheEngineAndNotFromALiteral:
         cfg = _percona_cfg()
         honest = _ops_build_modes("percona", {"ops": {}}, cfg)
         mutant = _ops_build_modes("percona", {"ops": {}},
-                                  _with_capability(cfg, True))
-        print(f"HONEST (capability false) = {honest}")
-        print(f"MUTANT (capability true)  = {mutant}")
+                                  _with_capability(cfg, False))
+        print(f"HONEST (capability true, as shipped) = {honest}")
+        print(f"MUTANT (capability false)            = {mutant}")
         assert honest != mutant, (
             "DEAD PROBE: the default did not move when the capability was "
             f"flipped, so this test is not measuring the fix. Both arms "
             f"returned {honest}")
-        assert honest == ["incremental"], (
-            "a profile naming no mode must not get the mode that kills the "
-            f"server; got {honest}")
-        assert mutant == ["post"], (
-            "with the bulk build declared working, the default must return to "
-            f"each engine's idiomatic build; got {mutant}")
+        assert honest == ["post"], (
+            "with the bulk build declared working at this pin, the default "
+            f"must be the engine's idiomatic build; got {honest}")
+        assert mutant == ["incremental"], (
+            "a profile naming no mode must not get a mode the engine declares "
+            f"broken; got {mutant}")
 
     def test_the_default_is_read_through_the_capability_for_every_profile(self):
         """Not only the Percona-only profile: the crash was in the profiles
-        that say nothing, which is most of them.
+        that say nothing, which is most of them -- so they are the ones that
+        must follow the declaration both ways.
         """
         from orchestrator.cli import _ops_build_modes
         from orchestrator.config import load_profile
         cfg = _percona_cfg()
-        for name in ("main", "smoke", "dev", "full", "quick"):
+        broken = _with_capability(cfg, False)
+        for name in ("main", "smoke", "dev", "full", "quick",
+                     "tuned-complete"):
             profile = load_profile(name)
             modes = _ops_build_modes("percona", profile, cfg)
-            print(f"{name}: percona build modes = {modes}")
-            assert "post" not in modes, (
-                f"profile {name!r} would run Percona's bulk build, which "
-                f"cannot complete at this pin")
+            mutant = _ops_build_modes("percona", profile, broken)
+            print(f"{name}: percona build modes = {modes} "
+                  f"(capability false: {mutant})")
+            assert modes == ["post"], (
+                f"profile {name!r} names no mode and should get Percona's "
+                f"declared-working bulk build; got {modes}")
+            assert mutant == ["incremental"], (name, mutant)
 
     @pytest.mark.parametrize("engine", ["mariadb", "mariadb123", "alisql",
                                         "pgvector", "mongodb", "valkey"])
@@ -186,7 +210,10 @@ class TestAnExplicitRequestIsHonouredRatherThanRefused:
         """
         from orchestrator.cli import _ops_build_modes
         profile = {"ops": {"percona_build_modes": ["post"]}}
-        modes = _ops_build_modes("percona", profile, _percona_cfg())
+        # The capability flipped back to false: the case the warning exists
+        # for, now that the shipped config says the build works.
+        modes = _ops_build_modes("percona", profile,
+                                 _with_capability(_percona_cfg(), False))
         warning = capsys.readouterr().err
         print(f"returned = {modes}")
         assert modes == ["post"], (
@@ -200,8 +227,7 @@ class TestAnExplicitRequestIsHonouredRatherThanRefused:
     def test_the_warning_is_silent_when_the_mode_is_usable(self, capsys):
         from orchestrator.cli import _ops_build_modes
         profile = {"ops": {"percona_build_modes": ["post"]}}
-        modes = _ops_build_modes("percona", profile,
-                                 _with_capability(_percona_cfg(), True))
+        modes = _ops_build_modes("percona", profile, _percona_cfg())
         warning = capsys.readouterr().err
         print(f"returned = {modes}, stderr = {warning!r}")
         assert modes == ["post"]
@@ -214,12 +240,18 @@ class TestAnExplicitRequestIsHonouredRatherThanRefused:
 # The profile, and its agreement with the estimator
 # ---------------------------------------------------------------------------
 
-class TestTheProfileAsksForTheMeasurableHalfOnly:
+class TestTheProfileRunsBothModesAgain:
 
-    def test_the_percona_profile_names_incremental_alone(self):
+    def test_the_percona_profile_names_both_modes(self):
+        """It was cut to `[incremental]` while the bulk build killed the
+        server, with a comment saying to restore both when it was fixed.
+        """
+        from orchestrator.cli import _ops_build_modes
         from orchestrator.config import load_profile
         modes = load_profile("percona")["ops"]["percona_build_modes"]
-        assert modes == ["incremental"], modes
+        assert modes == ["post", "incremental"], modes
+        assert _ops_build_modes("percona", load_profile("percona"),
+                                _percona_cfg()) == ["post", "incremental"]
 
     def test_the_loop_and_the_estimator_agree_on_the_unit_count(self):
         """`tests/test_e2_percona_wiring.py` pins the estimator's count, and
@@ -235,21 +267,23 @@ class TestTheProfileAsksForTheMeasurableHalfOnly:
         m_values = len(profile["ops"]["m_values"])
         assert est_mod._ops_units(profile, "percona") == m_values * len(modes)
 
-    def test_the_profile_records_what_the_narrowing_costs(self):
-        """The axis this profile exists for is down to one value. Saying so
-        is the difference between a measurement that is missing and one that
-        was judged uninteresting.
+    def test_the_profile_records_why_and_what_was_not_restored(self):
+        """The list was narrowed and widened again; the note beside it has to
+        say both, point at the evidence in the engine config, and say that
+        restoring `post` did not restore the churn repair.
         """
         with open(os.path.join(REPO, "config", "profiles",
                                "percona.yml")) as fh:
             text = fh.read()
-        head = text.index("percona_build_modes: [incremental]")
+        head = text.index("percona_build_modes: [post, incremental]")
         window = text[max(0, head - 1800):head]
         assert CAPABILITY in window, (
             "the profile must point at the engine's declaration, so the "
             "evidence lives in one place")
-        for needle in ("post", "incremental"):
+        for needle in ("post", "incremental", "OLD PIN",
+                       "vector_index_replace"):
             assert needle in window, needle
+        assert "KILLS THE SERVER AT THIS PIN" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -314,3 +348,37 @@ class TestAFailedUnitIsNoLongerSilent:
         assert len(continues) == 1, (
             "expected exactly the checkpoint skip; a second continue needs "
             "its own reasoning here")
+
+
+# ---------------------------------------------------------------------------
+# The report says which build each path measured
+# ---------------------------------------------------------------------------
+
+class TestTheReportSaysTheAnnCurveIsIncremental:
+    """With `post` now Percona's ops default, the ops records describe a bulk
+    build while every ann recall curve is still an incremental one (the ann
+    overlay module has no `build_mode`). §3's build-mode rows read only the
+    ops `index_build` records, so without a row of its own the report would
+    say "Percona Server bulk-builds after load" beside curves that were not.
+    """
+
+    @staticmethod
+    def _rows(*modes_seen):
+        from report.render import _build_mode_rows
+        build = [{"engine": "percona", "phase": "index_build",
+                  "build_mode": mode,
+                  "extra": {"separable_build": mode == "post"}}
+                 for mode in modes_seen]
+        return _build_mode_rows({"build": build})
+
+    def test_a_post_only_run_discloses_the_incremental_ann_build(self):
+        honest = self._rows("post")
+        mutant = self._rows("incremental")
+        honest_text = " ".join(" ".join(r) for r in honest)
+        mutant_text = " ".join(" ".join(r) for r in mutant)
+        print(f"HONEST (ops built post)        = {honest_text!r}")
+        print(f"MUTANT (ops built incremental) = {mutant_text!r}")
+        assert "recall curves are an incremental build" in honest_text
+        assert "recall curves are an incremental build" not in mutant_text, (
+            "an incremental ops unit matches the ann build; no disclosure is "
+            "owed and one would be noise")

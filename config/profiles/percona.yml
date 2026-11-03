@@ -36,8 +36,10 @@
 # `ef_construction` at the default, among 56 normalized Percona `recall_qps`
 # rows -- it just was not produced from here. Also never run from here: the
 # second build mode (`post`, blocked by
-# `capabilities.bulk_vector_index_build`), and churn, which `workloads` below
-# excludes on purpose.
+# `capabilities.bulk_vector_index_build` until the 2026-11-03 re-test at the
+# current pin restored it to `percona_build_modes` below -- the separate
+# profile `percona-build-modes` measured it instead), and churn, which
+# `workloads` below excludes on purpose.
 #
 # AND THE ANN TREE IS SHARED, which is why a cell appearing under a run id is
 # not evidence that run built it. `results/annb/<pass>/<fingerprint>/` is
@@ -189,13 +191,15 @@ ops:
   # whole graph (docs/09 §2.7), so a churn phase here would cost on the order
   # of a bulk build per fraction" -- which is no longer the fact: at the
   # pinned `source.tag` that repair is withdrawn
-  # (`capabilities.bulk_vector_index_build: false`) and a churn phase would
-  # cost nothing extra for it, because `maintain()` returns without issuing
-  # the ALTER. `churn` stays out because this profile exists to compare the
-  # two BUILD MODES and churn measures neither axis above -- and, at this pin,
-  # because the repair whose cost would have made it interesting does not run.
-  # If the capability is ever flipped to `true`, the original cost argument
-  # becomes live again and is the reason to keep churn out.
+  # (`capabilities.vector_index_replace: false`, which is now its own key and
+  # stayed false when `bulk_vector_index_build` was flipped to true) and a
+  # churn phase would cost nothing extra for it, because `maintain()` returns
+  # without issuing the ALTER. `churn` stays out because this profile exists
+  # to compare the two BUILD MODES and churn measures neither axis above --
+  # and, at this pin, because the repair whose cost would have made it
+  # interesting does not run. If `vector_index_replace` is ever flipped to
+  # `true`, the original cost argument becomes live again and is the reason
+  # to keep churn out.
   workloads: [build, concurrency, filtered]
   m_values: [16]
   ef_search: 100
@@ -238,18 +242,19 @@ ops:
   # table definition in this mode and `create_index` adds it with one
   # `ALTER TABLE … ADD VECTOR KEY … ALGORITHM=INPLACE` afterwards.
   #
-  # AND THAT STATEMENT KILLS THE SERVER AT THIS PIN, so the axis this
-  # profile exists for is down to one value. The evidence, the exact
-  # reproduction and the condition for restoring it are recorded once, next
-  # to `capabilities.bulk_vector_index_build` in `config/engines/percona.yml`
+  # THAT STATEMENT KILLED THE SERVER AT THE OLD PIN (9.7.1-1), and this list
+  # was cut to `[incremental]` for it: the load completed, the ALTER lost the
+  # connection, and the same corpus built and served correctly in
+  # `incremental`. At the current pin it built 25 times out of 25 and a
+  # 60,000-row comparison of the two modes gave the same index quality (the
+  # `percona-build-modes` profile), so both values are back. The evidence and
+  # the history are recorded once, next to
+  # `capabilities.bulk_vector_index_build` in `config/engines/percona.yml`
   # -- not duplicated here, because a second copy is a second thing to go
-  # stale. In short: the load completes, the ALTER loses the connection, and
-  # the same corpus builds and serves correctly in `incremental`.
+  # stale.
   #
-  # WHAT IS LOST IS NAMED RATHER THAN QUIETLY DROPPED: this profile can no
-  # longer report the within-engine bulk-vs-incremental build comparison that
-  # docs/09 §2.5 proposed, and no other engine can stand in for it, because
-  # `post` is a no-op on MariaDB and AliSQL. Restore `[post, incremental]`
-  # when the server is fixed; the one-value list is the measurable half of a
-  # two-value axis, not a decision that the axis was uninteresting.
-  percona_build_modes: [incremental]
+  # Restoring `post` does NOT restore the churn repair, which is a different
+  # ALTER (a replace on an indexed table) and is still withdrawn by
+  # `capabilities.vector_index_replace: false` -- see the `workloads` note
+  # above for why churn stays out of this profile regardless.
+  percona_build_modes: [post, incremental]

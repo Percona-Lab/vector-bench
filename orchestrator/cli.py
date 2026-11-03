@@ -1220,11 +1220,12 @@ def _check_free_disk(paths: Dict[str, Any], engines: List[str],
 # `tests/test_e2_percona_wiring.py::TestEveryShippedProfileRenders`.
 #
 # **The default WAS the literal `["post"]` for every engine including
-# Percona, and for Percona that default could not complete: see
-# `_ops_build_modes` below, which now takes it from the engine's own
-# `capabilities.bulk_vector_index_build`. The asymmetry the rest of this
-# paragraph describes is real and unchanged for every engine whose bulk
-# build works.** For
+# Percona, and for Percona at the old pin (9.7.1-1) that default could not
+# complete: see `_ops_build_modes` below, which now takes it from the
+# engine's own `capabilities.bulk_vector_index_build`. The asymmetry the
+# rest of this paragraph describes is real and unchanged for every engine
+# whose bulk build works, which includes Percona again at the current pin.**
+# For
 # MariaDB and AliSQL `post` is a no-op -- `create_index` does nothing
 # and `capabilities()["incremental_index"]` is True, so the measured
 # build is the incremental one either way. For Percona `post` is a
@@ -1234,8 +1235,9 @@ def _check_free_disk(paths: Dict[str, Any], engines: List[str],
 # what `docs/05-methodology.md` says these comparisons report), but it
 # is not like-for-like, and `build_mode` is on every record so the
 # report can say which. `config/profiles/percona.yml` ran both until the
-# bulk build was found to kill the server at the pinned version; it now
-# asks for `[incremental]` alone.
+# bulk build was found to kill the server at the old pin (9.7.1-1); it
+# asked for `[incremental]` alone until the current pin (9.7.2-2) built it
+# 25 times out of 25, and now runs both again.
 _OPS_BUILD_MODE_KEYS = {
     "pgvector": ("ann", "pgvector_build_modes"),
     "percona": ("ops", "percona_build_modes"),
@@ -1256,14 +1258,55 @@ def _bulk_vector_index_build(engine_cfg: Dict[str, Any]) -> bool:
     `_ops_build_modes` alone before this existed.
 
     **Absence reads as True**, and that default is the whole compatibility
-    story: the key is declared by exactly one engine config
-    (`config/engines/percona.yml`, false at its pin), which
-    `tests/test_e9_percona_bulk_build_crash.py` pins. mariadb, mariadb123,
-    alisql, pgvector, mongodb and valkey declare nothing and are unaffected in
-    both consumers.
+    story: the key is declared by two engine configs --
+    `config/engines/percona.yml` (true at its current pin, false at the old
+    one) and `config/engines/villagesql.yml` (false) -- which
+    `tests/test_e9_percona_bulk_build_crash.py` pins. Every other engine
+    declares nothing and is unaffected in both consumers.
+
+    **The second consumer no longer reads this directly.** It reads
+    `_vector_index_replace` below, which falls back to this function when an
+    engine does not declare the replace separately. The two statements were
+    one key while neither worked; at Percona's current pin the bulk build is
+    verified and the replace is not, so they had to come apart.
     """
     caps = engine_cfg.get("capabilities", {}) or {}
     return bool(caps.get("bulk_vector_index_build", True))
+
+
+def _vector_index_replace(engine_cfg: Dict[str, Any]) -> bool:
+    """Whether this engine's churn repair -- replacing the vector index on a
+    table that already has one -- is a measurement this run may publish.
+
+    **A SEPARATE STATEMENT FROM THE BULK BUILD, AND ONLY ONE OF THE TWO HAS
+    BEEN RE-VERIFIED.** `PerconaDriver.create_index` (`build_mode: post`)
+    issues `ALTER TABLE t1 ADD VECTOR KEY vi (...) ALGORITHM=INPLACE` on a
+    table with NO vector index. `PerconaDriver.maintain()` issues `ALTER
+    TABLE t1 DROP KEY vi, ADD VECTOR KEY ..., ALGORITHM=INPLACE` on a table
+    that HAS one. They were one key (`bulk_vector_index_build`) while both
+    failed at the old pin (9.7.1-1): the first killed the server, the second
+    returned in 1-4 ms with `index_bytes` byte-identical and recall identical
+    in all 20 before/after pairs of `full-20261015-215006` -- a no-op the
+    report published as a repair. The current pin (9.7.2-2) built the first
+    25 times out of 25 on 2026-11-03, and nobody has re-run the second. One
+    key would have restored both on that evidence, and the second one fails
+    SILENTLY, by publishing a plausible number.
+
+    **Absence falls back to `_bulk_vector_index_build`**, so an engine that
+    declares neither key, and VillageSQL (bulk false, no replace key, churn
+    declined anyway), reads exactly as it did when the two were one key.
+    Only an engine that declares `vector_index_replace` itself -- Percona,
+    false -- can have the two disagree.
+
+    Read here once, and handed to `ops_pass.harness_args`, which emits
+    `--no-vector-index-replace`; `harness/main.py` applies that through
+    `PerconaDriver.declare_vector_index_replace`.
+    """
+    caps = engine_cfg.get("capabilities", {}) or {}
+    declared = caps.get("vector_index_replace")
+    if declared is None:
+        return _bulk_vector_index_build(engine_cfg)
+    return bool(declared)
 
 
 def _ops_build_modes(engine: str, profile: Dict[str, Any],
@@ -1285,13 +1328,15 @@ def _ops_build_modes(engine: str, profile: Dict[str, Any],
     # CHANGE FIXED A CRASH IN EVERY PROFILE THAT NAMES NO MODE.** The
     # argument at `_OPS_BUILD_MODE_KEYS` is that `post` is the honest default
     # because it is each engine's idiomatic build. That holds for every engine
-    # whose bulk build WORKS. Percona's does not at its pinned version:
-    # `ALTER TABLE ... ADD VECTOR KEY ... ALGORITHM=INPLACE` kills the server,
-    # so a literal `["post"]` default meant `main`, `smoke`, `dev` and every
-    # other profile that sets no `percona_build_modes` ran Percona in the one
-    # mode that cannot complete -- after paying for the whole load first. The
-    # evidence is at `capabilities.bulk_vector_index_build` in
-    # `config/engines/percona.yml`.
+    # whose bulk build WORKS. Percona's did not at the old pin (9.7.1-1):
+    # `ALTER TABLE ... ADD VECTOR KEY ... ALGORITHM=INPLACE` killed the
+    # server, so a literal `["post"]` default meant `main`, `smoke`, `dev` and
+    # every other profile that sets no `percona_build_modes` ran Percona in
+    # the one mode that could not complete -- after paying for the whole load
+    # first. At the current pin it builds, and Percona declares the
+    # capability true again, so those profiles get `post`; VillageSQL still
+    # declares false and still gets `incremental`. The evidence for both is
+    # at `capabilities.bulk_vector_index_build` in each engine config.
     #
     # An engine that declares nothing keeps `post`, so this widens where the
     # default comes from rather than changing the default for anybody else.
@@ -1306,17 +1351,19 @@ def _ops_build_modes(engine: str, profile: Dict[str, Any],
     # would mean editing the engine config to do it. The warning names the
     # symptom so the resulting lost connection is not read as a harness fault.
     if "post" in modes and not bulk_build:
+        # The repair half of the old message ("the SAME declaration also
+        # withdraws the churn repair path") is now only true for an engine
+        # that declares no `vector_index_replace` of its own, which is what
+        # `_vector_index_replace` falls back on -- so it says that, not more.
         print(f"[ops] WARNING: {engine} declares "
               f"capabilities.bulk_vector_index_build: false and this profile "
               f"asks for build_mode 'post' anyway. At the pinned version that "
-              f"ALTER kills the server after the load has already been paid "
-              f"for, and the unit will fail with a lost connection. "
-              f"Honouring the explicit request. Note that the SAME "
-              f"declaration also withdraws the churn repair path in EVERY "
-              f"build mode -- `maintain()` issues that same ALTER, so the "
-              f"harness is told to declare repair_path 'none' and writes no "
-              f"post-maintenance record. Flipping the capability is what "
-              f"restores both.", file=sys.stderr)
+              f"bulk build is recorded as killing the server after the load "
+              f"has already been paid for, and the unit will fail with a lost "
+              f"connection. Honouring the explicit request. Unless the engine "
+              f"also declares capabilities.vector_index_replace, the same "
+              f"declaration withdraws any churn repair path that rebuilds "
+              f"the index, in every build mode.", file=sys.stderr)
     return modes
 
 
@@ -1496,6 +1543,11 @@ def _run_unit(phase: str, engine: str, dataset: str, profile: Dict[str, Any],
         # build mode or the storage engine. The same value `build_modes` above
         # was derived from, which is the point of there being one reader.
         bulk_build = _bulk_vector_index_build(engine_cfg)
+        # The churn repair's own reading, which falls back to `bulk_build`
+        # when the engine declares nothing separate. Percona declares it
+        # false while its bulk build is true: the replace has not been
+        # re-tested at the current pin (see `_vector_index_replace`).
+        replace = _vector_index_replace(engine_cfg)
         storage_engines = _ops_storage_engines(engine, profile, resources,
                                                resource_pass)
         worst_rc = 0
@@ -1553,6 +1605,7 @@ def _run_unit(phase: str, engine: str, dataset: str, profile: Dict[str, Any],
                         iterative_scan=_ops_iterative_scan(
                             engine, profile, resources, resource_pass),
                         bulk_vector_index_build=bulk_build,
+                        vector_index_replace=replace,
                         build=ops_build_selection.ops_build(ops_selection),
                         build_selection=ops_build_selection.disclosure(
                             ops_selection),

@@ -163,15 +163,25 @@ _MEASURED_ROWS_PER_S = {
     # a grid.
     #
     # AND THIS TABLE CANNOT EXPRESS THE BUILD MODE. Every figure above is
-    # `incremental`, Percona's default at this pin. The `post` plain load
-    # measured 2653.0 rows/s -- 7.8x the fashion-mnist entry -- and is in
-    # neither table because no graph is built during it. pgvector, Valkey and
-    # Percona Search are here with `post` figures for the opposite reason:
-    # they never maintain the graph on the write path, so `post` IS their
-    # load. When `capabilities.bulk_vector_index_build` is flipped and `post`
-    # becomes Percona's default, the right rate becomes mode-dependent and
-    # this key cannot say so -- `_ops_units` already reads
-    # `ops.percona_build_modes` and this table does not.
+    # `incremental`, which was Percona's ops default while
+    # `capabilities.bulk_vector_index_build` was false and is still what its
+    # ann phase builds (the ann module declares the index in CREATE TABLE).
+    # The `post` plain load measured 2653.0 rows/s -- 7.8x the fashion-mnist
+    # entry -- and is in neither table because no graph is built during it.
+    # pgvector, Valkey and Percona Search are here with `post` figures for
+    # the opposite reason: they never maintain the graph on the write path,
+    # so `post` IS their load.
+    #
+    # **THE CAPABILITY HAS NOW BEEN FLIPPED and `post` is Percona's ops
+    # default**, so the right ops rate is mode-dependent and this key still
+    # cannot say so -- `_ops_units` reads `ops.percona_build_modes` and this
+    # table does not. No `post` rate is added, because there is no
+    # load-plus-build rate measured on the grid this table prices: the one
+    # comparison at the current pin (`percona-build-modes`, fashion-mnist,
+    # 60,000 rows, M=16, one load thread) took 195 s for `post` against 288 s
+    # for `incremental`, one dataset at one M, which is a direction and not a
+    # rate. `print_load_estimate` says the ops share is charged at the
+    # incremental rate whenever the plan runs Percona `post` units.
     #
     # TWO PROVENANCE FACTS, RECORDED RATHER THAN CORRECTED FOR.
     #   * All twelve load-bearing records come from a binary built
@@ -360,12 +370,13 @@ _PER_QUERY_OPS_COSTS: Dict[str, Tuple[str, ...]] = {
         # than you would expect.** `full-20261015-215006` ran Percona's churn
         # phase: the index replace returned in 1-4 ms and changed nothing --
         # identical `index_bytes` to the byte and identical recall to five
-        # decimals in all 20 before/after pairs -- because that ALTER is the
-        # same statement `capabilities.bulk_vector_index_build: false`
-        # records as killing the server. So pgvector's VACUUM still has no
-        # measured rate, and Percona's repair now has one of zero while the
-        # capability is false, because the driver withdraws the path and runs
-        # nothing. The disclosure string below therefore qualifies Percona
+        # decimals in all 20 before/after pairs. That was the old pin's
+        # index replace, and no one has re-tested it since. So
+        # pgvector's VACUUM still has no measured rate, and Percona's repair
+        # now has one of zero while `capabilities.vector_index_replace` is
+        # false, because the driver withdraws the path and runs nothing. That
+        # key used to be `bulk_vector_index_build`; it was split off when the
+        # bulk build was re-verified and the replace was not. The disclosure string below therefore qualifies Percona
         # rather than dropping it: this module reads no engine configs, so it
         # cannot know which pin a given run is on, and a reader planning a run
         # on a FIXED server still needs the cost disclosed.
@@ -382,7 +393,7 @@ _PER_QUERY_OPS_COSTS: Dict[str, Tuple[str, ...]] = {
         # pgvector's VACUUM.
         "churn repair path: on an engine that has one it can execute at its "
         "pinned version (pgvector's VACUUM (ANALYZE); Percona Server's index "
-        "replace only while capabilities.bulk_vector_index_build is true -- "
+        "replace only while capabilities.vector_index_replace is true -- "
         "it is false at the pinned version, where the driver declares no "
         "repair path, runs nothing and pays neither cost), driver.maintain() "
         "per churn fraction plus a third ops.max_queries measurement of the "
@@ -1503,6 +1514,22 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
               f"smoke run supplies the figure; until then the ingest\n    "
               f"cost of this plan is higher than the number above, by an "
               f"amount nothing here knows.")
+    # Percona's ingest rate is its `incremental` rate (see
+    # `_INGEST_ROWS_PER_S`), which is right for its ann phase and for an
+    # `incremental` ops unit. Its ops DEFAULT is `post` now that
+    # `capabilities.bulk_vector_index_build` is true, and `post` loaded and
+    # built faster in the one comparison at this pin -- so the ops share is a
+    # likely overestimate, which is said rather than corrected with a rate
+    # nothing measured. The profile's list is read with this module's own
+    # `["post"]` default, which matches the engine's now that it is true.
+    if ("percona" in estimate["per_engine_hours"]
+            and "ops" in estimate["phases"]
+            and "post" in ((profile.get("ops") or {})
+                           .get("percona_build_modes", ["post"]))):
+        print("  percona's ops ingest is charged at its measured incremental "
+              "rate; its post\n    units (the ops default) have no rate here "
+              "and loaded faster in the one\n    comparison at this pin "
+              "(195 s vs 288 s, 60,000 rows), so that share is likely high.")
     bound = estimate.get("ops_build_bound")
     if bound:
         priced = ", ".join(

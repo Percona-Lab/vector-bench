@@ -4349,6 +4349,24 @@ def _build_mode_rows(summary: Optional[Dict[str, Any]]) -> List[List[str]]:
             "either, so `build_mode` is a comparison within one engine",
             consequence,
         ])
+    if "percona" in bulk:
+        # **THE TWO PATHS BUILD PERCONA DIFFERENTLY BY DEFAULT, and the row
+        # above cannot say so because it reads only ops `index_build`
+        # records.** Since `capabilities.bulk_vector_index_build` became true
+        # at the current pin, an ops unit that names no mode builds `post`;
+        # the ann overlay module has no `build_mode` and declares the index in
+        # CREATE TABLE, so every recall curve is an incremental build. At
+        # 60,000 fashion-mnist rows the two gave the same recall (0.9714 vs
+        # 0.9709 at ef_search 10), which is why this is a disclosure and not
+        # a refusal -- but a reader joining §4's curve to §5's build cost is
+        # joining two different builds, and has to be told.
+        rows.append([
+            "Percona Server's ops units bulk-built; its recall curves are an "
+            "incremental build",
+            "The ann phase declares the index in CREATE TABLE and has no "
+            "build mode, so the recall/QPS curves come from an index grown "
+            "row by row, while the ops figures (build cost, concurrency, "
+            "filtered, churn) come from the bulk build the ops pass ran."])
     return rows
 
 

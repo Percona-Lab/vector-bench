@@ -383,10 +383,12 @@ more than a trace they cannot.
 
 This is the highest-value request, and the framework already has the machinery: it
 is `build_mode: post`, implemented, tested, and switched off because
-*ALTER TABLE … ADD VECTOR KEY … ALGORITHM=INPLACE* killed the server at our pin.
-`config/engines/percona.yml`'s `capabilities.bulk_vector_index_build` is the switch,
-and its comment records the reproduction and says to flip it when the server is
-fixed.
+*ALTER TABLE … ADD VECTOR KEY … ALGORITHM=INPLACE* killed the server at the old pin
+(9.7.1-1). `config/engines/percona.yml`'s `capabilities.bulk_vector_index_build` is
+the switch. **It is now on**: at the current pin (9.7.2-2) the bulk build completed
+25 times out of 25 on 2026-11-03 and matched `incremental`'s index quality at 60,000
+rows, so the ops pass builds Percona `post` by default. Items 1 and 2 of §5.2 are
+done; the rest of §5.2 is not.
 
 ### 5.1 What the vendor document now says the bulk path does
 
@@ -403,23 +405,29 @@ build and larger.
 
 ### 5.2 The work
 
-1. `capabilities.bulk_vector_index_build` → `true`, once a `post` unit survives at
-   the new pin. **That flip does two things, not one, and the second one is a
-   hazard.** `orchestrator/cli.py`'s `_bulk_vector_index_build` is the single reader
-   of that key, and it feeds both the ops loop's build-mode default and the
-   `--no-bulk-vector-index-build` flag that reaches
-   `PerconaDriver.declare_bulk_vector_index_build`. So flipping it restores the `post`
-   build mode **and** re-arms the churn repair path — which §5.3 establishes is still
-   a no-op at the new pin, because PS-11617 fixes only the differing-*M* case. Seven
-   profiles set `workloads: [..., churn]` today (`full`, `main`, `smoke`, `dev`,
+1. **DONE, with the hazard below removed by splitting the key.**
+   `capabilities.bulk_vector_index_build` → `true` once `post` survived at the new
+   pin. The churn repair is now withdrawn by its own key,
+   `capabilities.vector_index_replace: false`, read by `_vector_index_replace` in
+   `orchestrator/cli.py` (falling back to the bulk-build key for engines that
+   declare no replace key), carried as `--no-vector-index-replace` and applied by
+   `PerconaDriver.declare_vector_index_replace`. So the flip restored `post` and did
+   NOT re-arm the repair; §5.3's switch can land on its own. What follows is the
+   hazard as it stood before the split. **That flip did two things, not one, and
+   the second one was a hazard.** `orchestrator/cli.py`'s `_bulk_vector_index_build` was the single reader
+   of that key, and it fed both the ops loop's build-mode default and the
+   `--no-bulk-vector-index-build` flag that then reached
+   `PerconaDriver.declare_bulk_vector_index_build`. So flipping it would have
+   restored the `post` build mode **and** re-armed the churn repair path — which
+   §5.3 establishes is still a no-op at the new pin, because PS-11617 fixes only the
+   differing-*M* case. Seven profiles set `workloads: [..., churn]` (`full`, `main`, `smoke`, `dev`,
    `quick`, `mariadb-blog`, `tuned-complete`). **So the flip and the
-   *ALTER TABLE … FORCE* switch in §5.3 have to land in the same change**, or no
-   churn-running profile may run between them — otherwise we publish the degraded
+   *ALTER TABLE … FORCE* switch in §5.3 had to land in the same change**, or no
+   churn-running profile could run between them — otherwise we publish the degraded
    index a second time and label it repaired, which is the exact outcome the
    capability was set to `false` to prevent.
-2. `config/profiles/percona.yml`: `percona_build_modes: [incremental]` →
-   `[post, incremental]`. The profile's comment already says the one-value list is
-   the measurable half of a two-value axis.
+2. **DONE.** `config/profiles/percona.yml`: `percona_build_modes: [incremental]` →
+   `[post, incremental]`.
 3. ***innodb_parallel_read_threads* is set in none of our configs, and pgvector's
    counterpart is set in ours.** pgvector's tuned pass sets
    `max_parallel_maintenance_workers`, `max_parallel_workers` and
@@ -466,9 +474,10 @@ read it as a repair that does nothing; it is a statement the server discards.
 
 The past tense is deliberate. **At HEAD that statement is no longer issued at all**:
 `maintain()` returns `None` before touching the cursor whenever
-`capabilities.bulk_vector_index_build` is false, printing the withdrawal into the
+`capabilities.vector_index_replace` is false, printing the withdrawal into the
 phase log instead. So the no-op is a property of the published run, not of the
-current code, and §5.2's flip is what would bring it back.
+current code. Flipping that key is what would bring it back — the bulk-build key no
+longer can, since §5.2 item 1 split them.
 
 The repair that does rebuild is *ALTER TABLE … FORCE* or *OPTIMIZE TABLE*, which the
 vendor document names as the rebuild that repairs a corrupt index. Switching to it

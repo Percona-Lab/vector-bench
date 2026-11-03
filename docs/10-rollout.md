@@ -440,19 +440,24 @@ stops for the duration).
 > is nothing to budget for and it is not the expensive one of the two — it is
 > the one that costs nothing.** Three sentences above are now wrong and are
 > left standing because the design claim they make is still right if the
-> server is fixed. `maintain()`'s `ALTER … ADD VECTOR KEY … ALGORITHM=INPLACE`
-> is the same statement `capabilities.bulk_vector_index_build: false` in
-> `config/engines/percona.yml` records as killing the server. Measured on
-> `full-20261015-215006`: **1–4 ms**, `index_bytes` identical to the byte and
+> server is fixed. `maintain()`'s `ALTER … DROP KEY vi, ADD VECTOR KEY …
+> ALGORITHM=INPLACE` replaces the index on a table that already has one.
+> Measured on `full-20261015-215006`, at the old pin (9.7.1-1): **1–4 ms**, `index_bytes` identical to the byte and
 > recall identical to five decimals in all 20 before/after pairs. So:
 > "Neither has a measured rate at any corpus size" — pgvector's still has
 > none, Percona's is now measured at effectively zero *because nothing runs*;
 > and "budget for it before scheduling a churn phase on this engine" —
 > **do not**, at this pin the churn phase pays no repair at all.
-> `PerconaDriver.declare_bulk_vector_index_build` withdraws the path per
+> `PerconaDriver.declare_vector_index_replace` withdraws the path per
 > instance, the class keeps declaring the mechanism, and §4's heading above
 > ("before/after maintenance shown where a repair path exists") resolves for
-> Percona to the `repair_path: none` branch until the capability is flipped.
+> Percona to the `repair_path: none` branch until
+> `capabilities.vector_index_replace` in `config/engines/percona.yml` is
+> flipped. That is its own key: the withdrawal used to ride on
+> `capabilities.bulk_vector_index_build: false`, and when the bulk build (an
+> `ADD VECTOR KEY` on an unindexed table) was re-verified at the current pin
+> (9.7.2-2) and that key became `true`, the replace — not re-tested — had to
+> stay withdrawn on its own.
 
 What MongoDB has instead is the index-sync wait, a different hook:
 `EngineDriver.wait_index_synced` returns `0.0` by default and MongoDB and

@@ -1344,22 +1344,21 @@ class TestTheOpsPathDoesSupportBothBuildModes:
     profile's headline axis would have been silently inert on both paths.
     """
 
-    def test_the_profile_declares_the_one_measurable_mode(self):
-        """It declared `[post, incremental]` until `post` was found to kill
-        the server at the pinned version -- see
+    def test_the_profile_declares_both_modes_and_the_capability_agrees(self):
+        """It declared `[post, incremental]`, was cut to `[incremental]` when
+        `post` was found to kill the server at the old pin (9.7.1-1), and is
+        back to both since the current pin built it 25 times out of 25 -- see
         `capabilities.bulk_vector_index_build` in
-        `config/engines/percona.yml` for the reproduction. The axis is down to
-        its measurable half, and this assertion is what stops the broken half
-        being reinstated without the capability being flipped first.
+        `config/engines/percona.yml`. The profile and the capability have to
+        move together: `post` in the profile with the capability false would
+        be the warned-and-honoured crash path in a shipped profile.
         """
         from orchestrator.config import load_profile
         from orchestrator.config import load_engine
-        assert load_profile("percona")["ops"]["percona_build_modes"] == [
-            "incremental"]
-        # Tied to the reason rather than to the value: if someone restores
-        # `post` because the server was fixed, the capability has to say so.
+        modes = load_profile("percona")["ops"]["percona_build_modes"]
+        assert modes == ["post", "incremental"]
         caps = load_engine("percona").get("capabilities", {}) or {}
-        assert caps.get("bulk_vector_index_build") is False
+        assert caps.get("bulk_vector_index_build") is True
 
     def test_the_key_lives_under_ops_where_the_ann_renderer_cannot_see_it(self):
         """**This assertion was inverted, and the inversion was a defect that
@@ -1916,13 +1915,11 @@ class TestEveryShippedProfileRenders:
             body = ann_pass.render_config("percona", profile, resources,
                                           resource_pass)
             assert sorted(body["float"]["any"][0]["run_groups"]) == ["innodb"]
-        # And the ops axis is one unit, not because the key move failed to
-        # preserve two -- it did, and `test_the_estimate_counts_both_modes_as_
-        # two_ops_units` still proves the estimator counts two when two are
-        # asked for -- but because the profile now asks for one. `post` kills
-        # the server at this pin; the capability in
-        # `config/engines/percona.yml` carries the evidence.
-        assert est_mod._ops_units(profile, "percona") == 1
+        # And the ops axis is two units again. It was one while `post` killed
+        # the server at the old pin and the profile asked for `incremental`
+        # alone; the capability in `config/engines/percona.yml` carries the
+        # evidence for both the narrowing and the restoration.
+        assert est_mod._ops_units(profile, "percona") == 2
 
 
 # ---------------------------------------------------------------------------

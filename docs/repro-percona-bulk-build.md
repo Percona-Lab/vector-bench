@@ -7,11 +7,15 @@ Percona Server's HNSW index can be built two ways: maintained on every INSERT
 ALTER TABLE t1 ADD VECTOR KEY vi (v) TYPE hnsw (M = 16, ef_construction = 200, metric = euclidean), ALGORITHM=INPLACE
 ```
 
-(`post`). The second one has killed the server. The client sees
+(`post`). At the old pin the second one killed the server. The client saw
 `mariadb.InterfaceError: Lost connection to server during query` while the
-ALTER is running, after the load has finished. That is why
-`config/engines/percona.yml` declares `capabilities.bulk_vector_index_build:
-false` and every benchmark builds Percona's index incrementally.
+ALTER was running, after the load had finished. That is why
+`config/engines/percona.yml` declared `capabilities.bulk_vector_index_build:
+false` and every benchmark built Percona's index incrementally until the
+re-test at the current pin, below. It now declares `true`, and the ops pass
+builds Percona with `post` unless a profile names a mode. The ann phase is
+unchanged: its module declares the index in `CREATE TABLE`, so it always
+builds incrementally.
 
 ## What was seen
 
@@ -29,9 +33,18 @@ crash is intermittent. In the same runs, the same corpus built and served
 correctly in `incremental` mode. mysqld's error log and any core were lost
 with the container. Capturing both is what this procedure adds.
 
-It has not been tried at the current pin (`source.tag` in
-`config/engines/percona.yml`). If no attempt crashes there, that is a result
-too: the capability can be set back to `true`.
+## At the current pin
+
+Percona 9.7.2-2 (`source.tag` in `config/engines/percona.yml`), built
+`-march=x86-64-v3`, on 2026-11-03, on a laptop (i9-12900HK), with this
+procedure and the same profile: **25 of 25 attempts built.** The ALTER took
+3.4-5.8 s (median 3.8 s). mysqld's error log held no error, signal or
+assertion, and no core was written with `kernel.core_pattern` set to
+`core.%p`.
+
+25 clean builds on one machine do not prove the old crash gone, and nothing
+here says what fixed it. They are enough to stop routing every run around it,
+and the profile and script stay so the next pin can be tested the same way.
 
 ## On a clean machine
 
@@ -67,8 +80,9 @@ The script does four things:
 2. Fetches `fashion-mnist-784-euclidean`.
 3. Runs `config/profiles/percona-bulk-repro.yml` `ATTEMPTS` times. Each attempt
    uses a fresh container and data directory, loads the rows with no vector
-   index, and then runs the ALTER. The framework warns that this mode is
-   declared broken and runs it anyway.
+   index, and then runs the ALTER. (While the capability was `false` the
+   framework warned that this mode was declared broken and ran it anyway; it
+   no longer warns.)
 4. For every crash, gets a backtrace from the core with gdb inside the bench
    image (`scripts/gdb-backtrace.py`). If any attempt crashed, it also copies
    out the `mysqld` binary that wrote the core.
@@ -148,9 +162,42 @@ operating point, 1 and 4 clients, and filtered search at 10% and 1%.
 
 The report's tables carry one row per build mode.
 
-## When it is fixed
+At the current pin, on 2026-11-03:
 
-Set `capabilities.bulk_vector_index_build: true` in
-`config/engines/percona.yml`. That makes `post` the default again, restores
-the churn repair path (the same ALTER), and lets `config/profiles/percona.yml`
-go back to `percona_build_modes: [post, incremental]`.
+| | `post` | `incremental` |
+| --- | --- | --- |
+| load + build | 180.9 s + 14.1 s ALTER = 195 s | 288 s |
+| index size | 289 MB | 256 MB |
+| recall@10 at ef_search 10 | 0.9714 | 0.9709 |
+| QPS, 1 / 4 clients | 5,895 / 19,233 | 5,599 / 18,103 |
+| filtered recall, `tag` 10% / 1% | 0.988 / 0.996 | 0.989 / 0.997 |
+| filtered recall, `ctag` 11% / 1.5% | 0.987 / 0.924 | 0.988 / 0.928 |
+
+The same index quality, built in two thirds of the time.
+
+## What was changed, and what was not
+
+`capabilities.bulk_vector_index_build` is now `true` in
+`config/engines/percona.yml`. That makes `post` the ops default for Percona
+again, and `config/profiles/percona.yml` is back to
+`percona_build_modes: [post, incremental]`.
+
+**The churn repair is still withdrawn**, by a separate key,
+`capabilities.vector_index_replace: false`. The repair is a different ALTER:
+
+```sql
+ALTER TABLE t1 DROP KEY vi, ADD VECTOR KEY vi (...), ALGORITHM=INPLACE
+```
+
+on a table that already has the index. At the old pin it returned in 1-4 ms
+with the index byte-identical and recall identical in all 20 before/after
+pairs of run `full-20261015-215006`. It was a no-op, and the report
+published it as a repair. Nothing above tests it. It used to be withdrawn by
+`bulk_vector_index_build: false`, on the grounds that both statements add
+the index with `ADD VECTOR KEY ... ALGORITHM=INPLACE`, so flipping that one
+key alone would have brought the no-op back.
+
+Set `vector_index_replace: true` only after running the replace by hand at
+the pin and seeing a real rebuild: `index_bytes` that changes, a time on the
+order of the bulk build (seconds at 20,000 rows, not milliseconds), and recall
+that moves on a churned table.
