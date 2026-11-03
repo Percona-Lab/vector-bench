@@ -46,10 +46,9 @@ sudo apt-get install -y docker.io python3-yaml git curl
 sudo usermod -aG docker "$USER"
 newgrp docker                       # or log out and back in
 
-# 2. The framework, on this branch.
+# 2. The framework.
 git clone https://github.com/Percona-Lab/vector-bench.git
 cd vector-bench
-git checkout repro/percona-bulk-build-crash
 chmod +x run-benchmark.sh scripts/*.sh
 
 # 3. Build, download the 20k-row corpus's source dataset, and run 5 attempts.
