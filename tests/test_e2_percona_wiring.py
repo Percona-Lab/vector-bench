@@ -1654,6 +1654,46 @@ class TestAnUnmeasuredIngestRateIsNamedAndNotModelled:
         # gap and drops the consequence.
         _prose("the real cost is higher than the printed total", out)
 
+    def test_the_post_rate_note_follows_the_engines_own_default(
+            self, monkeypatch):
+        """The note that Percona's `post` ops units are priced at its
+        incremental rate fires when the plan runs `post` units. A profile
+        that names no modes gets the ENGINE's default, so it must follow
+        `capabilities.bulk_vector_index_build`: a literal `["post"]` default
+        (found in review) would keep the note after the key was flipped back
+        to false, describing `post` units the run no longer builds."""
+        import io
+        from contextlib import redirect_stdout
+        from orchestrator import config as config_mod
+        from orchestrator.config import load_profile
+        from orchestrator.estimate import print_load_estimate
+        profile = load_profile("smoke")
+        real = config_mod.load_engine
+
+        def printed(bulk):
+            def load(name):
+                cfg = real(name)
+                if name == "percona":
+                    cfg = dict(cfg)
+                    cfg["capabilities"] = dict(cfg.get("capabilities") or {},
+                                               bulk_vector_index_build=bulk)
+                return cfg
+            monkeypatch.setattr(config_mod, "load_engine", load)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                print_load_estimate(profile, ["percona"],
+                                    list(profile["datasets"]),
+                                    ["normalized"], ["ann", "ops"])
+            return "ops ingest is charged at its measured incremental" in \
+                _flat(buf.getvalue())
+
+        honest, mutant = printed(True), printed(False)
+        print(f"HONEST (bulk true)  note={honest}")
+        print(f"MUTANT (bulk false) note={mutant}")
+        assert honest, "the current default is post; the note is owed"
+        assert not mutant, ("with the key false the default is incremental "
+                            "and no post unit runs")
+
     def test_the_churn_term_does_not_charge_an_unmeasured_engine_a_duration(
             self):
         """`typical` stays 0.0 and the basis says why, which is what

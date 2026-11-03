@@ -363,13 +363,41 @@ class TestTheReportSaysTheAnnCurveIsIncremental:
     """
 
     @staticmethod
-    def _rows(*modes_seen):
+    def _rows(*modes_seen, ann=True):
         from report.render import _build_mode_rows
         build = [{"engine": "percona", "phase": "index_build",
                   "build_mode": mode,
                   "extra": {"separable_build": mode == "post"}}
                  for mode in modes_seen]
-        return _build_mode_rows({"build": build})
+        return _build_mode_rows({"build": build,
+                                 "ann_engines": ["percona"] if ann else []})
+
+    @staticmethod
+    def _text(rows):
+        return " ".join(" ".join(r) for r in rows)
+
+    def test_a_both_modes_run_still_discloses_the_incremental_ann_build(self):
+        """`percona-build-modes` puts Percona in `either`, not `bulk` -- and
+        that is the run in which a reader compares modes against the curve.
+        Found in review: the row read `bulk` alone and went missing there."""
+        honest = self._text(self._rows("post", "incremental"))
+        mutant = self._text(self._rows("incremental"))
+        print(f"HONEST (both modes)       = {honest!r}")
+        print(f"MUTANT (incremental only) = {mutant!r}")
+        assert "recall curves are an incremental build" in honest
+        assert "some of its ops units bulk-built" in honest
+        assert "recall curves are an incremental build" not in mutant
+
+    def test_an_ops_only_report_has_no_curve_to_disclose(self):
+        """An ops-only report has no recall curve, so "its recall curves are
+        an incremental build" would describe something the report does not
+        contain. Found in review."""
+        honest = self._text(self._rows("post", ann=False))
+        mutant = self._text(self._rows("post", ann=True))
+        print(f"HONEST (no ann records) = {honest!r}")
+        print(f"MUTANT (ann records)    = {mutant!r}")
+        assert "recall curves" not in honest
+        assert "recall curves are an incremental build" in mutant
 
     def test_a_post_only_run_discloses_the_incremental_ann_build(self):
         honest = self._rows("post")

@@ -1520,12 +1520,21 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
     # `capabilities.bulk_vector_index_build` is true, and `post` loaded and
     # built faster in the one comparison at this pin -- so the ops share is a
     # likely overestimate, which is said rather than corrected with a rate
-    # nothing measured. The profile's list is read with this module's own
-    # `["post"]` default, which matches the engine's now that it is true.
+    # nothing measured. A profile that names no modes gets the ENGINE's
+    # default, read off the same capability `cli._ops_build_modes` reads, so
+    # flipping it back to false cannot leave this note claiming `post` units
+    # the run will not build (found in review: a literal `["post"]` here did).
+    from . import config as config_mod
+    percona_caps = ((config_mod.load_engine("percona") or {})
+                    .get("capabilities") or {}) \
+        if "percona" in estimate["per_engine_hours"] else {}
+    percona_default = (["post"]
+                       if percona_caps.get("bulk_vector_index_build", True)
+                       else ["incremental"])
     if ("percona" in estimate["per_engine_hours"]
             and "ops" in estimate["phases"]
             and "post" in ((profile.get("ops") or {})
-                           .get("percona_build_modes", ["post"]))):
+                           .get("percona_build_modes", percona_default))):
         print("  percona's ops ingest is charged at its measured incremental "
               "rate; its post\n    units (the ops default) have no rate here "
               "and loaded faster in the one\n    comparison at this pin "
