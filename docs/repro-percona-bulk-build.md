@@ -47,7 +47,7 @@ sudo usermod -aG docker "$USER"
 newgrp docker                       # or log out and back in
 
 # 2. The framework, on this branch.
-git clone https://github.com/EvgeniyPatlan/vector-bench.git
+git clone https://github.com/Percona-Lab/vector-bench.git
 cd vector-bench
 git checkout repro/percona-bulk-build-crash
 chmod +x run-benchmark.sh scripts/*.sh
