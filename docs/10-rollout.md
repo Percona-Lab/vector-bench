@@ -159,7 +159,7 @@ being wrong.
 There is no previous smoke run to compare against **through the report**, and
 the obstacle is a deliberate one.
 
-`OPS_MEASUREMENT_VERSION` is 10, in `harness/metrics/records.py`. Records
+`OPS_MEASUREMENT_VERSION` is 11, in `harness/metrics/records.py`. Records
 written before the constant existed carry no version key at all and are
 version 1 by definition, not "unknown" — that is
 `IMPLICIT_OPS_MEASUREMENT_VERSION`, beside it. The archived corpus is entirely

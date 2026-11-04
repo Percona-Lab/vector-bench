@@ -305,6 +305,22 @@ class EngineDriver(abc.ABC):
     #: Only `MyVectorDriver` declares anything (filtered search, which its
     #: pinned release does not have).
     declined_workloads: Tuple[Tuple[str, str], ...] = ()
+    #: Whether the graph is COLD when a build returns, so the ops pass must
+    #: run one discarded pass over the query set before anything is timed
+    #: (`harness/workloads/graph_warmup.py`, called from `build.run`).
+    #:
+    #: A declaration on the driver for the reason `status_gauges` is one: the
+    #: harness asks the driver rather than carrying a list of engine names,
+    #: and False here is what keeps every other engine byte-identical -- no
+    #: query, no record key, no run-wide stamp.
+    #:
+    #: Only `PerconaDriver` sets it, for a measured reason: its graph is
+    #: faulted in lazily from the entry point, and the ALTER a `post` build
+    #: issues evicts the table, so `Innodb_hnsw_memory_used` read 0 after 95
+    #: of 95 post builds. No other engine here has been shown to start its
+    #: query phases cold after a build, and setting this on one that does not
+    #: would hand it a warm-up the others are not given.
+    warm_graph_after_build: bool = False
 
     def __init__(self, spec: ConnectionSpec):
         self.spec = spec

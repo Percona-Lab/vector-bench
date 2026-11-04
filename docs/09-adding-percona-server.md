@@ -602,6 +602,53 @@ it is the only engine here that reports its graph's live memory, and
 *hnsw_memory_used.result* shows it reading `0` after a restart (the graph
 is loaded lazily) and rising on the first search.
 
+**It reads `0` after a `post` build too, and the ops pass warms the graph
+because of it.** Two facts, one from the source and one from the vendor:
+
+- *vec_runtime_load* in *vec0hnsw.cc*, at the pin, says of itself: "Only the
+  entry point is read here. Every other node is faulted in on demand when
+  traversal reaches it" — there is no preload, so a graph that has left memory
+  comes back one node per search that reaches it.
+- **The server team stated (2026-11-04) that `ALTER TABLE … ADD VECTOR KEY`
+  evicts the table as part of the ALTER.** That statement is the `post` build
+  (`create_index`), so the graph a `post` build produces leaves memory the
+  moment it is finished.
+
+Measured on this framework's records: `extra.server_status` on the
+`index_build` record read `Innodb_hnsw_memory_used = 0` in 95 of 95 `post`
+builds (20,000, 60,000 and 1,000,000 rows), while an `incremental` build of the
+same 60,000-row corpus read 207,407,472 B. The first calibration grid point
+after a `post` build was visibly slower than after an `incremental` one, so the
+within-engine post-vs-incremental latency comparison was a cold graph against a
+warm one.
+
+So `build.run` runs one discarded pass over the query set before the
+`index_build` record is written, for a driver declaring
+`EngineDriver.warm_graph_after_build` — `PerconaDriver` alone
+(`harness/workloads/graph_warmup.py`). It runs in **both** build modes, so the
+within-engine comparison stays symmetric; for `incremental` it faults in
+nothing and its reading is the control. The queries are the ones calibration
+will use — `dataset.test` capped at `--max-queries`, which is what that
+module's `plan` takes — at the highest ef_search any later phase can use, the
+top of the calibration grid or the profile's `ef_search`, whichever is larger
+(`top_ef`), because a search at a larger ef expands
+roughly a superset of the nodes a smaller ef expands for the same query, so one
+pass at the top faults in what calibration needs, with no plateau heuristic.
+It does not cover everything later: concurrency's own query budget, filtered
+search's predicate and churn's changing graph can still reach nodes the pass
+did not, inside their windows, and how much is not measured. An ops invocation
+without the `build` workload gets no warm-up and no `graph_warmup_status`, so a
+record without that key must not be read as warm. Results are not scored; the pass's time is not in
+`build_wall_s`. The `index_build` record keeps `extra.server_status` as the
+after-build reading (still `0` for a `post` build) and adds
+`extra.graph_warmup` — query count, ef, wall seconds, status, and the gauge
+**re-read after the pass** under its own `server_status`. Every later record of
+that unit carries `extra.graph_warmup_status`. A build-only unit
+(`percona-bulk-repro`, `percona-bulk-1m`) runs the pass too, so those runs get
+a memory figure for the graph they built. The same floor caveat applies to the
+after-warm-up reading as to every reading of this gauge (§3). Ops measurement
+version 11 marks the change.
+
 The **hypergraph optimizer** row is the one trap in this table that is a
 behaviour and not a knob. *percona-hnsw.md*, on the read path: "The read path is the
 old optimizer's, with no cost model. A session using the hypergraph optimizer
@@ -861,6 +908,33 @@ Setting it equal to the other two engines' `graph_cache_bytes` would therefore
 compare a cache budget against a wall. Under `normalized.yml`'s
 `graph_cache_fraction: 0.30` the three engines would get the same number of
 bytes and one of them would be unable to finish the load.
+
+### A table rebuild holds two graphs at its peak (server team, 2026-11-04)
+
+**Supplied by the server team, not measured here.** `OPTIMIZE TABLE` on a table
+with an HNSW index needs **double** the graph memory at its peak: the old
+table's graph and the new table's graph coexist during the rebuild. When the
+ALTER ends both read `0` in `Innodb_hnsw_memory_used` — the old graph is freed
+and the new one is evicted, the same eviction §2.6 describes for
+`ADD VECTOR KEY` — so the gauge read after the fact never shows the peak.
+
+What follows from that:
+
+- **With a finite `innodb_hnsw_max_memory`, the limit must be at least about
+  twice the graph's size for `OPTIMIZE TABLE` to complete**; otherwise the
+  rebuild fails partway with `ER_CAPACITY_EXCEEDED`. That is one more reason the
+  ceiling cannot be fed from a cache budget sized for one graph.
+- **Under this framework's policy (`0`, unlimited — below) the bound is the
+  container's memory limit** — 16 GB for the server in the normalized pass — so
+  a rebuild needs about twice the graph's memory inside that limit. Only the
+  container memory sampler (`mem-*.jsonl`) can see the peak; the status gauge
+  cannot.
+- **The framework does not run `OPTIMIZE TABLE`.** `PerconaDriver.maintain`'s
+  docstring gives the reason it chose the index replace instead. **Whether that
+  index replace — `DROP KEY vi, ADD VECTOR KEY` in one ALTER, currently
+  withdrawn under `capabilities.vector_index_replace: false` — has the same
+  two-graph peak is not known.** It is an open question for the server team,
+  not a fact, and `PerconaDriver.maintain` records it as one.
 
 ### What the default costs, with the inputs named
 

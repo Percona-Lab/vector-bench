@@ -18,7 +18,7 @@ instead of one misleading one.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy
 
@@ -29,12 +29,21 @@ from ..metrics.records import PHASE_BUILD, PHASE_INGEST, Record, Recorder
 from ..progress import Heartbeat
 from .index_size import index_size_shape, settled_index_bytes
 from .context import RunContext
+from . import graph_warmup
 
 
 def run(ctx: RunContext, driver: EngineDriver, dataset: Dataset,
         index: IndexSpec, load_threads: int = 1,
-        subset_rows: Optional[int] = None) -> None:
-    """Load the dataset and build the index, recording the cost of each."""
+        subset_rows: Optional[int] = None,
+        warmup: Optional[graph_warmup.WarmupPlan] = None,
+        ) -> Optional[Dict[str, Any]]:
+    """Load the dataset and build the index, recording the cost of each.
+
+    Returns what the post-build graph warm-up did (`extra.graph_warmup`), or
+    None when none ran -- no plan was given, or the driver does not declare
+    `warm_graph_after_build`. `main.py` stamps its status onto the records
+    that follow.
+    """
     vectors = dataset.train
     if subset_rows is not None and subset_rows < len(vectors):
         vectors = vectors[:subset_rows]
@@ -163,6 +172,32 @@ def run(ctx: RunContext, driver: EngineDriver, dataset: Dataset,
         + f", table {table_bytes:,} B, {rows:,} rows"
     )
 
+    # The post-build graph warm-up (`graph_warmup.py`), for a driver that
+    # declares its graph cold after a build -- Percona Server alone today.
+    # Placed HERE for three reasons, each of which rules out a neighbour:
+    #
+    # * After `effective_build` was computed and after every reading above,
+    #   so build time, the after-build `server_status` (which keeps meaning
+    #   "straight after the build", 0 for a post build) and the index size
+    #   are exactly what they were before this existed.
+    # * Before the records are written, because the records file is
+    #   append-only: the after-warm-up gauge can sit beside the after-build
+    #   one on the same `index_build` record only if it exists by then.
+    # * Inside the build workload and not in `main.py` before calibration,
+    #   so a build-only ops unit -- `percona-bulk-repro`, `percona-bulk-1m`
+    #   -- runs it too and gets a memory figure for the graph it built. The
+    #   dataset's test split is loaded for every invocation, build-only
+    #   included, so the queries are there.
+    #
+    # `warm` never raises; a failed pass is recorded on this record rather
+    # than losing it. The cost of the placement: if the pass HANGS rather
+    # than raising, nothing below runs -- the same exposure every statement
+    # above already has, and the queries are calibration's own, which would
+    # hang there instead.
+    warmed = None
+    if warmup is not None and graph_warmup.wanted(driver):
+        warmed = graph_warmup.warm(driver, warmup, ctx.k, _server_status)
+
     common = ctx.record_defaults(driver, dataset, index)
 
     ctx.recorder.write(Record(
@@ -215,8 +250,15 @@ def run(ctx: RunContext, driver: EngineDriver, dataset: Dataset,
                "index_bytes_after_build": index_bytes_after_build,
                "index_size_settle_s": round(settle_s, 3),
                "index_size_settle": settle,
-               **({"server_status": server_status} if server_status else {})},
+               **({"server_status": server_status} if server_status else {}),
+               # Last, and conditional for the reason `server_status` is:
+               # every engine but Percona Server never warms, and their key
+               # set does not move. Its own `server_status` is the after-warm-up
+               # reading; the key above stays the after-build one.
+               **({graph_warmup.EXTRA_KEY: warmed} if warmed is not None
+                  else {})},
     ))
+    return warmed
 
 
 def _driver_capabilities(driver) -> dict:

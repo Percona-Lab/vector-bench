@@ -1069,6 +1069,24 @@ class PerconaDriver(MySQLFamilyDriver):
     #: record the gauge instead"; until this hook existed, nothing did.
     status_gauges: Tuple[str, ...] = ("Innodb_hnsw_memory_used",)
 
+    #: The graph is cold after a build, so `build.run` warms it before the
+    #: `index_build` record is written (`harness/workloads/graph_warmup.py`).
+    #:
+    #: Two facts make it cold. `vec_runtime_load` at the pin reads only the
+    #: entry point and faults every other node in "on demand when traversal
+    #: reaches it" -- there is no preload. And, per the server team
+    #: (2026-11-04), `ALTER TABLE ... ADD VECTOR KEY` -- `create_index`, the
+    #: `post` build -- evicts the table as part of the ALTER. The gauge above
+    #: read 0 on the `index_build` record in 95 of 95 post builds, against
+    #: 207,407,472 B after an incremental build of the same 60k corpus, and
+    #: the first calibration point after a post build was visibly slower.
+    #:
+    #: On the CLASS, so it applies to both build modes: the incremental graph
+    #: is already resident and its warm-up faults in nothing, but leaving it
+    #: out would make the post-vs-incremental comparison this engine exists
+    #: to offer asymmetric again, in the other direction.
+    warm_graph_after_build: bool = True
+
     #: Whether replacing the vector index on a table that already has one is
     #: a repair this run may publish. Host-supplied with a class-level
     #: default, because this file cannot know it: the fact lives in
@@ -1290,6 +1308,16 @@ class PerconaDriver(MySQLFamilyDriver):
         and reuses each row's existing label, which the suite proves by
         asserting `TABLE_ID` is unchanged across it. That is the narrower
         repair and the one whose cost means something.
+
+        **Memory at the peak, an OPEN QUESTION.** The server team stated
+        (2026-11-04) that `OPTIMIZE TABLE` holds the old and the new graph at
+        once, so it needs about twice the graph's memory at its peak, and
+        that both read 0 in `Innodb_hnsw_memory_used` once the ALTER ends --
+        the gauge never shows the peak; only the container sampler
+        (`mem-*.jsonl`) can. Whether THIS replace (`DROP KEY vi, ADD VECTOR
+        KEY` in one ALTER) has the same two-graph peak is not known and has
+        been put to the server team; do not read it as established either
+        way. See `docs/09-adding-percona-server.md` §3.
 
         **The option list is read back off the server rather than re-derived
         from the profile, and that is the whole correctness argument.** The

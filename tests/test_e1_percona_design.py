@@ -2177,6 +2177,18 @@ CITED_SYMBOLS = {
          "effective_build = build_seconds if not incremental "
          "else load.wall_seconds"),
 
+    # -- §2.6's post-build graph warm-up --------------------------------
+    # §2.6 says which queries, at which ef, and which driver declares it.
+    ("harness/workloads/graph_warmup.py", "plan"):
+        ("test_vectors[:max_queries]", "top_ef(ef_grid, ef_search)"),
+    ("harness/workloads/graph_warmup.py", "top_ef"):
+        "max([int(ef) for ef in ef_grid] + [int(ef_search)])",
+    ("harness/drivers/base.py", "EngineDriver.warm_graph_after_build"):
+        "warm_graph_after_build: bool = False",
+    ("harness/drivers/mysql_family.py",
+     "PerconaDriver.warm_graph_after_build"):
+        "warm_graph_after_build: bool = True",
+
     # -- §2.1, §2.2, §4.1: the dialect ----------------------------------
     ("harness/drivers/mysql_family.py", "to_binary_f32"):
         "def to_binary_f32",

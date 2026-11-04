@@ -618,7 +618,47 @@ SCHEMA_VERSION = 1
 # build for one engine and dataset, and only the version keeps the report
 # from charting them as one series (`refuse_mixed_measurement_versions`
 # refuses 9 against 10, as it refuses 8 against 9).
-OPS_MEASUREMENT_VERSION = 10
+#
+# VERSION 11 -- PERCONA SERVER'S GRAPH IS WARMED BEFORE ANYTHING IS TIMED.
+# Percona loads its HNSW graph lazily (`vec_runtime_load` reads only the
+# entry point at the pin) and, per the server team, the ALTER a `post` build
+# issues evicts the table, so every post build handed calibration a cold
+# graph: `Innodb_hnsw_memory_used` read 0 on the `index_build` record in 95
+# of 95 post builds, against 207,407,472 B after an incremental build of the
+# same 60k corpus. `build.run` now runs one discarded pass over
+# calibration's query set at the top ef for a driver declaring
+# `EngineDriver.warm_graph_after_build` -- `PerconaDriver` alone -- in both
+# build modes (`harness/workloads/graph_warmup.py`). What moves:
+#
+#     ef_calibration  Percona's per-point latency and QPS, most at the first
+#     (percona)       grid points after a post build, which were measured
+#                     while the graph was being faulted in. Recall and the
+#                     chosen ef are not expected to move: a cold node is
+#                     read, not skipped.
+#     concurrency,    Percona's, to the extent any of their windows still
+#     filtered, churn saw a partly cold graph -- small, since calibration
+#     (percona)       ran first, but not zero and not measured.
+#     index_build     `extra.graph_warmup` (queries, ef_search, effective_ef,
+#     (percona)       wall_s, status, the after-warm-up `server_status`);
+#                     `extra.server_status` keeps its meaning. New
+#                     information, not a changed number.
+#     every later     `extra.graph_warmup_status` on Percona's records after
+#     record          the build. Absent for every other engine.
+#
+# WHY A BUMP WHEN EIGHT OF NINE ENGINES DO NOT MOVE: the charter at the top of
+# this block is the example this change is -- "a concurrency figure measured
+# with a per-client warmup is not the same quantity as one measured
+# without" -- and version 9's F7 (one discarded concurrency warm-up window)
+# rode a bump for the same reason. A resumed run straddling this change
+# would hold a cold-graph and a warm-graph Percona calibration curve for one
+# engine and dataset under one version, and
+# `refuse_mixed_measurement_versions` is the only thing that keeps them off
+# one series. The version
+# names the harness, not the engine (version 10's argument): the refusal
+# costs the other engines a re-run of a straddling directory, and buys that
+# no Percona figure is silently mixed. ANN_MEASUREMENT_VERSION is NOT bumped:
+# the ann path has its own warm-up (`vb_warmup.py`) and nothing in it moved.
+OPS_MEASUREMENT_VERSION = 11
 
 #: Key under `Record.extra` that `Recorder.write` stamps the version into.
 #: Lives in `extra` rather than as a column because SCHEMA_VERSION stays 1.

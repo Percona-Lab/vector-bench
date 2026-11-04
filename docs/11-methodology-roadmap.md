@@ -339,6 +339,17 @@ tested, deliberately unwired guard against the one quantified per-engine cold
 bias this harness has (§4.3). The churn workload's own warm-up count is the
 third, and the smallest (§4.7).
 
+**One engine-conditional warm-up now exists, by design, and it is not one of
+those three counts.** Since ops measurement version 11 a driver declaring
+`EngineDriver.warm_graph_after_build` — Percona Server alone — gets one
+discarded pass over calibration's query set at the top ef inside `build.run`,
+before anything is timed, recorded as `extra.graph_warmup` on the `index_build`
+record and `extra.graph_warmup_status` on every later one. It answers a cold
+start the others do not have: Percona's graph is faulted in lazily and its
+`post` build evicts it, so `Innodb_hnsw_memory_used` read 0 after every `post`
+build. The per-workload counts above are unchanged and still engine-invariant;
+see `docs/09-adding-percona-server.md` §2.6.
+
 ## 3. The version-bump rule, which governs almost every item below
 
 Nearly every item in §4 through §8 is scoped by one rule, so it is stated once
