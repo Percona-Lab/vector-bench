@@ -47,7 +47,7 @@ sudo apt-get update
 sudo apt-get install -y docker.io python3-yaml git curl
 sudo usermod -aG docker "$USER"        # then log out and back in
 
-git clone https://github.com/EvgeniyPatlan/vector-bench.git
+git clone https://github.com/Percona-Lab/vector-bench.git
 cd vector-bench
 chmod +x run-benchmark.sh scripts/*.sh tests/*.sh
 
