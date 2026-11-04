@@ -71,7 +71,18 @@ chmod +x run-benchmark.sh scripts/*.sh
 # More attempts, a bigger load, or an image that is already built:
 ATTEMPTS=20 SKIP_BUILD=1 ./scripts/repro-percona-bulk-build.sh
 ROWS=60000  SKIP_BUILD=1 ./scripts/repro-percona-bulk-build.sh
+
+# The same ALTER at 1M rows (all of sift-128, config/profiles/percona-bulk-1m.yml):
+PROFILE=percona-bulk-1m ATTEMPTS=1 SKIP_BUILD=1 ./scripts/repro-percona-bulk-build.sh
 ```
+
+`PROFILE` names any profile in `config/profiles/`; the script reads the dataset
+and row count from it, and `ROWS` still overrides the row count through a
+temporary copy. `percona-bulk-1m` is the scale a full run asks of the bulk
+build: sift-128's 1M rows loaded with four threads, then the one ALTER. Its
+memory fits the normalized pass's 16 GB server limit with room to spare, so it
+runs on a laptop; budget the load in minutes and the ALTER as unmeasured at
+this size until the first run records it.
 
 The script does four things:
 

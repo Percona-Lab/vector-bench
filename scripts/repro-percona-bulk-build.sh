@@ -8,9 +8,11 @@
 #   ROWS=60000  ./scripts/repro-percona-bulk-build.sh   # a larger load
 #   SKIP_BUILD=1 ./scripts/repro-percona-bulk-build.sh  # image already built
 #   NO_CORE=1   ./scripts/repro-percona-bulk-build.sh   # leave core_pattern alone
+#   PROFILE=percona-bulk-1m ATTEMPTS=1 ./scripts/repro-percona-bulk-build.sh  # 1M rows
 #
-# Each attempt is one run of config/profiles/percona-bulk-repro.yml: a fresh
-# container and data directory, load ROWS rows with no vector index, then
+# Each attempt is one run of config/profiles/$PROFILE.yml (percona-bulk-repro
+# unless PROFILE says otherwise): a fresh container and data directory, load
+# the profile's rows (or ROWS of them) with no vector index, then
 # ALTER TABLE ... ADD VECTOR KEY ... ALGORITHM=INPLACE. The crash is
 # intermittent (one of two identical runs crashed on 2026-10-15), so it repeats.
 # docs/repro-percona-bulk-build.md has the whole procedure from a clean machine.
@@ -24,9 +26,8 @@
 set -uo pipefail
 
 ATTEMPTS=${ATTEMPTS:-5}
-ROWS=${ROWS:-20000}
-PROFILE=percona-bulk-repro
-DATASET=fashion-mnist-784-euclidean
+ROWS=${ROWS:-}
+PROFILE=${PROFILE:-percona-bulk-repro}
 CORE_PATTERN=core.%p
 TS=$(date +%Y%m%d-%H%M%S)
 
@@ -38,6 +39,15 @@ die() { echo "error: $*" >&2; exit 1; }
 command -v docker >/dev/null || die "docker is not installed"
 docker info >/dev/null 2>&1 || die "cannot talk to the docker daemon (is $USER in the docker group?)"
 python3 -c 'import yaml' 2>/dev/null || die "python3 with PyYAML is required (apt-get install python3-yaml)"
+[ -e "config/profiles/$PROFILE.yml" ] || die "no profile config/profiles/$PROFILE.yml"
+
+# The dataset and row count come from the profile, so a PROFILE override needs
+# nothing else to match it.
+read -r DATASET PROFILE_ROWS < <(python3 -c '
+import sys, yaml
+p = yaml.safe_load(open(sys.argv[1]))
+print(p["datasets"][0], p["ops"].get("subset_rows") or "all")
+' "config/profiles/$PROFILE.yml") || die "cannot read config/profiles/$PROFILE.yml"
 
 old_pattern=$(cat /proc/sys/kernel/core_pattern)
 tmp_profile=
@@ -55,13 +65,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ROWS other than the default goes through a copy of the profile rather than
+# ROWS other than the profile's goes through a copy of the profile rather than
 # an edit of the committed one, so the tree stays clean.
-if [ "$ROWS" != 20000 ]; then
-    PROFILE=percona-bulk-repro-$ROWS
+if [ -n "$ROWS" ] && [ "$ROWS" != "$PROFILE_ROWS" ]; then
+    base=$PROFILE
+    PROFILE=$base-$ROWS
     tmp_profile=config/profiles/$PROFILE.yml
-    sed "s/subset_rows: 20000/subset_rows: $ROWS/;s/^name: .*/name: $PROFILE/" \
-        config/profiles/percona-bulk-repro.yml > "$tmp_profile"
+    sed "s/subset_rows: .*/subset_rows: $ROWS/;s/^name: .*/name: $PROFILE/" \
+        "config/profiles/$base.yml" > "$tmp_profile"
 fi
 
 [ -e "datasets/$DATASET.hdf5" ] \
@@ -78,7 +89,7 @@ mkdir -p "$OUT"
         echo "$image: $(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null)"
     done
     echo "host: $(uname -srm), $(nproc) cpus"
-    echo "rows: $ROWS, attempts: $ATTEMPTS"
+    echo "profile: $PROFILE, dataset: $DATASET, rows: ${ROWS:-$PROFILE_ROWS}, attempts: $ATTEMPTS"
 } > "$OUT/versions.txt"
 cat "$OUT/versions.txt"
 

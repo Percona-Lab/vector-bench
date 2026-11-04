@@ -1,0 +1,48 @@
+# Percona Server's bulk vector-index build at 1M rows. The same single
+# attempt as config/profiles/percona-bulk-repro.yml, at the scale a full run
+# asks of it: load all of sift-128 with no vector index, then
+#
+#     ALTER TABLE t1 ADD VECTOR KEY vi (v) TYPE hnsw (M = 16,
+#         ef_construction = 200, metric = euclidean), ALGORITHM=INPLACE
+#
+# Driven the same way, with the same core capture:
+#
+#     PROFILE=percona-bulk-1m ATTEMPTS=1 ./scripts/repro-percona-bulk-build.sh
+#
+# WHY. The 25 clean builds of 2026-11-03 were 20,000 rows of fashion-mnist,
+# and the 60,000-row build-modes run was the largest bulk ALTER on record.
+# `post` is now Percona's ops default, so a full run's first 1M-row ALTER would
+# otherwise also be its first test. This answers "does it survive at 1M" on a
+# laptop before a two-day run asks it.
+#
+# sift-128-euclidean because it is one of main.yml's two 1M datasets and the
+# smaller graph of the two: about 0.5 GB of vectors and an M=16 graph well
+# inside the normalized pass's 16 GB server limit. Euclidean, so the ALTER is
+# the one the crash was seen on.
+#
+# Four load threads, not the repro's one: the load is not what is under test,
+# and 1M rows through one thread costs most of the run for nothing. The ALTER
+# itself is a single statement either way.
+name: percona-bulk-1m
+description: Percona bulk vector-index build (load, then ALTER TABLE ADD VECTOR KEY) at 1M rows, sift-128
+engines: [percona]
+datasets:
+  - sift-128-euclidean
+default_resource_pass: normalized
+
+k: 10
+runs: 1
+
+ann:
+  enabled: false
+  m_values: [16]
+
+ops:
+  enabled: true
+  workloads: [build]
+  m_values: [16]
+  ef_search: 100
+  subset_rows: null
+  load_threads: 4
+  max_queries: 200
+  percona_build_modes: [post]
