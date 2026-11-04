@@ -22,7 +22,7 @@ import yaml
 VB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, VB_ROOT)
 
-EXTENSION_PIN = "bac885dd2bf43347c80dc9d9c4fa86ca0a596957"
+EXTENSION_PIN = "93ed00873dd65f64c0788c80576d5cf3fba39831"
 SERVER_TAG_84 = "publish/mysql-8.4_0.0.7"
 SERVER_PIN_84 = "689c74a9f88c91ae035f57e0ae8915a168274112"
 

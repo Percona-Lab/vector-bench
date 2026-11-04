@@ -31,14 +31,11 @@
 #    visible in the exec line and in the engine config's server flags; a
 #    persisted one lives in mysqld-auto.cnf where nothing in a run records it.
 #
-# 3. NO mysql_native_password. VillageSQL's adapter for the 8.4 base enabled
-#    it so the client stack matched MariaDB's; MySQL 9.7 has removed the
-#    plugin, so the bench account takes caching_sha2_password exactly as the
-#    Percona and MyVector accounts on the same server line do (init.sql).
-#    The 8.4 line (`villagesql84`, which this entrypoint also starts) still
-#    ships the plugin, disabled by default, and is left on
-#    caching_sha2_password too, so the two VillageSQL engines authenticate
-#    the same way and the server line is the only difference between them.
+# 3. NO mysql_native_password. MySQL 9.7 has removed the plugin and the 8.4
+#    line (`villagesql84`, which this entrypoint also starts) ships it
+#    disabled, so the bench account takes caching_sha2_password exactly as the
+#    Percona and MyVector accounts do (init.sql), and the two VillageSQL
+#    engines authenticate the same way.
 
 set -euo pipefail
 

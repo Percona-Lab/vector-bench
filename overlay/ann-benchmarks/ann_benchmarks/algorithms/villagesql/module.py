@@ -1,5 +1,5 @@
-"""VillageSQL 0.0.7 + vsql_vector (SVECTOR, HNSW custom index), driven by
-ann-benchmarks.
+"""VillageSQL + vsql_vector (SVECTOR, HNSW custom index, built from
+vsql-vector-pk), driven by ann-benchmarks.
 
 New module; upstream ann-benchmarks has no VillageSQL support. The ops-harness
 driver, `harness/drivers/villagesql.py`, carries the evidence for each
@@ -14,22 +14,21 @@ extension:
   `INDEX vi (v hnsw_<metric>) USING EXTENDED(hnsw) WITH (M = m,
   ef_construction = e)`, maintained on every INSERT -- so `build_seconds` is
   the load, as for MHNSW, VIDX and Percona. NOT the bulk `CREATE INDEX` over
-  a loaded table, although the server accepts it: on the pinned build it
-  intermittently deadlocks two page latches inside the extension storage ABI
-  and InnoDB's monitor aborts the server (`capabilities.
-  bulk_vector_index_build` in config/engines/villagesql.yml has the
-  evidence).
-* Vectors are text (`'[a,b,...]'`, shortest float32 repr per element):
-  SVECTOR has no binary input. The query vector is inlined, because the
-  server's KNN recognition needs a constant query operand.
+  a loaded table, although the server accepts it: it can crash the server
+  (`capabilities.bulk_vector_index_build` in config/engines/villagesql.yml
+  has the evidence).
+* Vectors are text (`'[a,b,...]'`, shortest float32 repr per element). The
+  query vector is inlined, because the server's KNN recognition needs a
+  constant query operand.
 * `vsql_vector.ef_search` is a per-session variable, set on every connection
   that queries.
-* **The plan is checked and a full scan is REFUSED, not measured.** At this
-  pin the server cannot drive a distance scan from vsql_vector's HNSW (it
-  requires HAS_ROW_REF; the index declares HAS_COLUMN_REF), so every query is
-  a filesort over a table scan with recall 1.000. `set_query_arguments`
-  raises when EXPLAIN FORMAT=TREE lacks "Custom index distance scan on vi",
-  so no recall/QPS point is written for a brute-force scan.
+* **The plan is checked and a full scan is REFUSED, not measured.** The
+  server drives a distance scan only from an index that stores row
+  references; vsql-vector-pk's does, plain vsql-vector's does not, and with
+  it every query was a filesort over a table scan with recall 1.000.
+  `set_query_arguments` raises when EXPLAIN FORMAT=TREE lacks "Custom index
+  distance scan on vi", so no recall/QPS point is written for a brute-force
+  scan.
 """
 
 from __future__ import annotations
@@ -46,7 +45,7 @@ import numpy
 from ...vb_mysql import (DATABASE, INSERT_BATCH, PROGRESS_INTERVAL_S, TABLE,
                          Dialect, VBMySQLBase)
 
-# vsql-vector bac885d, src/index/hnsw/storage.h (`Options::DEFAULT_M`,
+# vsql-vector-pk 93ed008, src/index/hnsw/storage.h (`Options::DEFAULT_M`,
 # `DEFAULT_EF_CONSTRUCTION`, `MAX_M`, `MAX_EF_CONSTRUCTION_FACTOR`) and
 # `Options::validate` in storage.cc (the M floor of 2). Repeated as
 # `KNOB_BOUNDS["villagesql"]` in orchestrator/ann_knobs.py, which cannot
@@ -272,7 +271,8 @@ class VillageSQL(VBMySQLBase):
         extra = super().get_additional()
         extra["ef_construction"] = self._ef_construction
         extra["build_seconds"] = round(self._build_seconds, 3)
-        extra["vector_binding"] = "text literal (SVECTOR has no binary input)"
+        extra["vector_binding"] = ("text literal ('[a,b,...]', "
+                                   "parsed by strtof)")
         extra["extension_status"] = ("preview (vsql_allow_preview_extensions=ON; "
                                      "dev/unstable extension ABI)")
         return extra

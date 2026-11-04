@@ -1,12 +1,12 @@
 #
-# VillageSQL + the vsql_vector extension (SVECTOR type and HNSW custom index),
-# both compiled from pinned sources. Two engines build from this file:
-# `villagesql` (server on the MySQL 9.7.2 base) and `villagesql84` (`alias_of:
-# villagesql`, server on the MySQL 8.4 base). The steps are the same for both:
-# the 8.4 tree takes every cmake flag the 9.7 one does, carries its Boost in
-# extra/boost as 9.7 does, and stages a byte-identical extension SDK
-# (villagesql/sdk), so only `source.server_tag` -- and therefore the tarball
-# prepare-sources.sh exports -- differs.
+# VillageSQL + the vsql_vector extension (SVECTOR type and HNSW custom index,
+# built from vsql-vector-pk), both compiled from pinned sources. Two engines
+# build from this file: `villagesql` (server on the MySQL 9.7.2 base) and
+# `villagesql84` (`alias_of: villagesql`, server on the MySQL 8.4 base). The
+# steps are the same for both: the 8.4 tree takes every cmake flag the 9.7 one
+# does, carries its Boost in extra/boost as 9.7 does, and stages a
+# byte-identical extension SDK (villagesql/sdk), so only `source.server_tag`
+# -- and therefore the tarball prepare-sources.sh exports -- differs.
 #
 # Targets:
 #   runtime  — mysqld, the client, and vsql_vector.veb, nothing else.
@@ -15,7 +15,8 @@
 # Build context is work/buildctx/<engine>/, produced by
 # `scripts/prepare-sources.sh --engine <engine>`. It holds ONE tarball with
 # two trees: `source/` is villagesql-server at `source.server_tag`, and
-# `vsql-vector/` is the extension at `source.tag` (a commit SHA on `main`).
+# `vsql-vector/` is the extension at `source.tag` (a commit SHA on
+# vsql-vector-pk's `main`).
 #
 # Two compiles, in this order, and the order is forced:
 #
@@ -30,7 +31,7 @@
 #     and stages `villagesql-extension-sdk-*/` in the build tree, which is
 #     what the extension's FindVillageSQL looks for.
 #  2. The extension, against the server's BUILD tree (`VillageSQL_BUILD_DIR`)
-#     rather than an installed SDK, because vsql-vector sets
+#     rather than an installed SDK, because vsql-vector(-pk) sets
 #     `VSQL_USE_DEV_ABI ON`: it links the dev/unstable ABI (`storage_api.h`,
 #     the preview index-builder and session-variable headers), which is the
 #     staged SDK's `include-dev/`. This is the upstream README's own recipe.
@@ -65,7 +66,7 @@ ARG EXTRA_CXXFLAGS=""
 ARG JOBS=0
 
 ENV DEBIAN_FRONTEND=noninteractive
-# docker/myvector/Dockerfile's list (same MySQL 9.7.2 tree) plus `zip` and
+# docker/myvector/Dockerfile's list (a MySQL 9.7.2 tree) plus `zip` and
 # `jq`, which villagesql/bld_tools/setup_linux_build_env.sh -- the vendor's
 # definitive dependency list -- names and the VEB packaging step uses.
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -148,12 +148,11 @@ reading it as "no restriction" is how a one-engine profile measured seven.
 engines, and `run` prints `note: opt-in engine(s) not run unless named with
 --engines: ...` so the shorter list is not mistaken for a bug. Naming it runs
 it: `--engines villagesql`, or `--engines mariadb,villagesql`. VillageSQL is
-the one opt-in engine today. At its pin no query reaches its HNSW index, and
-the ann module and the driver refuse to time the full scan the server runs
-instead. They find that out only after the corpus has loaded, so a default run
-would pay a whole load per ann build (15 in `frontier-explore`) and get no
-points from any of them. The engine's config says what flips the flag back.
-The web UI's estimate follows the same default.
+the one opt-in engine today. It was made opt-in when its first pin's index
+was never used (every query was a full scan the module refused to time); its
+current pin's index is used, and whether it joins every default run is a cost
+decision the flag leaves open. The web UI's estimate follows the same
+default.
 
 ### `select-builds` options — the two-stage frontier
 

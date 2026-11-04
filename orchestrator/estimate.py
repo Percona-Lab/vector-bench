@@ -755,7 +755,7 @@ def _runs_filtered_search(engine: str) -> bool:
 def _runs_churn(engine: str) -> bool:
     """False only for an engine whose config declares `churn: false`.
 
-    `_runs_filtered_search`'s rule for the churn terms: VillageSQL 0.0.7
+    `_runs_filtered_search`'s rule for the churn terms: VillageSQL
     rejects DELETE on a table with a custom index, so its driver declines the
     workload and nothing of it runs. Every other engine declares nothing and
     is charged exactly as before.

@@ -11,9 +11,9 @@
 # The ef_search grid matches every other engine's; the scan searches at
 # max(ef_search, k).
 #
-# At the pinned build no query reaches the index (see
-# harness/drivers/villagesql.py) and the module refuses to time a full scan,
-# so this sweep produces no recall/QPS points until that changes.
+# The module checks the plan once per built index and refuses to time a full
+# scan (see harness/drivers/villagesql.py); at the pinned build the plan is a
+# distance scan on the index.
 float:
   any:
   - base_args: ['@metric']

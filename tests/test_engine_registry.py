@@ -58,22 +58,22 @@ GOLDEN = {
                  "/server-data/data", ("bench", "bench"), "extra",
                  "#17becf", "X", ":", "MyVector (MySQL 9.7 plugin, hnswlib)",
                  "MyVector (MySQL 9.7 plugin, hnswlib)"),
-    # VillageSQL 0.0.7 with the vsql_vector extension. `VillageSQL` is a new
+    # VillageSQL with the vsql_vector extension. `VillageSQL` is a new
     # constructor, so no other engine's ann result files can be read as its
     # own; the rest is the MySQL family's port, mounts and account.
     "villagesql": ("VillageSQLDriver", "VillageSQL", 3306, "/var/lib/vbench",
                    "/server-data/data", ("bench", "bench"), "extra",
                    "#8c564b", "h", "--",
-                   "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector HNSW)",
-                   "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector HNSW)"),
+                   "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector-pk HNSW)",
+                   "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector-pk HNSW)"),
     # The same extension commit on VillageSQL's MySQL 8.4 server line.
     # `VillageSQL84` and not `VillageSQL` for the reason `mariadb123` is not
     # `MariaDB`: a shared constructor would hand 8.4 the 9.7 result files.
     "villagesql84": ("VillageSQLDriver", "VillageSQL84", 3306,
                      "/var/lib/vbench", "/server-data/data", ("bench", "bench"),
                      "extra", "#c49c94", "H", "-.",
-                     "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)",
-                     "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)"),
+                     "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector-pk HNSW)",
+                     "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector-pk HNSW)"),
 }
 
 # The order a run iterates and a report presents: the original three, then the

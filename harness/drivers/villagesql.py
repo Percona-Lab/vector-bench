@@ -1,13 +1,13 @@
 """Ops-harness driver for VillageSQL + vsql_vector (SVECTOR, HNSW custom index).
 
-VillageSQL is a MySQL fork -- 9.7.2 for `villagesql`, 8.4 for
-`villagesql84`, which this driver serves unchanged (the extension commit is
-the same and so is every statement below) -- driven through the same MariaDB
-Connector/C as every other MySQL-family engine here, so connection handling,
-the threaded load and sizing come from `MySQLFamilyDriver`. Four things
-differ, and each is forced by the server or the extension at the pin in
-`config/engines/villagesql.yml` (server `publish/mysql-9.7_0.0.7`,
-vsql-vector `bac885d`):
+VillageSQL is a MySQL fork -- 9.7.2 for `villagesql`, 8.4 for `villagesql84`,
+which this driver serves unchanged (the extension commit is the same and so is
+every statement below) -- driven through the same MariaDB Connector/C as every
+other MySQL-family engine here, so connection handling, the threaded load and
+sizing come from `MySQLFamilyDriver`. Four things differ, and each is forced by
+the server or the extension at the pin in `config/engines/villagesql.yml`
+(server `publish/mysql-9.7_0.0.7` = `533ab4b5`; villagesql84's
+`publish/mysql-8.4_0.0.7` = `689c74a9`; vsql-vector-pk `93ed008` on both):
 
 1. **The column and the index are an extension's.** `v SVECTOR(n)` is a
    custom type; the index is a custom index, `INDEX vi (v hnsw_<metric>) USING
@@ -17,10 +17,9 @@ vsql-vector `bac885d`):
    function must be the one that profile binds (`L2_DISTANCE`,
    `COSINE_DISTANCE`).
 
-2. **Vectors travel as text.** `SVECTOR` has exactly one input conversion, the
-   `'[a,b,...]'` literal (`svector_from_string` in vsql-vector's
-   src/vector.cc, `strtof` per element); there is no binary input path. Every
-   other MySQL-family engine here binds packed float32. The text is the
+2. **Vectors travel as text.** Every vector is sent as the `'[a,b,...]'`
+   literal (`svector_from_string` in src/vector.cc, `strtof` per element).
+   Every other MySQL-family engine here binds packed float32. The text is the
    shortest float32 repr per element, which `strtof` reads back to the same
    bits, so no value changes -- but formatting and parsing it is a cost only
    this engine pays, on the load and inside every timed query, and the record
@@ -30,26 +29,24 @@ vsql-vector `bac885d`):
    custom_index_knn_recognition.cc), which a prepared-statement parameter is
    not at optimisation time.
 
-3. **No query reaches the index at this pin, and the driver refuses to
-   measure one that does not.** The server only drives a distance scan from
-   an index whose storage props include HAS_ROW_REF (`FindCustomKnnIndexOnField`,
-   gate added by server PR #1269); vsql_vector's HNSW declares HAS_COLUMN_REF
-   | REF_LOOKUP. Measured on the pinned build, the plan is a filesort over a
-   table scan in both optimizers and recall is exactly 1.000 at every
-   ef_search. CLAUDE.md's "every engine can fall back to a full table scan"
-   is this engine's ONLY behaviour here, so `query` and `query_filtered`
-   check the plan once per connection and raise `BruteForceRefused` rather
-   than time a brute-force scan under an ANN label. The build workload --
-   which times the load and the graph build and runs no query -- is
-   unaffected and is a real measurement.
+3. **The plan is checked, and a query that does not use the index is
+   refused.** The server drives a distance scan only from an index whose
+   storage props include HAS_ROW_REF (`FindCustomKnnIndexOnField`, gate added
+   by server PR #1269). vsql-vector-pk's HNSW declares it, and at this pin
+   EXPLAIN FORMAT=TREE shows `Custom index distance scan on vi`. Plain
+   vsql-vector's does not, and with it every query was a filesort over a
+   table scan with recall exactly 1.000 (this engine's first pin). CLAUDE.md's
+   "every engine can fall back to a full table scan" is therefore checked
+   rather than assumed: `query` and `query_filtered` EXPLAIN once per
+   connection and raise `BruteForceRefused` rather than time a brute-force
+   scan under an ANN label.
 
 4. **Two workloads are declined.** DELETE on a table with a custom index is
-   rejected ("DELETE on a table with a custom index (USING EXTENDED) is not
-   supported yet."), so churn cannot run; and filtered search cannot be
-   verified while no query reaches the index (VillageSQL's own adapter for
-   this framework measured ~0.1 recall for a WHERE beside the KNN ORDER BY on
-   its August build). Both are `declined_workloads`, so the report names them
-   and the reason instead of the engine vanishing from those sections.
+   rejected, so churn cannot run; and a WHERE beside the KNN ORDER BY is
+   applied after the scan, to its top max(ef_search, LIMIT) candidates, so a
+   selective predicate returns fewer than k rows. Both are
+   `declined_workloads`, so the report names them and the reason instead of
+   the engine vanishing from those sections.
 """
 
 from __future__ import annotations
@@ -98,18 +95,17 @@ DELETE_REJECTED = (
     "DELETE on a table with a custom index (USING EXTENDED) is not supported "
     "yet.")
 CHURN_DECLINED = (
-    "VillageSQL 0.0.7 rejects every DELETE on a table carrying a custom index "
+    "VillageSQL rejects every DELETE on a table carrying a custom index "
     f"(the server's error: \"{DELETE_REJECTED}\"), so rows cannot be churned. "
     "Re-inserting without deleting would measure a different workload under "
     "this one's label.")
 FILTERED_DECLINED = (
-    "Not verifiable at this pin: no query reaches the HNSW index on "
-    "VillageSQL 0.0.7 with vsql-vector bac885d (the server's KNN scan needs "
-    "an index that stores row references, and vsql_vector's stores column "
-    "references), so a filtered query is an exact scan. VillageSQL's own "
-    "August adapter measured ~0.1 recall for a WHERE beside the KNN ORDER BY; "
-    "the workload stays declined until a build where the index is used can "
-    "show it returns the filtered nearest neighbours.")
+    "vsql_vector applies a WHERE beside the KNN ORDER BY after the index "
+    "search: the HNSW scan returns its top max(ef_search, LIMIT) candidates "
+    "and the predicate filters those (vsql-vector-pk README, 'Filtering with "
+    "a WHERE clause'), so a selective predicate returns fewer than k rows "
+    "even when enough matching rows exist. Measuring that would publish "
+    "post-filtered recall as filtered search.")
 
 VILLAGESQL_DIALECT = MySQLDialect(
     name="villagesql",
@@ -209,7 +205,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
 
     def query_path_facts(self, index: IndexSpec) -> Dict[str, Any]:
         return {
-            "vector_binding": "text literal (SVECTOR has no binary input)",
+            "vector_binding": "text literal ('[a,b,...]', parsed by strtof)",
             "extension_status": ("preview (vsql_allow_preview_extensions=ON; "
                                  "dev/unstable extension ABI)"),
         }
@@ -219,7 +215,8 @@ class VillageSQLDriver(MySQLFamilyDriver):
 
         The graph is maintained on INSERT when the index is declared in
         CREATE TABLE, and built over the loaded rows by CREATE INDEX
-        otherwise; both work at this pin. `harness/workloads/build.py` reads
+        otherwise (which can crash the server at this pin; see
+        `declare_bulk_vector_index_build`). `harness/workloads/build.py` reads
         this flag to decide whether `create_index` runs at all.
         """
         incremental = (self._index is None
@@ -428,10 +425,10 @@ class VillageSQLDriver(MySQLFamilyDriver):
             raise BruteForceRefused(
                 "villagesql: the query plan is not a 'Custom index distance "
                 "scan on vi' -- the server would answer by sorting a full "
-                "table scan, which is exact and is not ANN search. At "
-                "VillageSQL 0.0.7 + vsql-vector bac885d this is expected: the "
-                "KNN scan requires an index with HAS_ROW_REF and vsql_vector's "
-                "HNSW declares HAS_COLUMN_REF. Refusing to measure it.")
+                "table scan, which is exact and is not ANN search. Refusing "
+                "to measure it. The scan needs an index that declares "
+                "HAS_ROW_REF (vsql-vector-pk's HNSW; plain vsql-vector's "
+                "does not), built against a server with the KNN scan.")
 
     def query(self, vector, k: int) -> List[int]:
         self._require_index(vector, k)

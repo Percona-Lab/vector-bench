@@ -509,83 +509,102 @@ its graph has the same headroom.
 
 ---
 
-## VillageSQL 0.0.7 — vsql_vector (SVECTOR + HNSW custom index)
+## VillageSQL — vsql_vector built from vsql-vector-pk (SVECTOR + HNSW custom index)
 
-Server `villagesql/villagesql-server` tag `publish/mysql-9.7_0.0.7`
-(`533ab4b58d2744b79bb45e41f44fa928f190a655`, MySQL 9.7.2 base) with the
-`villagesql/vsql-vector` extension at `main` `bac885dd2bf43347c80dc9d9c4fa86ca0a596957`
-— the first vsql-vector commit with the HNSW index, the DML interface and the
-`vsql_vector.ef_search` session variable; its only tag, 0.0.1, has no index.
-`bac885d` builds cleanly against the 0.0.7 build tree (`VillageSQL_BUILD_DIR`),
--O3, at `x86-64-v3`. Everything below was measured on that build on
-2026-10-30, with the SQL and the server's own error text.
+Server `villagesql/villagesql-server` tag `publish/mysql-9.7_0.0.7` (`533ab4b5`,
+VillageSQL 0.0.7 on MySQL 9.7.2) with the `villagesql/vsql-vector-pk` extension
+at release `0.0.3` (`93ed0087`). vsql-vector-pk is the build of vsql-vector
+whose HNSW index stores each row's primary key; it installs as `vsql_vector`,
+and a server runs one or the other. It builds against the server's build tree
+(`VillageSQL_BUILD_DIR`), -O3, at `x86-64-v3`. `villagesql84` (below) builds the
+same extension commit against the MySQL 8.4 line.
 
-| | VillageSQL 0.0.7 + vsql_vector |
+"This pin" in the rows below is vsql-vector-pk `0.0.3`. Its measurements were
+taken on the 8.4 build (`villagesql84`'s server, `689c74a9`), whose KNN
+recognition, custom-index DML layer and storage ABI are the same files as 9.7's
+(see the 8.4 section). On 9.7 this framework built vsql-vector-pk `d23b87c4`
+(`0.0.3` without its version bump) against `533ab4b5` and ran the gate profile
+through both phases with the plan check passing, and the 8.4-built
+`vsql_vector.veb` installed into the 9.7 server and planned the distance scan.
+
+The engine's first pin was server `publish/mysql-9.7_0.0.7` (`533ab4b5`) with
+plain vsql-vector `bac885dd`, measured on 2026-10-30. Where a row below says
+"first pin", that is the build it was measured on.
+
+| | VillageSQL + vsql_vector (vsql-vector-pk) |
 | --- | --- |
-| Enable | `INSTALL EXTENSION vsql_vector` once (the entrypoint's bootstrap), and `--vsql-allow-preview-extensions=ON` on every start: once the extension is installed a server started without it **refuses to start** (`Failed to load VEF extension 'vsql_vector': extension requires preview capabilities but vsql_allow_preview_extensions is OFF`, then `Aborting`), and `SET GLOBAL` of it is refused (`must be set with SET PERSIST`) |
-| Column type | `SVECTOR(N)`, N ≤ 3072, stored by the extension in its own InnoDB pages |
-| Value input | **text only**, `'[a,b,…]'`, parsed with `strtof` per element — no binary path |
+| Enable | `INSTALL EXTENSION vsql_vector` once (the entrypoint's bootstrap), and `--vsql-allow-preview-extensions=ON` on every start: on the first pin, once the extension was installed a server started without it **refused to start** (`Failed to load VEF extension 'vsql_vector': extension requires preview capabilities but vsql_allow_preview_extensions is OFF`, then `Aborting`), and `SET GLOBAL` of it was refused (`must be set with SET PERSIST`) |
+| Column type | `SVECTOR(N)`, stored by the extension in its own InnoDB pages |
+| Value input | the text literal `'[a,b,…]'`, parsed with `strtof` per element; that is what the driver and the ann module send, the query vector inlined. vsql-vector-pk also accepts a binary form (a tagged big-endian dimension, then little-endian float32; `svector_from_binary`, src/vector.cc), which this engine does not use |
 | Index DDL | `INDEX vi (v hnsw_l2) USING EXTENDED(hnsw) WITH (M = 16, ef_construction = 200)` inline, or `CREATE INDEX vi ON t1 (…)` |
 | Metric | chosen by the key part's profile: `hnsw_l2`, `hnsw_cosine`, `hnsw_l1`, `hnsw_inner_product` |
-| **ef_construction** | `WITH (ef_construction = …)`, default 200, **rejected above 32 × M** with only `InnoDB: Custom type operation failed. See server error log for details.` (M=4: 128 accepted, 129 refused), and below M (`Options::validate`, src/index/hnsw/storage.cc; M itself is 2..128). So 200 is not buildable at M=6 or below. The engine's first version clamped to 192 and recorded both values, but the result file and every label downstream still said 200; the combination is now dropped from the render by name (`orchestrator/ann_knobs.py`), and the driver and module refuse it if anything bypasses that. m-sweep gives VillageSQL M 8..32 for this reason |
+| **ef_construction** | `WITH (ef_construction = …)`, default 200, rejected above 32 × M and below M (`Options::validate`, src/index/hnsw/storage.cc; M itself is 2..128; the same constants as plain vsql-vector's). On the first pin a refusal said only `InnoDB: Custom type operation failed. See server error log for details.` (M=4: 128 accepted, 129 refused). So 200 is not buildable at M=6 or below. The engine's first version clamped to 192 and recorded both values, but the result file and every label downstream still said 200; the combination is now dropped from the render by name (`orchestrator/ann_knobs.py`), and the driver and module refuse it if anything bypasses that. m-sweep gives VillageSQL M 8..32 for this reason |
 | Search width | `SET SESSION vsql_vector.ef_search = n` (default 40, 1..65536); the scan searches at `max(k, ef)` |
 | Distance fn | `L2_DISTANCE`, `COSINE_DISTANCE`, `L1_DISTANCE`, `INNER_PRODUCT` |
-| Graph location | extension segments inside `t1.ibd`; the catalog reports one page for `vi` |
+| Graph location | extension segments inside `t1.ibd`; on the first pin the catalog reported one page for `vi` |
 | Build timing | incremental on INSERT, or bulk `CREATE INDEX` — see the third trap |
 
 ### The traps
 
-1. **No query reaches the index.** `SELECT id FROM t1 ORDER BY
-   L2_DISTANCE(v, '[…]') LIMIT 10` plans as `Sort` over `Table scan on t1`
-   (TRADITIONAL: `type ALL`, `Using temporary; Using filesort`), with the
-   vector inlined or bound, under `hypergraph_optimizer=off` and `=on`, and
-   recall is 1.000 at ef_search 10, 40, 160 and 400 alike — exact brute
-   force. The server only drives a distance scan ("Custom index distance
-   scan on vi" in EXPLAIN FORMAT=TREE) from an index whose storage props
-   include `HAS_ROW_REF` (`FindCustomKnnIndexOnField` in
+1. **The index is used only if it stores row references.** The server
+   drives a distance scan ("Custom index distance scan on vi" in EXPLAIN
+   FORMAT=TREE) only from an index whose storage props include
+   `HAS_ROW_REF` (`FindCustomKnnIndexOnField` in
    `villagesql/sql/custom_index_knn_recognition.cc`, gate from server PR
-   #1269); vsql_vector's HNSW declares `HAS_COLUMN_REF | REF_LOOKUP`, and no
-   vsql-vector branch declares `HAS_ROW_REF`. The release notes' "KNN scan
-   works in both optimizers" is true of an index that stores row references
-   (the server's own `vsql_knn_index_test` extension), not of this one.
-   `VillageSQLDriver` and the ann module therefore check the plan and
-   **raise instead of timing the query**: the build workload produces
-   records, and every query workload fails loudly into the report's failed
-   phases rather than publishing brute force as ANN search.
-2. **DELETE is rejected.** `DELETE FROM t1 WHERE id IN (1,2,3)` →
-   `DELETE on a table with a custom index (USING EXTENDED) is not supported
-   yet.` Churn is declined (`declined_workloads`, `capabilities.churn: false`).
-   `UPDATE t1 SET tag = 5 WHERE id = 10` and an UPDATE of `v` are both
-   rejected too: `UPDATE that changes an indexed column on a table with a
-   custom index (USING EXTENDED) is not supported yet.` — any indexed column,
-   not only the vector. Nothing here issues an UPDATE.
-3. **The bulk build can kill the server.** `CREATE INDEX vi ON t1 (v hnsw_…)
-   USING EXTENDED(hnsw)` over a loaded table works and is fast, and in about
-   one build in seven it deadlocks: two threads X-latch extension pages at
-   the storage ABI's page get (`storage/innobase/villagesql/storage_abi.cc`)
-   and wait on each other, InnoDB's monitor prints `DEADLOCK of threads
-   detected!` and aborts (`[FATAL]`, `sync0arr.cc`, signal 6). Seen after
-   1-, 2- and 4-thread loads; never in 12 incremental builds. So
+   #1269). Plain vsql-vector's HNSW declares `HAS_COLUMN_REF | REF_LOOKUP`:
+   on the first pin `SELECT id FROM t1 ORDER BY L2_DISTANCE(v, '[…]') LIMIT
+   10` planned as `Sort` over `Table scan on t1` (TRADITIONAL: `type ALL`,
+   `Using temporary; Using filesort`), with the vector inlined or bound,
+   under `hypergraph_optimizer=off` and `=on`, and recall was 1.000 at
+   ef_search 10, 40, 160 and 400 alike — exact brute force. vsql-vector-pk
+   declares `HAS_ROW_REF`, and on this pin the plan is `Custom index distance
+   scan on vi` under the default (classic) optimizer; on a 300 × 8 probe its
+   top 5 matched exact brute force. `VillageSQLDriver` and
+   the ann module still check the plan and **raise instead of timing the
+   query** without it, so a pin that loses the scan fails loudly into the
+   report's failed phases rather than publishing brute force as ANN search.
+   The query vector must be a constant (`BindFieldAndQuery`): a bound
+   parameter is not one at optimisation time, so it is inlined.
+2. **DELETE is rejected.** `DELETE FROM t WHERE id = 1` → `DELETE on a table
+   with a custom index (USING EXTENDED) is not supported yet.` Churn is
+   declined (`declined_workloads`, `capabilities.churn: false`). An UPDATE of
+   `v`, and of `tag` (which carries its own B-tree index), is rejected too:
+   `UPDATE that changes an indexed column on a table with a custom index
+   (USING EXTENDED) is not supported yet.` — any indexed column, not only the
+   vector. Nothing here issues an UPDATE. All three measured on this pin, as
+   on the first.
+3. **The bulk build can kill the server.** On the first pin, `CREATE INDEX vi
+   ON t1 (v hnsw_…) USING EXTENDED(hnsw)` over a loaded table worked and was
+   fast, and in about one build in seven it deadlocked: two threads X-latched
+   extension pages at the storage ABI's page get
+   (`storage/innobase/villagesql/storage_abi.cc`) and waited on each other,
+   InnoDB's monitor printed `DEADLOCK of threads detected!` and aborted
+   (`[FATAL]`, `sync0arr.cc`, signal 6); never in 12 incremental builds.
+   vsql-vector-pk's README says building the index over a populated table
+   "is not safe yet and can crash the server". So
    `capabilities.bulk_vector_index_build: false` and the build mode is
    `incremental`; a profile may still ask for `post` to re-test a new pin.
-4. **Filtered search is unverifiable**, because of trap 1, and VillageSQL's
-   own August adapter measured ~0.1 recall for a `WHERE` beside the KNN
-   `ORDER BY`. Declined until a build where the index is used shows it
-   returns the filtered nearest neighbours.
+4. **A WHERE beside the KNN ORDER BY is a post-filter.** The scan returns its
+   top `max(ef_search, LIMIT)` candidates and the predicate filters those
+   (vsql-vector-pk README, "Filtering with a WHERE clause"), so a selective
+   predicate returns fewer than k rows even when enough matching rows exist.
+   Filtered search is declined: measuring it would publish post-filtered
+   recall as filtered search.
 5. **Text binding is a cost only this engine pays**, on the load and inside
    every timed query; `extra.vector_binding` carries it and the report states
    it. The shortest float32 repr per element round-trips exactly through
    `strtof`, so the stored vectors are bit-identical to the dataset's.
-6. **Ingest slows within one server lifetime.** Repeated drop-and-reload
-   cycles of a 3,000 × 16 incremental build on one server ran at ~290, ~330,
-   ~330, ~150, ~120, ~125 rows/s; a restarted server starts fast again.
-   Unexplained; the framework restarts the server per configuration, so it
-   does not reach a measurement, but a hand-run loop will see it.
+6. **Ingest slowed within one server lifetime on the first pin.** Repeated
+   drop-and-reload cycles of a 3,000 × 16 incremental build on one server ran
+   at ~290, ~330, ~330, ~150, ~120, ~125 rows/s; a restarted server started
+   fast again. Unexplained, and not re-measured on this pin; the framework
+   restarts the server per configuration, so it does not reach a
+   measurement, but a hand-run loop may see it.
 
 ### The MySQL 8.4 line — `villagesql84`
 
 VillageSQL's team asked for their 8.4 build to be benchmarked rather than 9.7, so
-`villagesql84` compiles the **same** vsql-vector commit (`bac885d`) against server tag
+`villagesql84` compiles the **same** vsql-vector-pk commit (`93ed0087`) against server tag
 `publish/mysql-8.4_0.0.7` (`689c74a9f88c91ae035f57e0ae8915a168274112`, the same commit as
 `release/0.0.7`; MySQL 8.4.11 base — not the Percona Server 8.4 based line). Its config is
 `alias_of: villagesql`: the same Dockerfile, entrypoint, init.sql, driver, cmake flags,
@@ -599,7 +618,7 @@ What was checked in the 8.4 tree, and found the same as 9.7:
 - **The build.** Every cmake flag in the 9.7 config exists in 8.4, Boost is bundled in
   `extra/boost` (1.84) as it is in 9.7, and `villagesql/sdk` — the headers the extension
   includes, dev ABI and all — is byte-identical between the two tags (all 69 blobs). The
-  extension therefore needs no change and its pin did not move.
+  extension therefore needs no change, and both engines pin the same commit.
 - **The server surface the driver uses.** `vsql_allow_preview_extensions`, the DELETE /
   UPDATE refusal text, `EXPLAIN FORMAT=TREE`, `information_schema.INNODB_TABLESPACES`
   and the performance_schema wait instruments all exist. `L2_DISTANCE` /
@@ -608,23 +627,25 @@ What was checked in the 8.4 tree, and found the same as 9.7:
   the bench account stays on `caching_sha2_password` as on 9.7.
 - **Trap 1 holds on 8.4.** `FindCustomKnnIndexOnField` in
   `villagesql/sql/custom_index_knn_recognition.cc` is the same file on both tags and skips
-  any index without `VEF_INDEX_STORAGE_HAS_ROW_REF`; vsql_vector `bac885d` declares
-  `HAS_COLUMN_REF | REF_LOOKUP` (`src/vector.cc`). The only differences in `villagesql/`
-  between the tags are build scripts and the 8.4 iterator API (`Init`/`Read` where 9.7
-  has `DoInit`/`DoRead` in `custom_index_knn_scan.cc`). So the KNN query is a filesort
-  over a full scan on 8.4 as well, the plan check refuses it, and `villagesql84` is
-  opt-in for the same reason. **Measured** on the built image (2026-11-04,
-  `8.4.11-villagesql-0.0.7-dev-vector-bench`, 2,000 × 16 rows, index declared inline at
-  M=16, ef_construction=200): `EXPLAIN FORMAT=TREE SELECT id FROM t1 ORDER BY
-  L2_DISTANCE(v, '[…]') LIMIT 10` is `Limit` → `Sort: vsql_vector.l2_distance(…)` →
-  `Stream results` → `Table scan on t1`, TRADITIONAL is `type ALL … Using temporary;
-  Using filesort`, the same at `vsql_vector.ef_search = 10`, and `DELETE` fails with the 9.7
-  text. One difference from 9.7: the hypergraph optimizer cannot be switched on at all in a
-  non-debug 8.4 build (`ERROR 3999 … does not yet support 'use in non-debug builds'`), so
-  "both optimizers" is one optimizer here. The `dev` profile on this engine produced its
-  `ingest` and `index_build` records (incremental, 595 and 1,130 rows/s on the 4,000 × 16
-  tiny corpus in the normalized and tuned passes) and the concurrency workload raised
-  `BruteForceRefused` in both passes, as designed.
+  any index without `VEF_INDEX_STORAGE_HAS_ROW_REF`. The only differences in `villagesql/`
+  between the tags are build scripts and the 8.4 iterator API (`Init`/`Read` where 9.7 has
+  `DoInit`/`DoRead` in `custom_index_knn_scan.cc`). vsql-vector-pk declares `HAS_ROW_REF`,
+  and the measurements in the rows above were taken on this 8.4 build: the KNN query plans
+  as `Custom index distance scan on vi`. At the previous pin, plain vsql_vector `bac885d`
+  (`HAS_COLUMN_REF | REF_LOOKUP`, `src/vector.cc`), the KNN query was a filesort over a full
+  scan on 8.4 as on 9.7 and the plan check refused it. **Measured** at that pin on the built
+  image (2026-11-04, `8.4.11-villagesql-0.0.7-dev-vector-bench`, 2,000 × 16 rows, index
+  declared inline at M=16, ef_construction=200):
+  `EXPLAIN FORMAT=TREE SELECT id FROM t1 ORDER BY L2_DISTANCE(v, '[…]') LIMIT 10` is `Limit`
+  → `Sort: vsql_vector.l2_distance(…)` → `Stream results` → `Table scan on t1`, TRADITIONAL
+  is `type ALL … Using temporary; Using filesort`, the same at `vsql_vector.ef_search = 10`,
+  and `DELETE` fails with the 9.7 text. One difference from 9.7: the hypergraph optimizer
+  cannot be switched on at all in a non-debug 8.4 build
+  (`ERROR 3999 … does not yet support 'use in non-debug builds'`), so "both optimizers" is
+  one optimizer here. The `dev` profile on this engine produced its `ingest` and
+  `index_build` records (incremental, 595 and 1,130 rows/s on the 4,000 × 16 tiny corpus in
+  the normalized and tuned passes) and the concurrency workload raised `BruteForceRefused`
+  in both passes, as designed.
 - **Trap 3** (the bulk-build deadlock) was measured on 9.7 only. Every file under
   `storage/innobase/villagesql/` — `storage_abi.cc`, where the two latches were taken,
   among them — is byte-identical between the tags, so `bulk_vector_index_build: false` is

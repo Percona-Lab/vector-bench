@@ -70,24 +70,15 @@
 #                                 dropped by `render_config` and named before
 #                                 the run -- never clamped, which is what the
 #                                 engine's first version did. Every M keeps
-#                                 64. AT THIS PIN ITS ANN PHASE PRODUCES NO
-#                                 POINT: no query reaches the index, and the
-#                                 module refuses to time the full scan the
-#                                 server runs instead (config/engines/
-#                                 villagesql.yml), so the 15 builds would be
-#                                 paid for and the phase would then fail
-#                                 loudly. That is why it is OPT-IN
+#                                 64. It is OPT-IN
 #                                 (`runtime.default_selected: false`): a bare
 #                                 `run --profile frontier-explore` leaves it
 #                                 out and says so, and only
-#                                 `--engines ...,villagesql` measures it. It
-#                                 stays in the grid so that the first pin
-#                                 whose index is used is explored with
-#                                 everything else, not added by hand.
+#                                 `--engines ...,villagesql` measures it.
 #   villagesql84                  The same 15 builds, from the same
 #                                 `villagesql_ef_construction` key: the same
 #                                 extension on the MySQL 8.4 server line, and
-#                                 opt-in for the same reason.
+#                                 opt-in the same way.
 #   mongodb (Percona Search)      quantization scalar and none = 2 builds. mongot
 #                                 exposes no graph degree to this framework, so
 #                                 M is pinned to one label (16) below rather

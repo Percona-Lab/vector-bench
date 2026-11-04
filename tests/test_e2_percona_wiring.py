@@ -2148,28 +2148,29 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
         "scans the whole tree for 40-hex commits, so a second engine pinned "
         "by SHA has to be declared here or it reads as a half-finished "
         "Percona re-pin."),
-    "bac885dd2bf43347c80dc9d9c4fa86ca0a596957": (
+    "93ed00873dd65f64c0788c80576d5cf3fba39831": (
         ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
          "config/engines/villagesql84.yml",
          "tests/test_e30_villagesql84_engine.py",
          "docs/04-engine-notes.md", SELF_REL),
-        "a different engine's pin, not a copy of Percona's: vsql-vector "
-        "`main` at bac885d (villagesql/vsql-vector), which "
-        "config/engines/villagesql.yml carries as its own `source.tag`."),
+        "a different engine's pin, not a copy of Percona's: vsql-vector-pk "
+        "release 0.0.3 at 93ed008 (villagesql/vsql-vector-pk), which "
+        "config/engines/villagesql.yml and config/engines/villagesql84.yml "
+        "carry as their own `source.tag`."),
     "533ab4b58d2744b79bb45e41f44fa928f190a655": (
         ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
          "docs/04-engine-notes.md", SELF_REL),
-        "VillageSQL's publish/mysql-9.7_0.0.7 tag, the server tree vsql-vector "
-        "is compiled against. Pinned by commit as well as by tag so "
-        "prepare_villagesql can refuse a moved tag."),
+        "VillageSQL's publish/mysql-9.7_0.0.7 tag, the server tree "
+        "vsql-vector-pk is compiled against. Pinned by commit as well as by "
+        "tag so prepare_villagesql can refuse a moved tag."),
     "689c74a9f88c91ae035f57e0ae8915a168274112": (
         ("config/engines/villagesql84.yml",
          "tests/test_e30_villagesql84_engine.py",
          "docs/04-engine-notes.md", SELF_REL),
         "VillageSQL's publish/mysql-8.4_0.0.7 tag (the same commit as "
         "release/0.0.7), the MySQL 8.4 server tree villagesql84 compiles the "
-        "same vsql-vector commit against. Pinned by commit as well as by tag "
-        "so prepare_villagesql can refuse a moved tag."),
+        "same vsql-vector-pk commit against. Pinned by commit as well as by "
+        "tag so prepare_villagesql can refuse a moved tag."),
     "008e09c2834b98143a8c067d4d225c90953050cf": (
         ("config/engines/myvector.yml", "tests/test_e24_myvector_disclosures.py",
          SELF_REL),
