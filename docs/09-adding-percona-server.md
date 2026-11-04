@@ -905,6 +905,33 @@ compare a cache budget against a wall. Under `normalized.yml`'s
 `graph_cache_fraction: 0.30` the three engines would get the same number of
 bytes and one of them would be unable to finish the load.
 
+### A table rebuild holds two graphs at its peak (server team, 2026-11-04)
+
+**Supplied by the server team, not measured here.** `OPTIMIZE TABLE` on a table
+with an HNSW index needs **double** the graph memory at its peak: the old
+table's graph and the new table's graph coexist during the rebuild. When the
+ALTER ends both read `0` in `Innodb_hnsw_memory_used` — the old graph is freed
+and the new one is evicted, the same eviction §2.6 describes for
+`ADD VECTOR KEY` — so the gauge read after the fact never shows the peak.
+
+What follows from that:
+
+- **With a finite `innodb_hnsw_max_memory`, the limit must be at least about
+  twice the graph's size for `OPTIMIZE TABLE` to complete**; otherwise the
+  rebuild fails partway with `ER_CAPACITY_EXCEEDED`. That is one more reason the
+  ceiling cannot be fed from a cache budget sized for one graph.
+- **Under this framework's policy (`0`, unlimited — below) the bound is the
+  container's memory limit** — 16 GB for the server in the normalized pass — so
+  a rebuild needs about twice the graph's memory inside that limit. Only the
+  container memory sampler (`mem-*.jsonl`) can see the peak; the status gauge
+  cannot.
+- **The framework does not run `OPTIMIZE TABLE`.** `PerconaDriver.maintain`'s
+  docstring gives the reason it chose the index replace instead. **Whether that
+  index replace — `DROP KEY vi, ADD VECTOR KEY` in one ALTER, currently
+  withdrawn under `capabilities.vector_index_replace: false` — has the same
+  two-graph peak is not known.** It is an open question for the server team,
+  not a fact, and `PerconaDriver.maintain` records it as one.
+
 ### What the default costs, with the inputs named
 
 **These figures are projections, not measurements.** Nothing here was run

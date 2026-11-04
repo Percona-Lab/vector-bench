@@ -1309,6 +1309,15 @@ class PerconaDriver(MySQLFamilyDriver):
         asserting `TABLE_ID` is unchanged across it. That is the narrower
         repair and the one whose cost means something.
 
+        **Memory at the peak, an OPEN QUESTION.** The server team stated
+        (2026-11-04) that `OPTIMIZE TABLE` holds the old and the new graph at
+        once, so it needs about twice the graph's memory at its peak, and
+        that both read 0 in `Innodb_hnsw_memory_used` once the ALTER ends --
+        the gauge never shows the peak; only the container sampler
+        (`mem-*.jsonl`) can. Whether THIS replace (`DROP KEY vi, ADD VECTOR
+        KEY` in one ALTER) has the same two-graph peak is not known and has
+        been put to the server team; do not read it as established either
+        way. See `docs/09-adding-percona-server.md` §3.
 
         **The option list is read back off the server rather than re-derived
         from the profile, and that is the whole correctness argument.** The

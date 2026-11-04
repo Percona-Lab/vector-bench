@@ -242,6 +242,9 @@ These are the reasons the code looks over-defensive. Do not relax them.
   alone (`warm_graph_after_build`) gets one discarded pass over calibration's queries at the
   top ef inside `build.run`, in both build modes, before anything is timed; the re-read gauge
   is `extra.graph_warmup.server_status` on that same `index_build` record (ops version 11).
+  Per the server team, `OPTIMIZE TABLE` holds two graphs at its peak and the gauge shows
+  neither afterwards, so a finite limit would need ~2× the graph; whether the churn index
+  replace has the same peak is an open question (§3).
 - **A profile's `resources:` block deep-merges dict-into-dict.** To *clear* an inherited key
   write `null`, not `{}` — `{}` recurses into the inherited map and changes nothing. This
   silently halved the `m-sweep` profile once.
