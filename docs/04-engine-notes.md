@@ -613,7 +613,18 @@ What was checked in the 8.4 tree, and found the same as 9.7:
   between the tags are build scripts and the 8.4 iterator API (`Init`/`Read` where 9.7
   has `DoInit`/`DoRead` in `custom_index_knn_scan.cc`). So the KNN query is a filesort
   over a full scan on 8.4 as well, the plan check refuses it, and `villagesql84` is
-  opt-in for the same reason.
+  opt-in for the same reason. **Measured** on the built image (2026-11-04,
+  `8.4.11-villagesql-0.0.7-dev-vector-bench`, 2,000 × 16 rows, index declared inline at
+  M=16, ef_construction=200): `EXPLAIN FORMAT=TREE SELECT id FROM t1 ORDER BY
+  L2_DISTANCE(v, '[…]') LIMIT 10` is `Limit` → `Sort: vsql_vector.l2_distance(…)` →
+  `Stream results` → `Table scan on t1`, TRADITIONAL is `type ALL … Using temporary;
+  Using filesort`, the same at `vsql_vector.ef_search = 10`, and `DELETE` fails with the 9.7
+  text. One difference from 9.7: the hypergraph optimizer cannot be switched on at all in a
+  non-debug 8.4 build (`ERROR 3999 … does not yet support 'use in non-debug builds'`), so
+  "both optimizers" is one optimizer here. The `dev` profile on this engine produced its
+  `ingest` and `index_build` records (incremental, 595 and 1,130 rows/s on the 4,000 × 16
+  tiny corpus in the normalized and tuned passes) and the concurrency workload raised
+  `BruteForceRefused` in both passes, as designed.
 - **Trap 3** (the bulk-build deadlock) was measured on 9.7 only. Every file under
   `storage/innobase/villagesql/` — `storage_abi.cc`, where the two latches were taken,
   among them — is byte-identical between the tags, so `bulk_vector_index_build: false` is

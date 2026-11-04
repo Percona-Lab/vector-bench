@@ -31,7 +31,11 @@ alias_of: villagesql
 # config/engines/villagesql.yml. The 8.4 tree carries the same extension
 # framework and the same KNN recognition at 0.0.7 -- `FindCustomKnnIndexOnField`
 # requires HAS_ROW_REF on the 8.4 branch exactly as on the 9.7 one -- so the
-# same refusal applies; docs/04-engine-notes.md has the evidence for this line.
+# same refusal applies. Measured on the built image on 2026-11-04: the KNN
+# query plans as `Sort` over `Table scan on t1` and the dev profile's
+# concurrency workload raises BruteForceRefused; docs/04-engine-notes.md has
+# the evidence. (The hypergraph optimizer cannot be enabled in a non-debug
+# 8.4 build at all, so only the classic one was observed.)
 name: villagesql84
 display_name: VillageSQL on MySQL 8.4 (vsql_vector)
 family: mysql
