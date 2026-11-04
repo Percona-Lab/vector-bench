@@ -2358,9 +2358,18 @@ class TestThePullRequestMappingMatchesTheHistory:
         (16, "t5b-stats"),
     ]
 
+    #: The last merge of the repository whose numbering §1 describes:
+    #: EvgeniyPatlan/vector-bench's #74, the tip Percona-Lab/vector-bench was
+    #: fast-forwarded to on 2026-11-03 when it became the upstream. Percona-Lab
+    #: numbers its own pull requests from #1 again, and reading HEAD put this
+    #: class red the moment its #4 merged: the gap §1 names was "filled" by a
+    #: pull request from a different repository. Every number §1 talks about
+    #: is reachable from here, and nothing merged later can change that set.
+    OLD_NUMBERING_TIP = "0ddf29a"
+
     @pytest.fixture(scope="class")
     def merges(self):
-        found = _merges_at("HEAD")
+        found = _merges_at(self.OLD_NUMBERING_TIP)
         if not found:
             pytest.skip("no merge commits in this checkout")
         return found
