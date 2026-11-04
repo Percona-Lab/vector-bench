@@ -9,10 +9,15 @@
 #     ALTER TABLE t1 ADD VECTOR KEY vi (v) TYPE hnsw (M = 16,
 #         ef_construction = 200, metric = euclidean), ALGORITHM=INPLACE
 #
-# `config/engines/percona.yml` declares `capabilities.bulk_vector_index_build:
-# false`, so every other profile runs `incremental` for this engine; an
-# explicit `post` here is honoured with a warning, which is the opt-in that
-# declaration leaves open for exactly this.
+# When this was written `config/engines/percona.yml` declared
+# `capabilities.bulk_vector_index_build: false`, so every other profile ran
+# `incremental` for this engine and this explicit `post` was honoured with a
+# warning -- the opt-in that declaration left open for exactly this. At the
+# current pin (9.7.2-2) this profile built 25 times out of 25 on 2026-11-03,
+# and the capability is now true: `post` is Percona's ops default and this
+# list no longer draws a warning. Keep it as the repro for the next pin -- an
+# intermittent crash is re-tested by repetition, and this is the shape it was
+# seen on.
 #
 # THE SHAPE IS THE ONE THAT CRASHED, NOT A CHOICE: fashion-mnist, 20,000
 # rows, one load thread, M=16, normalized pass. Seen on 2026-10-15 at the old

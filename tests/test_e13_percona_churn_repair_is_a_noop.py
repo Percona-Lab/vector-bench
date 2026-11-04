@@ -29,23 +29,36 @@ all 20 of those rows as `after ALTER TABLE (index replace) (0.0 s)`: the
 degraded index, measured twice, presented as a repair result.
 
 THE DEFECT ON THIS SIDE is not the server's refusal to rebuild. It is that
-the statement `maintain()` issues is **the same statement** that
-`capabilities.bulk_vector_index_build: false` in `config/engines/percona.yml`
-records as killing the server at the pinned `source.tag`. PR #36 (merged,
-`a89b536`) stopped the *build mode* default from reaching that path and did
-not touch this one, so ten published rows measured the degraded index twice.
+the statement `maintain()` issues was withdrawn by nothing: PR #36 (merged,
+`a89b536`) stopped the *build mode* default from reaching the bulk build,
+which `capabilities.bulk_vector_index_build: false` then recorded as killing
+the server at the old pin, and did not touch the repair, so ten published
+rows measured the degraded index twice.
 
-The fix: the driver declares **no repair path** when the host says the bulk
-vector index build is broken -- `repair_path = "none"`, the base class default
-at `harness/drivers/base.py:258`, and `maintain()` returning `None`. The churn
+The fix: the driver declares **no repair path** when the host says the index
+replace is unverified -- `repair_path = "none"`, the base class default at
+`harness/drivers/base.py:258`, and `maintain()` returning `None`. The churn
 workload needs no change: `_record_maintenance` returns early on a non-`str`,
-so only the "before" record is written, which is the shape the five engines
-with no repair path already use.
+so only the "before" record is written, which is the shape the engines with
+no repair path already use.
+
+TWO KEYS NOW, NOT ONE. The withdrawal first rode on
+`bulk_vector_index_build: false`, on the grounds that both ALTERs add a
+vector key. On 2026-11-03 the bulk build was re-verified at the current pin
+(9.7.2-2, 25 of 25 builds) and the replace was not re-tested, so Percona now
+declares `bulk_vector_index_build: true` and `vector_index_replace: false`,
+and this file pins the second: read by `cli._vector_index_replace` (which
+FALLS BACK to the bulk-build reading when an engine declares no replace key,
+so every other engine reads as before), carried as
+`--no-vector-index-replace`, applied by
+`PerconaDriver.declare_vector_index_replace`. A test below proves the split
+is real: Percona's default build mode is `post` while its repair stays
+withdrawn.
 
 The capability lives in the engine config and `harness/` must not import
 `orchestrator` -- each runs in a container that mounts only itself -- so the
-decision is made on the host and passed in as `--no-bulk-vector-index-build`,
-the way `--driver` already is.
+decision is made on the host and passed in as a flag, the way `--driver`
+already is.
 
 PROBE STYLE, per this suite's convention (see
 `tests/test_e9_percona_bulk_build_crash.py`): every decision test reports its
@@ -85,9 +98,9 @@ from tests.fake_driver import (DIM, FakeDriver, K, N_QUERIES,         # noqa: E4
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-CAPABILITY = "bulk_vector_index_build"
-FLAG = "--no-bulk-vector-index-build"
-HOOK = "declare_bulk_vector_index_build"
+CAPABILITY = "vector_index_replace"
+FLAG = "--no-vector-index-replace"
+HOOK = "declare_vector_index_replace"
 
 def _other_engines():
     """Every engine but Percona, from the registry rather than from memory.
@@ -98,8 +111,10 @@ def _other_engines():
     been silently exempt from "nothing else moved".
     """
     from orchestrator.cli import KNOWN_ENGINES
-    # VillageSQL declares its bulk build broken too (an intermittent latch
-    # deadlock aborts the server); its flag is pinned in
+    # VillageSQL declares its bulk build broken (an intermittent latch
+    # deadlock aborts the server), so its replace reading falls back to
+    # false and it gets this flag too; see
+    # `test_villagesql_gets_both_flags_off_its_one_key` below and
     # tests/test_e26_villagesql_engine.py.
     return tuple(sorted(set(KNOWN_ENGINES) - {"percona", "villagesql"}))
 
@@ -184,10 +199,10 @@ SHOW_CREATE = (
 )
 
 
-def percona_driver(bulk_build: Optional[bool] = None) -> PerconaDriver:
+def percona_driver(replace: Optional[bool] = None) -> PerconaDriver:
     """A `PerconaDriver` wired to a recording cursor.
 
-    `bulk_build=None` declares nothing, which is the case that has to be
+    `replace=None` declares nothing, which is the case that has to be
     today's behaviour exactly: a hand-run harness, a `run-benchmark.sh lab`
     script and every test written before this change construct the driver
     with no capability at all.
@@ -196,8 +211,8 @@ def percona_driver(bulk_build: Optional[bool] = None) -> PerconaDriver:
     driver._cur = RecordingCursor(SHOW_CREATE)
     driver._index = IndexSpec(dim=8, m=16, metric="euclidean",
                               build_mode="post")
-    if bulk_build is not None:
-        driver.declare_bulk_vector_index_build(bulk_build)
+    if replace is not None:
+        driver.declare_vector_index_replace(replace)
     return driver
 
 
@@ -213,10 +228,10 @@ def statements(driver) -> List[str]:
 class TestTheHostReadsTheCapabilityOnce:
 
     def test_the_capability_decides_and_absence_reads_as_working(self):
-        from orchestrator.cli import _bulk_vector_index_build
+        from orchestrator.cli import _vector_index_replace
         cfg = _engine_cfg()
-        honest = _bulk_vector_index_build(cfg)
-        mutant = _bulk_vector_index_build(_with_capability(cfg, True))
+        honest = _vector_index_replace(cfg)
+        mutant = _vector_index_replace(_with_capability(cfg, True))
         print(f"HONEST (percona.yml as it is) = {honest}")
         print(f"MUTANT (capability flipped)   = {mutant}")
         assert honest != mutant, (
@@ -224,61 +239,109 @@ class TestTheHostReadsTheCapabilityOnce:
             f"flipped; both arms returned {honest}")
         assert honest is False
         assert mutant is True
-        # And the default-when-absent, which is what keeps six engines still.
-        assert _bulk_vector_index_build({}) is True
-        assert _bulk_vector_index_build({"capabilities": None}) is True
+        # And the default when NEITHER key is declared, which is what keeps
+        # every other engine still.
+        assert _vector_index_replace({}) is True
+        assert _vector_index_replace({"capabilities": None}) is True
 
-    def test_the_key_is_read_in_exactly_one_place(self):
-        """The drift guard, and the reason `_bulk_vector_index_build` exists.
+    @pytest.mark.parametrize("caps,want", [
+        # Absent replace key: follows the bulk-build reading, both ways.
+        ({"bulk_vector_index_build": True}, True),
+        ({"bulk_vector_index_build": False}, False),
+        # Declared replace key: overrides the bulk-build reading, both ways.
+        ({"bulk_vector_index_build": True, "vector_index_replace": False},
+         False),
+        ({"bulk_vector_index_build": False, "vector_index_replace": True},
+         True),
+    ])
+    def test_absence_falls_back_to_the_bulk_build_reading(self, caps, want):
+        """THE COMPATIBILITY STORY. Before the split there was one key, and
+        an engine that declares only that one -- VillageSQL, false -- or
+        neither must read exactly as it did. Only an engine that declares
+        `vector_index_replace` itself can have the two disagree.
+        """
+        from orchestrator.cli import _vector_index_replace
+        got = _vector_index_replace({"capabilities": dict(caps)})
+        print(f"{caps} -> {got}")
+        assert got is want
 
-        `_ops_build_modes` read `caps.get("bulk_vector_index_build", True)`
-        TWICE, with the default spelled out in both; the ops harness's flag
-        would have been a third. A default that appears N times is a default
-        that can disagree with itself, and this repo's worst failures are
-        exactly that shape -- a fact read two ways, each plausible.
+    def test_villagesql_still_reads_as_one_key(self):
+        """The one other engine that declares the bulk build false. Its
+        replace reading must come off the fallback, not off a key of its own.
+        """
+        from orchestrator.cli import (_bulk_vector_index_build,
+                                      _vector_index_replace)
+        cfg = _engine_cfg("villagesql")
+        assert CAPABILITY not in (cfg.get("capabilities") or {})
+        assert _bulk_vector_index_build(cfg) is False
+        assert _vector_index_replace(cfg) is False
+
+    @pytest.mark.parametrize("key,reader", [
+        ("vector_index_replace", "_vector_index_replace"),
+        ("bulk_vector_index_build", "_bulk_vector_index_build"),
+    ])
+    def test_each_key_is_read_in_exactly_one_place(self, key, reader):
+        """The drift guard, and the reason both readers exist.
+
+        `_ops_build_modes` once read `caps.get("bulk_vector_index_build",
+        True)` TWICE, with the default spelled out in both; the ops harness's
+        flag would have been a third. A default that appears N times is a
+        default that can disagree with itself, and this repo's worst failures
+        are exactly that shape -- a fact read two ways, each plausible. The
+        replace key is held to the same rule: its fallback to the bulk key is
+        a CALL to `_bulk_vector_index_build`, not a second spelling of it.
         """
         with open(os.path.join(REPO, "orchestrator", "cli.py")) as fh:
             src = fh.read()
         # BOTH quote styles, and as an AST walk over string constants rather
         # than a text count: the double-quote-only version of this test would
-        # not have seen a second reader spelled `caps.get('bulk_vector_...')`,
-        # which is the same key and the same drift.
+        # not have seen a second reader spelled with single quotes, which is
+        # the same key and the same drift.
         tree = ast.parse(src)
         literals = [n for n in ast.walk(tree)
-                    if isinstance(n, ast.Constant) and n.value == CAPABILITY]
+                    if isinstance(n, ast.Constant) and n.value == key]
         reads = len(literals)
-        print(f"{CAPABILITY!r} string constants in cli.py = {reads} "
-              f"(line(s) {[n.lineno for n in literals]}); "
-              f"raw text count, both quote styles = "
-              f"{src.count(chr(34) + CAPABILITY + chr(34))} double + "
-              f"{src.count(chr(39) + CAPABILITY + chr(39))} single")
+        print(f"{key!r} string constants in cli.py = {reads} "
+              f"(line(s) {[n.lineno for n in literals]})")
         assert reads == 1, (
-            f"the capability key should be spelled once, inside "
-            f"`_bulk_vector_index_build`; found {reads} string constants, so "
-            f"two readings of one fact can now drift")
+            f"the capability key should be spelled once, inside `{reader}`; "
+            f"found {reads} string constants, so two readings of one fact "
+            f"can now drift")
         enclosing = [n for n in ast.walk(tree)
                      if isinstance(n, ast.FunctionDef)
                      and any(c is literals[0] for c in ast.walk(n))]
-        assert [n.name for n in enclosing] == ["_bulk_vector_index_build"], (
-            f"the one reader must be `_bulk_vector_index_build`; it is in "
+        assert [n.name for n in enclosing] == [reader], (
+            f"the one reader must be `{reader}`; it is in "
             f"{[n.name for n in enclosing]}")
 
-    def test_the_build_mode_default_still_comes_off_the_same_reading(self):
-        """The two consumers must not be able to disagree about one engine.
+    def test_percona_builds_post_and_still_withdraws_the_repair(self):
+        """THE SPLIT ITSELF. The two consumers used to come off one key, so
+        an engine either lost both the `post` default and its repair or kept
+        both. At Percona's current pin the bulk build is verified and the
+        replace is not, and the shipped config has to say both at once.
 
-        `maintain()`'s ALTER and `create_index`'s ALTER are the same
-        statement, so an engine whose bulk build is broken must both lose the
-        `post` default and withdraw its repair path -- from one key.
+        Honest (percona.yml as shipped): modes ["post"], replace False.
+        Mutant (the replace key deleted, i.e. the old one-key wiring with the
+                bulk key flipped): modes ["post"], replace True -- the
+                repair is back, which is exactly the no-op that was published.
         """
-        from orchestrator.cli import _bulk_vector_index_build, _ops_build_modes
+        from orchestrator.cli import (_bulk_vector_index_build,
+                                      _ops_build_modes, _vector_index_replace)
         cfg = _engine_cfg()
-        for value, want_modes in ((False, ["incremental"]), (True, ["post"])):
-            variant = _with_capability(cfg, value)
-            modes = _ops_build_modes("percona", {"ops": {}}, variant)
-            reading = _bulk_vector_index_build(variant)
-            print(f"capability={value}: reading={reading}, modes={modes}")
-            assert reading is value
-            assert modes == want_modes
+        one_key = copy.deepcopy(cfg)
+        del one_key["capabilities"][CAPABILITY]
+        honest = (_ops_build_modes("percona", {"ops": {}}, cfg),
+                  _vector_index_replace(cfg))
+        mutant = (_ops_build_modes("percona", {"ops": {}}, one_key),
+                  _vector_index_replace(one_key))
+        print(f"HONEST (two keys)          = modes {honest[0]}, "
+              f"replace {honest[1]}")
+        print(f"MUTANT (replace key gone)  = modes {mutant[0]}, "
+              f"replace {mutant[1]}")
+        assert honest != mutant, "DEAD PROBE"
+        assert _bulk_vector_index_build(cfg) is True
+        assert honest == (["post"], False)
+        assert mutant == (["post"], True)
 
 
 # ---------------------------------------------------------------------------
@@ -317,18 +380,18 @@ class TestTheDecisionIsPassedInAndNotImported:
                 f"that mounts only harness/, so this is a "
                 f"ModuleNotFoundError right after the server comes up")
 
-    def _argv(self, bulk_build: Optional[bool] = None) -> List[str]:
-        kwargs = ({} if bulk_build is None
-                  else {"bulk_vector_index_build": bulk_build})
+    def _argv(self, replace: Optional[bool] = None) -> List[str]:
+        kwargs = ({} if replace is None
+                  else {"vector_index_replace": replace})
         return ops_pass.harness_args({"name": "t", "k": 10, "ops": {}}, 16,
                                      "percona", None, "normalized", {},
                                      **kwargs)
 
-    def test_the_flag_is_emitted_only_when_the_bulk_build_is_broken(self):
+    def test_the_flag_is_emitted_only_when_the_replace_is_withdrawn(self):
         honest = FLAG in self._argv(False)
         mutant = FLAG in self._argv(True)
-        print(f"HONEST (bulk build broken) = {FLAG} emitted: {honest}")
-        print(f"MUTANT (bulk build works)  = {FLAG} emitted: {mutant}")
+        print(f"HONEST (replace withdrawn) = {FLAG} emitted: {honest}")
+        print(f"MUTANT (replace granted)   = {FLAG} emitted: {mutant}")
         assert honest != mutant, (
             "DEAD PROBE: the emission did not move with the parameter")
         assert honest is True
@@ -346,16 +409,48 @@ class TestTheDecisionIsPassedInAndNotImported:
     @pytest.mark.parametrize("engine", OTHER_ENGINES)
     def test_no_other_engine_gets_the_flag(self, engine):
         """Derived from each engine's own config, not from a literal: an
-        engine that declares nothing reads as "the bulk build works".
+        engine that declares neither key reads as "the replace works".
         """
-        from orchestrator.cli import _bulk_vector_index_build
+        from orchestrator.cli import _vector_index_replace
         cfg = _engine_cfg(engine)
         assert CAPABILITY not in (cfg.get("capabilities") or {}), engine
         argv = ops_pass.harness_args(
             {"name": "t", "k": 10, "ops": {}}, 16, engine, None, "normalized",
-            {}, bulk_vector_index_build=_bulk_vector_index_build(cfg))
+            {}, vector_index_replace=_vector_index_replace(cfg))
         print(f"{engine}: {FLAG} emitted: {FLAG in argv}")
         assert FLAG not in argv, engine
+
+    def test_villagesql_gets_both_flags_off_its_one_key(self):
+        """VillageSQL declares only the bulk build (false), so the replace
+        reading falls back to it and both flags are emitted. Its driver has no
+        replace hook and no repair path (churn is declined), so the second
+        flag reaches nothing -- harmless, and true of the engine.
+        """
+        from orchestrator.cli import (_bulk_vector_index_build,
+                                      _vector_index_replace)
+        cfg = _engine_cfg("villagesql")
+        argv = ops_pass.harness_args(
+            {"name": "t", "k": 10, "ops": {}}, 16, "villagesql", None,
+            "normalized", {},
+            bulk_vector_index_build=_bulk_vector_index_build(cfg),
+            vector_index_replace=_vector_index_replace(cfg))
+        assert "--no-bulk-vector-index-build" in argv
+        assert FLAG in argv
+
+    def test_the_percona_argv_carries_the_replace_flag_and_not_the_bulk_one(
+            self):
+        from orchestrator.cli import (_bulk_vector_index_build,
+                                      _vector_index_replace)
+        cfg = _engine_cfg("percona")
+        argv = ops_pass.harness_args(
+            {"name": "t", "k": 10, "ops": {}}, 16, "percona", None,
+            "normalized", {},
+            bulk_vector_index_build=_bulk_vector_index_build(cfg),
+            vector_index_replace=_vector_index_replace(cfg))
+        print(f"percona argv flags: "
+              f"{[a for a in argv if a.startswith('--no-')]}")
+        assert FLAG in argv
+        assert "--no-bulk-vector-index-build" not in argv
 
     @pytest.mark.parametrize("engine,want_flag",
                              [("percona", True), ("mariadb", False)])
@@ -365,9 +460,10 @@ class TestTheDecisionIsPassedInAndNotImported:
         fail on the break its own subject has, and that was measured.**
 
         It asserted `"bulk_build = _bulk_vector_index_build(engine_cfg)" in
-        src` -- and that line occurs TWICE in `cli.py`, once inside
-        `_ops_build_modes` and once inside `_run_unit`. Replacing the
-        `_run_unit` one with `bulk_build = True` left the whole suite
+        src` -- when that line occurred TWICE in `cli.py`, once inside
+        `_ops_build_modes` and once inside `_run_unit`, and when the repair
+        still rode on the bulk-build key. Replacing the `_run_unit` one with
+        `bulk_build = True` left the whole suite
         byte-identical (3264 passed, 5 skipped, exit 0) while percona's argv
         lost the flag entirely. `--build-mode incremental` still comes off
         `_ops_build_modes`, so the bulk build was still avoided and the ONLY
@@ -389,8 +485,10 @@ class TestTheDecisionIsPassedInAndNotImported:
         `tests/test_t3c_filtered.py::test_run_unit_puts_the_flags_on_the_real
         _command_line`.
 
-        Honest: percona's every unit carries the flag; mariadb's carries none.
-        Mutant (`_run_unit`'s `bulk_build` hard-wired to True, or the keyword
+        Honest: percona's every unit carries the flag AND builds `post` --
+            the split this file pins, on the real command line; mariadb's
+            carries no flag.
+        Mutant (`_run_unit`'s `replace` hard-wired to True, or the keyword
             dropped from the `harness_args` call): percona's units lose it and
             this fails naming the engine.
         """
@@ -438,13 +536,14 @@ class TestTheDecisionIsPassedInAndNotImported:
             assert "--build-mode" in argv
         if engine == "percona":
             modes = {argv[argv.index("--build-mode") + 1] for argv in seen}
-            assert modes == {"incremental"}, modes
+            assert modes == {"post"}, modes
 
     def test_the_reading_is_derived_inside_the_run_loop_not_assumed(self):
         """The structural half, scoped by AST to `_run_unit` alone.
 
-        `bulk_build = _bulk_vector_index_build(engine_cfg)` appears in two
-        functions, so a file-level substring test matches the wrong one. This
+        A file-level substring test matches the wrong function as soon as a
+        reading appears in two of them, which `bulk_build =
+        _bulk_vector_index_build(engine_cfg)` once did. This
         walks `_run_unit`'s own body and requires both halves there: the call
         that derives the value, and the keyword that hands it on.
         """
@@ -456,11 +555,11 @@ class TestTheDecisionIsPassedInAndNotImported:
         derives = [n for n in ast.walk(run_unit)
                    if isinstance(n, ast.Call)
                    and isinstance(n.func, ast.Name)
-                   and n.func.id == "_bulk_vector_index_build"]
+                   and n.func.id == "_vector_index_replace"]
         passes = [kw for n in ast.walk(run_unit)
                   if isinstance(n, ast.Call)
                   for kw in n.keywords
-                  if kw.arg == "bulk_vector_index_build"]
+                  if kw.arg == "vector_index_replace"]
         print(f"_run_unit: derives={len(derives)}, passes={len(passes)}")
         assert len(derives) == 1, (
             "_run_unit must derive the reading from the engine config "
@@ -479,8 +578,8 @@ class TestTheDecisionIsPassedInAndNotImported:
         base = ["--engine", "percona", "--dataset", "d", "--m", "16",
                 "--run-id", "r", "--host", "h", "--port", "3306",
                 "--output", "/tmp/out.jsonl"]
-        honest = parse_args(base + [FLAG]).no_bulk_vector_index_build
-        mutant = parse_args(base).no_bulk_vector_index_build
+        honest = parse_args(base + [FLAG]).no_vector_index_replace
+        mutant = parse_args(base).no_vector_index_replace
         print(f"HONEST (flag given)   = {honest}")
         print(f"MUTANT (flag omitted) = {mutant}")
         assert honest != mutant, "DEAD PROBE: the flag changes nothing"
@@ -491,7 +590,7 @@ class TestTheDecisionIsPassedInAndNotImported:
         hole big enough to drive the whole defect back through.**
 
         The hop under test is `main()` -> `driver_factory()` ->
-        `declare_bulk_vector_index_build`. `get_driver` takes only the
+        `declare_vector_index_replace`. `get_driver` takes only the
         connection spec and the driver class name, so the capability is
         applied after construction, through `getattr`.
 
@@ -521,7 +620,7 @@ class TestTheDecisionIsPassedInAndNotImported:
         class StubPercona(PerconaDriver):
             """The real declaration path; everything else stubbed.
 
-            A subclass rather than a mock, so `declare_bulk_vector_index_build`,
+            A subclass rather than a mock, so `declare_vector_index_replace`,
             `repair_path` and `maintain` are the shipped implementations and
             not a test's restatement of them.
             """
@@ -571,20 +670,20 @@ class TestTheDecisionIsPassedInAndNotImported:
         mutant = run(False)
         print(f"HONEST (flag given)   = repair_path "
               f"{honest.repair_path!r}, "
-              f"bulk_vector_index_build={honest.bulk_vector_index_build}")
+              f"vector_index_replace={honest.vector_index_replace}")
         print(f"MUTANT (flag omitted) = repair_path "
               f"{mutant.repair_path!r}, "
-              f"bulk_vector_index_build={mutant.bulk_vector_index_build}")
+              f"vector_index_replace={mutant.vector_index_replace}")
         assert honest.repair_path != mutant.repair_path, (
             "DEAD PROBE: the driver main() built came out the same either "
             "way, so this test does not observe the declaration being "
             "applied")
         assert honest.repair_path == "none"
-        assert honest.bulk_vector_index_build is False
+        assert honest.vector_index_replace is False
         assert honest.maintain() is None
         assert statements(honest) == [], statements(honest)
         assert mutant.repair_path == "index-replace"
-        assert mutant.bulk_vector_index_build is True
+        assert mutant.vector_index_replace is True
         assert mutant.maintain() == "ALTER TABLE (index replace)"
 
     def test_the_declaration_is_applied_inside_the_driver_factory(self):
@@ -614,48 +713,60 @@ class TestTheDecisionIsPassedInAndNotImported:
         assert len(getattrs) == 1, (
             f"expected exactly one {HOOK} lookup inside driver_factory; "
             f"found {len(getattrs)}")
-        # And it is guarded by nothing but the None check -- an `and False`
-        # or any extra condition would be a second test on that `if`.
+        # And each hook is guarded by nothing but its None check -- an
+        # `and False` or any extra condition would be a second test on that
+        # `if`. Two hooks now (the bulk-build one, which VillageSQL alone
+        # carries, and this one), so two ifs, both plain comparisons.
         guards = [n.test for n in ast.walk(factory) if isinstance(n, ast.If)]
-        assert len(guards) == 1, f"expected one if in driver_factory, {guards}"
-        assert isinstance(guards[0], ast.Compare), (
-            "the declaration must be guarded by the None check alone; a "
-            "compound condition is how `and False` hid from the source-string "
-            "version of this test")
+        assert len(guards) == 2, f"expected two ifs in driver_factory, {guards}"
+        for guard in guards:
+            assert isinstance(guard, ast.Compare), (
+                "each declaration must be guarded by the None check alone; a "
+                "compound condition is how `and False` hid from the "
+                "source-string version of this test")
 
     def test_every_engine_that_declares_it_has_a_driver_that_can_act_on_it(
             self):
         """The wiring fault, caught in the suite instead of in a run.
 
-        `harness/main.py` applies the capability through `getattr`, so a
-        driver without the hook silently ignores it. There is deliberately no
+        `harness/main.py` applies the reading through `getattr`, so a driver
+        without the hook silently ignores it. There is deliberately no
         runtime warning -- it would fire once per client connection, up to 32
         in the concurrency pool, for what is a wiring fault -- and this is the
-        check that replaces it. If a second engine ever declares the
-        capability false, it fails here rather than publishing a repair that
-        did not happen.
+        check that replaces it.
+
+        The set that MATTERS is engines whose host reading withdraws the
+        replace AND whose driver class has a repair path to withdraw: a
+        driver with `repair_path = "none"` (VillageSQL, whose churn is
+        declined) runs no repair for the flag to stop. If any other engine
+        ever lands in that set without the hook, it fails here rather than
+        publishing a repair that did not happen.
         """
         from harness.drivers.postgres import _driver_classes
         from orchestrator import engines as engines_mod
-        from orchestrator.cli import KNOWN_ENGINES
+        from orchestrator.cli import KNOWN_ENGINES, _vector_index_replace
         classes = _driver_classes()
-        declaring, actionable = [], []
+        withdrawing, at_risk, actionable = [], [], []
         for engine in sorted(KNOWN_ENGINES):
-            cfg = _engine_cfg(engine)
-            if (cfg.get("capabilities") or {}).get(CAPABILITY, True):
+            if _vector_index_replace(_engine_cfg(engine)):
                 continue
-            declaring.append(engine)
+            withdrawing.append(engine)
             cls = classes[engines_mod.get(engine).driver]
+            if cls.repair_path == "none":
+                continue
+            at_risk.append(engine)
             if hasattr(cls, HOOK):
                 actionable.append(engine)
-        print(f"engines declaring {CAPABILITY}: false = {declaring}")
-        print(f"of those, drivers carrying {HOOK}() = {actionable}")
-        assert declaring == ["percona", "villagesql"], declaring
-        assert actionable == declaring, (
-            f"{sorted(set(declaring) - set(actionable))} declare the bulk "
-            f"build broken but their driver cannot act on it, so the "
-            f"declaration reaches nothing and whatever repair that driver "
-            f"runs is still published as a repair")
+        print(f"engines whose replace reading is false = {withdrawing}")
+        print(f"of those, with a repair path = {at_risk}; "
+              f"carrying {HOOK}() = {actionable}")
+        assert withdrawing == ["percona", "villagesql"], withdrawing
+        assert at_risk == ["percona"], at_risk
+        assert actionable == at_risk, (
+            f"{sorted(set(at_risk) - set(actionable))} withdraw the replace "
+            f"but their driver cannot act on it, so the declaration reaches "
+            f"nothing and whatever repair that driver runs is still published "
+            f"as a repair")
 
 
 # ---------------------------------------------------------------------------
@@ -667,8 +778,8 @@ class TestTheDriverDeclaresNoRepairPath:
     def test_the_repair_path_is_withdrawn_on_the_instance(self):
         honest = percona_driver(False).repair_path
         mutant = percona_driver(True).repair_path
-        print(f"HONEST (bulk build broken) = repair_path {honest!r}")
-        print(f"MUTANT (bulk build works)  = repair_path {mutant!r}")
+        print(f"HONEST (replace withdrawn) = repair_path {honest!r}")
+        print(f"MUTANT (replace granted)   = repair_path {mutant!r}")
         assert honest != mutant, (
             "DEAD PROBE: the repair path did not move with the declaration")
         assert honest == EngineDriver.repair_path == "none", (
@@ -702,9 +813,9 @@ class TestTheDriverDeclaresNoRepairPath:
         honest = percona_driver(False)
         mutant = percona_driver(True)
         honest_what, mutant_what = honest.maintain(), mutant.maintain()
-        print(f"HONEST (bulk build broken) = maintain() -> {honest_what!r}, "
+        print(f"HONEST (replace withdrawn) = maintain() -> {honest_what!r}, "
               f"{len(statements(honest))} statement(s)")
-        print(f"MUTANT (bulk build works)  = maintain() -> {mutant_what!r}, "
+        print(f"MUTANT (replace granted)   = maintain() -> {mutant_what!r}, "
               f"{len(statements(mutant))} statement(s)")
         assert (honest_what, statements(honest)) != \
                (mutant_what, statements(mutant)), "DEAD PROBE"
@@ -731,7 +842,7 @@ class TestTheDriverDeclaresNoRepairPath:
         key to attempt the repair on purpose.
         """
         bare = percona_driver(None)
-        assert bare.bulk_vector_index_build is True
+        assert bare.vector_index_replace is True
         assert bare.repair_path == "index-replace"
         assert bare.maintain() == "ALTER TABLE (index replace)"
         assert any(s.startswith("ALTER") for s in statements(bare))
@@ -743,7 +854,7 @@ class TestTheDriverDeclaresNoRepairPath:
         """
         driver = percona_driver(False)
         assert driver.repair_path == "none"
-        driver.declare_bulk_vector_index_build(True)
+        driver.declare_vector_index_replace(True)
         assert driver.repair_path == "index-replace"
         assert driver.maintain() == "ALTER TABLE (index replace)"
 
@@ -754,6 +865,17 @@ class TestTheDriverDeclaresNoRepairPath:
         for cls in (MariaDBDriver, AliSQLDriver):
             assert not hasattr(cls, HOOK), cls.__name__
             assert cls.repair_path == "none", cls.__name__
+
+    def test_percona_no_longer_gates_the_repair_on_the_bulk_build(self):
+        """The gate was renamed, not duplicated. A `PerconaDriver` that still
+        carried `declare_bulk_vector_index_build` would let
+        `--no-bulk-vector-index-build` withdraw -- or, worse, its absence
+        restore -- the repair alongside the new hook, and the two keys would
+        be one again by the back door.
+        """
+        assert not hasattr(PerconaDriver, "declare_bulk_vector_index_build")
+        assert not hasattr(PerconaDriver, "bulk_vector_index_build")
+        assert PerconaDriver.vector_index_replace is True
 
 
 # ---------------------------------------------------------------------------
@@ -773,8 +895,8 @@ class _PerconaRepairFake(FakeDriver):
     the real driver sent.
     """
 
-    def __init__(self, *args, bulk_build: Optional[bool] = None, **kwargs):
-        self.percona = percona_driver(bulk_build)
+    def __init__(self, *args, replace: Optional[bool] = None, **kwargs):
+        self.percona = percona_driver(replace)
         super().__init__(*args, **kwargs)
         # After `super().__init__`, which sets `repair_path` from the fake's
         # own knob. The workload stamps this onto the "before" record BEFORE
@@ -786,25 +908,25 @@ class _PerconaRepairFake(FakeDriver):
         return self.percona.maintain()
 
 
-def _loaded(dataset, bulk_build: Optional[bool]) -> _PerconaRepairFake:
+def _loaded(dataset, replace: Optional[bool]) -> _PerconaRepairFake:
     from harness import datasets as ds
     driver = _PerconaRepairFake(dim=dataset.dim, metric=dataset.metric,
-                                bulk_build=bulk_build)
+                                replace=replace)
     driver.connect()
     driver.create_schema(index_spec(dataset))
     driver.load(dataset.train, ds.assign_tags(N_ROWS))
     return driver
 
 
-def _run_churn(tmp_path, dataset, bulk_build: Optional[bool],
+def _run_churn(tmp_path, dataset, replace: Optional[bool],
                fractions: Sequence[float] = (0.10, 0.25)):
     """One churn phase, and everything it wrote."""
-    recorder = records.Recorder(str(tmp_path / f"ops-{bulk_build}.jsonl"))
+    recorder = records.Recorder(str(tmp_path / f"ops-{replace}.jsonl"))
     ctx = RunContext(run_id="e13", resource_pass="normalized",
                      recorder=recorder, engine="percona", engine_tag="pin",
                      march="x86-64-v3", k=K,
-                     cache_dir=str(tmp_path / f"cache-{bulk_build}"))
-    driver = _loaded(dataset, bulk_build)
+                     cache_dir=str(tmp_path / f"cache-{replace}"))
+    driver = _loaded(dataset, replace)
     try:
         cw.run(ctx, driver, dataset, index_spec(dataset), ef_search=512,
                fractions=fractions, max_queries=N_QUERIES,
@@ -840,7 +962,7 @@ class TestNoPostMaintenanceRecordIsWrittenAtAll:
             self, tmp_path, dataset):
         driver, written = _run_churn(tmp_path, dataset, False)
         states = _states(written)
-        print(f"HONEST (bulk build broken) = maintenance_state values "
+        print(f"HONEST (replace withdrawn) = maintenance_state values "
               f"{states}, cursor statements {statements(driver.percona)}")
         assert states, "non-vacuity: the churn phase wrote no step records"
         assert set(states) == {"before"}, states
@@ -877,7 +999,7 @@ class TestNoPostMaintenanceRecordIsWrittenAtAll:
         states = _states(written)
         alters = [s for s in statements(driver.percona)
                   if s.startswith("ALTER")]
-        print(f"MUTANT (bulk build works) = maintenance_state values "
+        print(f"MUTANT (replace granted)  = maintenance_state values "
               f"{states}, ALTERs sent {len(alters)}")
         assert states.count("after") == 2, states
         after = [r for r in written

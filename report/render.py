@@ -4349,6 +4349,34 @@ def _build_mode_rows(summary: Optional[Dict[str, Any]]) -> List[List[str]]:
             "either, so `build_mode` is a comparison within one engine",
             consequence,
         ])
+    ann_engines = (summary or {}).get("ann_engines") or []
+    if "percona" in ann_engines and ("percona" in bulk or "percona" in either):
+        # **THE TWO PATHS BUILD PERCONA DIFFERENTLY BY DEFAULT, and the rows
+        # above cannot say so because they read only ops `index_build`
+        # records.** Since `capabilities.bulk_vector_index_build` became true
+        # at the current pin, an ops unit that names no mode builds `post`;
+        # the ann overlay module has no `build_mode` and declares the index in
+        # CREATE TABLE, so every recall curve is an incremental build. At
+        # 60,000 fashion-mnist rows the two gave the same recall (0.9714 vs
+        # 0.9709 at ef_search 10), which is why this is a disclosure and not
+        # a refusal -- but a reader joining §4's curve to §5's build cost is
+        # joining two different builds, and has to be told.
+        #
+        # Two conditions, both found in review. Percona's ops units swept
+        # over BOTH modes land in `either`, not `bulk`, and that is exactly
+        # the run in which a reader compares modes against the curve, so
+        # `either` counts. And an ops-only report has no curve to be an
+        # incremental build of, so the row needs Percona's recall records.
+        ops_side = ("some of its ops units bulk-built"
+                    if "percona" in either else "its ops units bulk-built")
+        rows.append([
+            f"Percona Server: {ops_side}; its recall curves are an "
+            "incremental build",
+            "The ann phase declares the index in CREATE TABLE and has no "
+            "build mode, so the recall/QPS curves come from an index grown "
+            "row by row, while the ops figures for a bulk-built unit (build "
+            "cost, concurrency, filtered, churn) come from the bulk build "
+            "the ops pass ran."])
     return rows
 
 

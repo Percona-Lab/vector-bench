@@ -1069,37 +1069,44 @@ class PerconaDriver(MySQLFamilyDriver):
     #: record the gauge instead"; until this hook existed, nothing did.
     status_gauges: Tuple[str, ...] = ("Innodb_hnsw_memory_used",)
 
-    #: Whether the server's BULK vector index build works at the pinned
-    #: version. Host-supplied with a class-level default, because this file
-    #: cannot know it: the fact lives in
-    #: `capabilities.bulk_vector_index_build` in `config/engines/percona.yml`,
+    #: Whether replacing the vector index on a table that already has one is
+    #: a repair this run may publish. Host-supplied with a class-level
+    #: default, because this file cannot know it: the fact lives in
+    #: `capabilities.vector_index_replace` in `config/engines/percona.yml`,
     #: and `harness/` must not import `orchestrator` -- each runs in a
     #: container that mounts only itself. `harness/main.py` passes it in on
-    #: the command line, the way it passes `--driver`, and
-    #: `declare_bulk_vector_index_build` below applies it.
+    #: the command line (`--no-vector-index-replace`), the way it passes
+    #: `--driver`, and `declare_vector_index_replace` below applies it.
     #:
     #: **True, because the absence of a declaration has to mean today's
     #: behaviour exactly.** It is the same reading
-    #: `orchestrator/cli.py:_bulk_vector_index_build` gives the capability --
-    #: one fact with one default on both sides of the container boundary -- so
-    #: the six engines that declare nothing are untouched, and a hand-run
-    #: harness or a `run-benchmark.sh lab` script still gets the repair with
-    #: no flags.
-    bulk_vector_index_build: bool = True
+    #: `orchestrator/cli.py:_vector_index_replace` gives an engine that
+    #: declares neither key -- one fact with one default on both sides of the
+    #: container boundary -- so a hand-run harness or a `run-benchmark.sh
+    #: lab` script still gets the repair with no flags.
+    #:
+    #: **This used to be `bulk_vector_index_build`, set from that capability,
+    #: and the rename is the fix rather than tidying.** The bulk build
+    #: (`create_index`, `build_mode: post`) and the repair (`maintain()`) are
+    #: different statements on different tables, and since 2026-11-03 they
+    #: have different verdicts at the pin: the first is verified, the second
+    #: is not. A gate named after the first would have reopened the second
+    #: the day the first was enabled.
+    vector_index_replace: bool = True
 
-    def declare_bulk_vector_index_build(self, supported: bool) -> None:
-        """Withdraw the repair path when the server cannot execute it.
+    def declare_vector_index_replace(self, supported: bool) -> None:
+        """Withdraw the repair path while the index replace is unverified.
 
-        **`maintain()`'s `ALTER TABLE … DROP KEY vi, ADD VECTOR KEY …,
-        ALGORITHM=INPLACE` is the same statement `create_index` issues for
-        `build_mode: post`**, which `capabilities.bulk_vector_index_build:
-        false` records as killing the server at the pinned `source.tag`. PR
-        #36 stopped the build-mode default from reaching that path and did not
-        touch this one, and the difference between the two failures is why
-        this hook exists rather than a second warning:
+        **`maintain()` issues `ALTER TABLE … DROP KEY vi, ADD VECTOR KEY …,
+        ALGORITHM=INPLACE` on a table that already HAS a vector index.**
+        `create_index` (`build_mode: post`) issues `ALTER TABLE … ADD VECTOR
+        KEY …, ALGORITHM=INPLACE` on one that has none. At the old pin
+        (9.7.1-1) both failed, in opposite ways, and one capability --
+        `bulk_vector_index_build: false` -- withdrew both:
 
-        * the bulk BUILD fails loudly -- `Lost connection to server during
-          query`, the ops unit dies, nothing is published;
+        * the bulk BUILD failed loudly -- `Lost connection to server during
+          query` in one of two runs on the same image, the ops unit dies,
+          nothing is published;
         * the REPAIR failed silently. On `full-20261015-215006`
           (`ops-percona-*.jsonl`, phase `churn`) the ALTER returned in
           **1-4 ms** -- `maintenance_s` was 0.001 seventeen times, 0.002
@@ -1116,25 +1123,33 @@ class PerconaDriver(MySQLFamilyDriver):
           `after ALTER TABLE (index replace) (0.0 s)`: the degraded index,
           measured twice, presented as a repair result.
 
+        **At the current pin (9.7.2-2) the bulk build was re-verified and the
+        replace was not.** 25 of 25 bulk builds completed on 2026-11-03
+        (profile `percona-bulk-repro`), and a 60,000-row post/incremental
+        comparison gave the same index quality, so
+        `bulk_vector_index_build` is true again. Nobody has re-run the
+        replace, and a 1-4 ms no-op is exactly the failure that cannot be
+        seen without re-running it -- so `vector_index_replace: false` keeps
+        it withdrawn on its own key.
+
         A 1-4 ms DDL has not rebuilt the graph, so there is nothing here to
         time. Declaring **no repair path** is the honest answer, and it is
-        already the shape five of seven engines use: `churn.py`'s
+        already the shape most engines use: `churn.py`'s
         `_record_maintenance` returns early on a non-`str`, so only the
         "before" record is written and no `maintenance_state: "after"` record
         exists to be read as a repair.
 
-        **NO EXPLICIT OPT-IN TO ATTEMPT IT ANYWAY, and that is a decision
-        rather than an omission.** PR #36 gave the build mode one -- a profile
-        that writes `percona_build_modes: [post]` is honoured with a warning
-        -- so that whoever tests a newer Percona for the fix is not blocked by
-        the engine config. Three things make the repair path different:
+        **NO EXPLICIT PER-RUN OPT-IN TO ATTEMPT IT ANYWAY, and that is a
+        decision rather than an omission.** The build mode has one -- a
+        profile that writes `percona_build_modes: [post]` is honoured even on
+        an engine that declares its bulk build broken -- and three things
+        make the repair path different:
 
         1. `build_mode` is an EXISTING profile axis. Honouring it is honouring
-           a request a profile can already make, and refusing it would leave
-           the run's records disagreeing with the profile that asked. Nothing
-           selects a repair path, so an opt-in here would mean INVENTING a
-           profile key whose only purpose is to turn on a measurement already
-           known to be false.
+           a request a profile can already make. Nothing selects a repair
+           path, so an opt-in here would mean INVENTING a profile key whose
+           only purpose is to turn on a measurement already known to be false
+           at the last pin it was measured at.
         2. The two failures are not the same kind. The bulk build fails
            loudly and publishes nothing; this one publishes a credible number
            that is wrong. An escape hatch whose misuse produces a crash is a
@@ -1142,27 +1157,29 @@ class PerconaDriver(MySQLFamilyDriver):
            a report is a trap, and CLAUDE.md's first paragraph is about
            exactly that distinction.
         3. **Two escape hatches already exist and neither needs a new key.**
-           The capability itself is one: a tester moving to a newer server is
-           editing `source.tag` in `config/engines/percona.yml` anyway, and
-           flipping `bulk_vector_index_build: true` is one line in the file
-           they already have open -- whereas a per-run override could leave
-           the run's `repair_path: index-replace` contradicting the config's
-           own declaration. The other is `run-benchmark.sh lab`, whose
-           documented job is "diagnose, don't measure": the class default
-           above is True, so a lab script that constructs this driver and
-           calls `maintain()` gets the ALTER with no flag at all.
+           The capability itself is one: flipping `vector_index_replace: true`
+           in `config/engines/percona.yml` is one line, to be written once a
+           replace at the pin has been shown to change `index_bytes` and take
+           time on the order of a build -- whereas a per-run override could
+           leave the run's `repair_path: index-replace` contradicting the
+           config's own declaration. The other is `run-benchmark.sh lab`,
+           whose documented job is "diagnose, don't measure": the class
+           default above is True, so a lab script that constructs this driver
+           and calls `maintain()` gets the ALTER with no flag at all -- which
+           is how the re-test should be done.
 
         An INSTANCE attribute shadowing the class one, which is the shape
         `tests/fake_driver.py` already uses for this key. The class keeps
         declaring `"index-replace"` on purpose: that IS this engine's repair
         mechanism, `docs/10-rollout.md` names it as one of the two, and what
-        the pinned server cannot do is EXECUTE it. The record has to carry
-        what this run could actually measure, so the instance says "none" --
-        the base class's default, `harness/drivers/base.py:258`.
+        the pinned server has not been shown to do is EXECUTE it. The record
+        has to carry what this run could actually measure, so the instance
+        says "none" -- the base class's default,
+        `harness/drivers/base.py:258`.
         """
-        self.bulk_vector_index_build = bool(supported)
+        self.vector_index_replace = bool(supported)
         self.repair_path = (type(self).repair_path
-                            if self.bulk_vector_index_build else "none")
+                            if self.vector_index_replace else "none")
 
     def effective_ef(self, ef: int, k: int) -> int:
         """`max(ef, k)` -- the clamp is the variable's own contract.
@@ -1290,25 +1307,25 @@ class PerconaDriver(MySQLFamilyDriver):
         and the ALTER takes a SHARED metadata lock -- readers continue, every
         writer stops for the duration.
 
-        **None of that happens when the host says the bulk build is broken.**
-        The statement below IS the bulk build, so an engine whose
-        `capabilities.bulk_vector_index_build` is false has no repair path to
-        run, and returning `None` before the cursor is touched is what keeps
-        the degraded index from being measured twice and published as
-        repaired. See `declare_bulk_vector_index_build`, which carries the
-        measured evidence.
+        **None of that happens when the host says the replace is
+        unverified.** An engine whose `capabilities.vector_index_replace` is
+        false -- or, declaring none, whose `bulk_vector_index_build` is false
+        -- has no repair path to run, and returning `None` before the cursor
+        is touched is what keeps the degraded index from being measured twice
+        and published as repaired. See `declare_vector_index_replace`, which
+        carries the measured evidence.
         """
-        if not self.bulk_vector_index_build:
+        if not self.vector_index_replace:
             # THIS PRINT IS THE ARTEFACT. It reaches the run's phase log,
             # which is the only place a reader can learn that the repair was
             # withdrawn and why -- nothing writes the harness argv anywhere,
             # so the flag itself leaves no trace a reader will ever see. See
-            # `declare_bulk_vector_index_build` for the full evidence.
-            print(f"[{self.name}] no repair path at this version: the index "
-                  f"replace is the same ALTER TABLE ... ADD VECTOR KEY ... "
-                  f"ALGORITHM=INPLACE that capabilities."
-                  f"bulk_vector_index_build: false records as killing the "
-                  f"server, and on full-20261015-215006 it returned in "
+            # `declare_vector_index_replace` for the full evidence.
+            print(f"[{self.name}] no repair path at this version: "
+                  f"capabilities.vector_index_replace is false. This "
+                  f"ALTER TABLE ... DROP KEY vi, ADD VECTOR KEY ... "
+                  f"ALGORITHM=INPLACE has not been re-tested at this pin, and "
+                  f"at the old one (full-20261015-215006) it returned in "
                   f"1-4 ms with the index byte-identical either side of it "
                   f"in all 20 before/after pairs. Measuring the degraded "
                   f"index again and labelling it repaired is worse than "

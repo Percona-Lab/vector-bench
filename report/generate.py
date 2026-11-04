@@ -439,6 +439,10 @@ def summarize(records: List[Dict[str, Any]],
     summary: Dict[str, Any] = {
         "datasets": datasets,
         "engines": engines,
+        # Which engines have a recall curve at all, for a §3 row that is only
+        # true when one exists (`render._build_mode_rows`'s Percona row).
+        "ann_engines": sorted({r["engine"] for r in recall_records
+                               if r.get("engine")}),
         "per_dataset": {},
         "plan_failures": [],
         "short_result_cases": [],

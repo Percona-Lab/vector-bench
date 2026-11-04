@@ -388,45 +388,78 @@ capabilities:
   # percona_vector suite sets an isolation level to make vector DML work.
   requires_read_committed: false
   filtered_search: true
-  # FALSE AT THIS PIN, AND IT IS A SERVER DEFECT RATHER THAN A MISSING
-  # FEATURE. `ALTER TABLE ... ADD VECTOR KEY ... ALGORITHM=INPLACE` -- the
-  # statement `PerconaDriver.create_index` issues for `build_mode: post` --
-  # KILLS THE SERVER. OBSERVED on the build host at the pinned
-  # `source.tag`, on fashion-mnist-784-euclidean, 20,000 rows subset, M=16,
-  # ef_construction=200, normalized pass: the load completed in 7.7 s at
-  # 2,583 rows/s, the ALTER was issued, and the next thing the client saw was
-  # `mariadb.InterfaceError: Lost connection to server during query` from
-  # `harness/drivers/mysql_family.py`'s `create_index`.
+  # TRUE AT THIS PIN; IT WAS FALSE AT THE OLD ONE, AND ONLY HALF OF WHAT THE
+  # FALSE WITHDREW COMES BACK WITH IT.
   #
-  # The same corpus, the same M and the same ef_construction build and serve
-  # correctly in `incremental` mode, where the graph is maintained per INSERT
-  # -- so this is the BULK path alone, not the index, the dimensionality or
-  # the dataset. `incremental` reached recall@10=0.9895 at the smallest grid
-  # ef_search and 8,263 qps at four clients in the same run that `post` died
-  # in.
+  # WHAT THE KEY DRIVES. `ALTER TABLE t1 ADD VECTOR KEY vi (...)
+  # ALGORITHM=INPLACE` on a table loaded with NO vector index -- the statement
+  # `PerconaDriver.create_index` issues for `build_mode: post` -- read through
+  # the single reader `orchestrator/cli.py:_bulk_vector_index_build`. The ops
+  # loop picks the DEFAULT build mode from it (true -> `post`, false ->
+  # `incremental`); an explicit mode in a profile is honoured either way, with
+  # a warning when the key is false. It does NOT drive the ann phase: the ann
+  # overlay module declares the index in CREATE TABLE, i.e. builds
+  # incrementally, and has no `build_mode` at all.
   #
-  # What this key does. TWO consumers, both off the single reader
-  # `orchestrator/cli.py:_bulk_vector_index_build`:
+  # THE OLD PIN (9.7.1-1, built -march=native), 2026-10-15. On
+  # fashion-mnist-784-euclidean, 20,000-row subset, M=16, ef_construction=200,
+  # normalized pass, the same profile on the same image: run
+  # `percona-20261015-183321` built the index in 7.6 s, and run
+  # `percona-20261015-203911` loaded in 7.7 s at 2,583 rows/s, issued the
+  # ALTER, and the next thing the client saw was
+  # `mariadb.InterfaceError: Lost connection to server during query` -- the
+  # ALTER KILLED THE SERVER. `incremental` on the same corpus and knobs built
+  # and served correctly in the same run (recall@10=0.9895 at the smallest
+  # grid ef_search, 8,263 qps at four clients), so it was the BULK path alone.
+  # This key was false from then until the re-test below, and every profile
+  # that named no mode built Percona incrementally.
   #
-  #   1. The ops loop picks the DEFAULT build mode from it: `post` would
-  #      crash this engine in every profile that names no mode, `main` and
-  #      `smoke` included. An explicit `post` is still honoured, with a
-  #      warning, so a newer Percona can be tested without editing this file.
-  #   2. `ops_pass.harness_args` emits `--no-bulk-vector-index-build`, which
-  #      makes `PerconaDriver` declare NO REPAIR PATH for churn.
-  #      `maintain()` issues this same `ADD VECTOR KEY ... ALGORITHM=INPLACE`
-  #      statement, so while the bulk build is broken the repair cannot work
-  #      either. Measured on `full-20261015-215006`: 1-4 ms, `index_bytes`
-  #      identical to the byte and recall identical to five decimals in all
-  #      20 before/after pairs, published as
-  #      `after ALTER TABLE (index replace) (0.0 s)`. Unlike (1) this has NO
-  #      per-run opt-in: no profile key selects a repair path, and adding one
-  #      would only be a way to publish that false row again.
+  # THE CURRENT PIN (9.7.2-2, `source.tag` above, x86-64-v3), 2026-11-03, on
+  # a laptop (i9-12900HK), profile `percona-bulk-repro` (the same corpus,
+  # 20,000 rows, 1 load thread, M=16, ef_construction=200, normalized): 25 OF
+  # 25 ATTEMPTS BUILT. The ALTER took 3.4-5.8 s (median 3.8 s); mysqld's error
+  # log held no error, signal or assertion, and no core was written with
+  # `core_pattern` set to `core.%p`. Profile `percona-build-modes` then built
+  # the full 60,000 rows both ways at this pin:
   #
-  # Flip it to `true` when the server is fixed and BOTH come back:
-  # `config/profiles/percona.yml` gets its second ops unit, and churn
-  # measures a real before/after maintenance pair again.
-  bulk_vector_index_build: false
+  #                 load+build         index    recall@10  QPS 1/4 clients
+  #   post          180.9 s + 14.1 s   289 MB   0.9714     5,895 / 19,233
+  #   incremental   288 s              256 MB   0.9709     5,599 / 18,103
+  #
+  # (recall at ef_search 10), and filtered recall tag 10%/1% 0.988/0.996 vs
+  # 0.989/0.997, ctag 11%/1.5% 0.987/0.924 vs 0.988/0.928 -- the same index
+  # quality, built in two thirds of the time. 25 clean builds on one machine
+  # bound how rare the old crash can be at this pin without proving it gone,
+  # which is why the incident stays recorded here.
+  bulk_vector_index_build: true
+  # FALSE, AND DELIBERATELY NOT FLIPPED WITH THE KEY ABOVE: it is a different
+  # statement, and it is the one that failed silently.
+  #
+  # The churn REPAIR, `PerconaDriver.maintain()`, issues `ALTER TABLE t1 DROP
+  # KEY vi, ADD VECTOR KEY ..., ALGORITHM=INPLACE` on a table that ALREADY has
+  # the index. Until this key existed it was withdrawn by
+  # `bulk_vector_index_build: false` above, because both were one ALTER.
+  # They are not one test. At the old pin, on `full-20261015-215006`, the
+  # replace returned in 1-4 ms with `index_bytes` identical to the byte and
+  # recall identical in all 20 before/after pairs -- a no-op, which the
+  # report published as `after ALTER TABLE (index replace) (0.0 s)`. NOTHING
+  # ABOUT IT HAS BEEN RE-TESTED AT THE CURRENT PIN: the 25 builds above are
+  # the add on an unindexed table, not the replace.
+  #
+  # Read by `orchestrator/cli.py:_vector_index_replace` (which falls back to
+  # `bulk_vector_index_build` for an engine that declares no such key, so no
+  # other engine moved); `ops_pass.harness_args` emits
+  # `--no-vector-index-replace`, `PerconaDriver.declare_vector_index_replace`
+  # sets `repair_path` to "none", and `maintain()` runs nothing, so churn
+  # writes its "before" record and no "after" one. No per-run opt-in exists,
+  # for the reasons that hook's docstring gives.
+  #
+  # FLIP IT TO `true` only after a replace at this pin has been run by hand
+  # (`run-benchmark.sh lab`, where the driver's class default issues it) and
+  # shown to be a real rebuild: `index_bytes` that changes across it, a
+  # duration on the order of the bulk build above (seconds at 20,000 rows,
+  # not milliseconds), and recall that moves on a churned table.
+  vector_index_replace: false
 
 # Percona's optimizer CAN decline the index, but never for cost reasons, and
 # the distinction decides what this guard is protecting against.

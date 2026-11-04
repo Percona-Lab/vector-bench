@@ -979,17 +979,20 @@ step and carry `extra.repair_path = "none"`; pgvector carries
 
 **Percona Server belongs in the second list at its pinned version, and a
 reader looking for it in either list would until now have found it in
-neither.** Its driver declares the `"index-replace"` repair mechanism, but
-that mechanism is the same `ALTER TABLE … ADD VECTOR KEY … ALGORITHM=INPLACE`
-that `config/engines/percona.yml`'s `capabilities.bulk_vector_index_build:
-false` records as killing the server at this pin. Measured on
-`full-20261015-215006`, it returned in 1–4 ms and changed nothing: identical
+neither.** Its driver declares the `"index-replace"` repair mechanism, an
+`ALTER TABLE … DROP KEY vi, ADD VECTOR KEY … ALGORITHM=INPLACE` on the
+already-indexed table. Measured on `full-20261015-215006`, at the old pin
+(9.7.1-1), it returned in 1–4 ms and changed nothing: identical
 `index_bytes` to the byte and identical recall to five decimals in all 20
-before/after pairs. The host therefore tells the harness to withdraw the
-repair path, Percona Server writes **one** record per step carrying
-`extra.repair_path = "none"`, and no `"after"` record exists to be read as a
-repair. If `capabilities.bulk_vector_index_build` is ever flipped to `true`,
-it moves back to the first list with no other change. `OPTIMIZE TABLE` is not used for MHNSW or VIDX: at 1M rows
+before/after pairs. It has not been re-tested at the current pin, so
+`config/engines/percona.yml` declares `capabilities.vector_index_replace:
+false`, the host tells the harness to withdraw the repair path, Percona Server
+writes **one** record per step carrying `extra.repair_path = "none"`, and no
+`"after"` record exists to be read as a repair. That key is separate from
+`capabilities.bulk_vector_index_build`, which is `true` at the current pin and
+decides only the ops build mode: re-verifying the bulk build does not restore
+the repair. If `vector_index_replace` is ever flipped to `true`, Percona moves
+back to the first list with no other change. `OPTIMIZE TABLE` is not used for MHNSW or VIDX: at 1M rows
 it rebuilds the whole vector index, which is a separate experiment and not a
 churn step.
 

@@ -1344,22 +1344,21 @@ class TestTheOpsPathDoesSupportBothBuildModes:
     profile's headline axis would have been silently inert on both paths.
     """
 
-    def test_the_profile_declares_the_one_measurable_mode(self):
-        """It declared `[post, incremental]` until `post` was found to kill
-        the server at the pinned version -- see
+    def test_the_profile_declares_both_modes_and_the_capability_agrees(self):
+        """It declared `[post, incremental]`, was cut to `[incremental]` when
+        `post` was found to kill the server at the old pin (9.7.1-1), and is
+        back to both since the current pin built it 25 times out of 25 -- see
         `capabilities.bulk_vector_index_build` in
-        `config/engines/percona.yml` for the reproduction. The axis is down to
-        its measurable half, and this assertion is what stops the broken half
-        being reinstated without the capability being flipped first.
+        `config/engines/percona.yml`. The profile and the capability have to
+        move together: `post` in the profile with the capability false would
+        be the warned-and-honoured crash path in a shipped profile.
         """
         from orchestrator.config import load_profile
         from orchestrator.config import load_engine
-        assert load_profile("percona")["ops"]["percona_build_modes"] == [
-            "incremental"]
-        # Tied to the reason rather than to the value: if someone restores
-        # `post` because the server was fixed, the capability has to say so.
+        modes = load_profile("percona")["ops"]["percona_build_modes"]
+        assert modes == ["post", "incremental"]
         caps = load_engine("percona").get("capabilities", {}) or {}
-        assert caps.get("bulk_vector_index_build") is False
+        assert caps.get("bulk_vector_index_build") is True
 
     def test_the_key_lives_under_ops_where_the_ann_renderer_cannot_see_it(self):
         """**This assertion was inverted, and the inversion was a defect that
@@ -1655,6 +1654,46 @@ class TestAnUnmeasuredIngestRateIsNamedAndNotModelled:
         # gap and drops the consequence.
         _prose("the real cost is higher than the printed total", out)
 
+    def test_the_post_rate_note_follows_the_engines_own_default(
+            self, monkeypatch):
+        """The note that Percona's `post` ops units are priced at its
+        incremental rate fires when the plan runs `post` units. A profile
+        that names no modes gets the ENGINE's default, so it must follow
+        `capabilities.bulk_vector_index_build`: a literal `["post"]` default
+        (found in review) would keep the note after the key was flipped back
+        to false, describing `post` units the run no longer builds."""
+        import io
+        from contextlib import redirect_stdout
+        from orchestrator import config as config_mod
+        from orchestrator.config import load_profile
+        from orchestrator.estimate import print_load_estimate
+        profile = load_profile("smoke")
+        real = config_mod.load_engine
+
+        def printed(bulk):
+            def load(name):
+                cfg = real(name)
+                if name == "percona":
+                    cfg = dict(cfg)
+                    cfg["capabilities"] = dict(cfg.get("capabilities") or {},
+                                               bulk_vector_index_build=bulk)
+                return cfg
+            monkeypatch.setattr(config_mod, "load_engine", load)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                print_load_estimate(profile, ["percona"],
+                                    list(profile["datasets"]),
+                                    ["normalized"], ["ann", "ops"])
+            return "ops ingest is charged at its measured incremental" in \
+                _flat(buf.getvalue())
+
+        honest, mutant = printed(True), printed(False)
+        print(f"HONEST (bulk true)  note={honest}")
+        print(f"MUTANT (bulk false) note={mutant}")
+        assert honest, "the current default is post; the note is owed"
+        assert not mutant, ("with the key false the default is incremental "
+                            "and no post unit runs")
+
     def test_the_churn_term_does_not_charge_an_unmeasured_engine_a_duration(
             self):
         """`typical` stays 0.0 and the basis says why, which is what
@@ -1916,13 +1955,11 @@ class TestEveryShippedProfileRenders:
             body = ann_pass.render_config("percona", profile, resources,
                                           resource_pass)
             assert sorted(body["float"]["any"][0]["run_groups"]) == ["innodb"]
-        # And the ops axis is one unit, not because the key move failed to
-        # preserve two -- it did, and `test_the_estimate_counts_both_modes_as_
-        # two_ops_units` still proves the estimator counts two when two are
-        # asked for -- but because the profile now asks for one. `post` kills
-        # the server at this pin; the capability in
-        # `config/engines/percona.yml` carries the evidence.
-        assert est_mod._ops_units(profile, "percona") == 1
+        # And the ops axis is two units again. It was one while `post` killed
+        # the server at the old pin and the profile asked for `incremental`
+        # alone; the capability in `config/engines/percona.yml` carries the
+        # evidence for both the narrowing and the restoration.
+        assert est_mod._ops_units(profile, "percona") == 2
 
 
 # ---------------------------------------------------------------------------

@@ -246,7 +246,11 @@ These are the reasons the code looks over-defensive. Do not relax them.
   a build-time and a query-time effort knob; pgvector bulk-builds while MHNSW and VIDX build
   incrementally on every INSERT, and Percona Server does either, so its `build_mode` is a
   comparison within one engine (ops path only — the ann overlay module has no `build_mode`,
-  and `render_config` refuses the key rather than emitting two identical curves); MyVector
+  and `render_config` refuses the key rather than emitting two identical curves). Its ops
+  default is `post` (`capabilities.bulk_vector_index_build: true` since the 9.7.2-2 re-test;
+  it killed the server at 9.7.1-1) while every ann curve is an incremental build, and the
+  churn index replace stays withdrawn on its own key, `capabilities.vector_index_replace:
+  false` — a different ALTER, a 1–4 ms no-op at the old pin, not re-tested; MyVector
   only bulk-builds after the load, because its one write-path mechanism (a binlog listener)
   exits after its first idle second on this server; AliSQL VIDX is InnoDB-only and requires
   READ COMMITTED. MyVector has **no filtered search** at its pin and its driver declines that

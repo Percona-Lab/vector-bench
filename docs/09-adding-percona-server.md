@@ -754,25 +754,35 @@ and `repair_path`:
 | `prepare_churn()` | **no-op — inherit** | There is no autovacuum-equivalent to pin down. This hook exists for pgvector, whose autovacuum decides on its own schedule whether tombstones are still there when recall is re-measured; Percona has no background graph maintenance at all, so there is no knob whose state could differ between the baseline and the post-churn measurement. |
 | `wait_index_synced()` | **no-op — inherit `0.0`** | The graph is maintained on the write path, inside the `INSERT`. There is nothing to wait for and the honest value is zero, which is what the inherited method returns. Returning a small positive number "to be safe" would be a fabricated measurement in a field documented as a measurement. |
 | `maintain()` | **implement** — `ALTER TABLE t1 DROP KEY vi, ADD VECTOR KEY vi (v) TYPE hnsw (…), ALGORITHM=INPLACE`, returning `"ALTER TABLE (index replace)"` — **but it returns `None` at the pinned version; see the correction below** | This is the one hook Percona changes relative to MariaDB and AliSQL, both of which inherit `None`. Percona has a repair path, it is the only MySQL-family engine here that does, and `maintain()`'s contract is to run it and name it. |
-| `repair_path` | **`"index-replace"` on the class; `"none"` on the instance at the pinned version** | The comment over `EngineDriver.repair_path` is explicit that this is declared and not inferred, because the churn workload stamps it onto the record *before* maintenance runs. The class attribute still declares `"index-replace"` because that **is** this engine's repair mechanism; `PerconaDriver.declare_bulk_vector_index_build` shadows it with `"none"` per instance when the host says the bulk build is broken, which is what the records then carry. Note that the same comment says "MariaDB, AliSQL, Valkey and Percona Search inherit `"none"`" — "Percona Search" there is the MongoDB engine, not this one, and the sentence stays true. |
+| `repair_path` | **`"index-replace"` on the class; `"none"` on the instance at the pinned version** | The comment over `EngineDriver.repair_path` is explicit that this is declared and not inferred, because the churn workload stamps it onto the record *before* maintenance runs. The class attribute still declares `"index-replace"` because that **is** this engine's repair mechanism; `PerconaDriver.declare_vector_index_replace` shadows it with `"none"` per instance when the host says the index replace is unverified (`capabilities.vector_index_replace: false`), which is what the records then carry. Note that the same comment says "MariaDB, AliSQL, Valkey and Percona Search inherit `"none"`" — "Percona Search" there is the MongoDB engine, not this one, and the sentence stays true. |
 
 > **CORRECTION, and it reverses the argument in the `maintain()` row above.**
 > That row said returning `None` "would lose the measurement this engine is
 > uniquely able to supply". **At the pinned `source.tag` there is no such
 > measurement to lose**, and the row was written before anyone had run the
-> repair. `maintain()`'s `ALTER … ADD VECTOR KEY … ALGORITHM=INPLACE` is the
-> same statement `capabilities.bulk_vector_index_build: false` records as
-> killing the server. Measured on `full-20261015-215006`: it returned in
+> repair. Measured on `full-20261015-215006`, at the old pin (9.7.1-1), where
+> the bulk build — `ALTER … ADD VECTOR KEY … ALGORITHM=INPLACE` on an unindexed
+> table — also killed the server: the replace returned in
 > **1–4 ms** and changed nothing — `index_bytes` identical to the byte either
 > side of it and recall identical to five decimals in **all 20** before/after
 > pairs (10 ops units × 2 fractions, three datasets). What the before/after
 > pair supplied was the degraded index measured twice and published as
-> `after ALTER TABLE (index replace) (0.0 s)`. So the driver now declares no
-> repair path when the host says the bulk build is broken, and the churn
-> workload writes one record per fraction — the shape the five engines with no
-> repair path already use. Nothing is lost; a false row is removed. Flip
-> `capabilities.bulk_vector_index_build` in `config/engines/percona.yml` when
-> the server is fixed and both the bulk build and this repair come back.
+> `after ALTER TABLE (index replace) (0.0 s)`. So the driver declares no
+> repair path, and the churn workload writes one record per fraction — the
+> shape the engines with no repair path already use. Nothing is lost; a false
+> row is removed.
+>
+> The withdrawal first rode on `capabilities.bulk_vector_index_build: false`.
+> At the current pin (9.7.2-2) the bulk build was re-verified on 2026-11-03 (25
+> of 25 builds, and the same index quality as `incremental` at 60,000 rows), so
+> that key is now `true` — but the replace is a different statement on an
+> already-indexed table and has **not** been re-tested. It is therefore
+> withdrawn by its own key, `capabilities.vector_index_replace: false`, read by
+> `_vector_index_replace` in `orchestrator/cli.py` (which falls back to the
+> bulk-build key for an engine that declares no replace key) and carried to
+> the harness as `--no-vector-index-replace`. Flip it only after a replace at
+> the pin has been shown to be a real rebuild; the comment beside the key in
+> `config/engines/percona.yml` says what that takes.
 
 Two warnings about that `maintain()`, both of which make it a *measurement* and
 not a tidy-up:
@@ -1233,13 +1243,15 @@ build mode is a real axis — see §4.10.
   belongs in `main`, because neither has a counterpart on MariaDB or AliSQL.
   **The build-mode half runs on the ops path only**, and the ann half could not
   be delivered — see §4.10.
-  **The build-mode comparison is unmeasurable at the pinned version** and the
-  profile asks for `[incremental]` alone: `ALTER TABLE … ADD VECTOR KEY …
-  ALGORITHM=INPLACE` kills the server, so `post` cannot complete a unit. The
-  reproduction is recorded at `capabilities.bulk_vector_index_build` in
-  `config/engines/percona.yml`, which is also what the ops loop reads to keep
-  the default off that mode for every profile that names none. Restore the
-  pair when the server is fixed.
+  **The build-mode comparison was unmeasurable at the old pin** (9.7.1-1),
+  where `ALTER TABLE … ADD VECTOR KEY … ALGORITHM=INPLACE` killed the server,
+  and the profile asked for `[incremental]` alone. At the current pin it built
+  25 times out of 25, so the profile runs the pair again, and the ops loop —
+  which reads `capabilities.bulk_vector_index_build` in
+  `config/engines/percona.yml` for its default — builds Percona `post` in
+  every profile that names no mode. The ann phase still builds incrementally:
+  its module has no `build_mode`. The incident and the re-test are recorded
+  beside that key.
 - `docs/07-planning-a-run.md` carries the cost model (`_INGEST_ROWS_PER_S` in
   `orchestrator/estimate.py`). Percona's ingest rate is unmeasured, so it has no
   entry, and an estimate for it would be a guess presented as a plan. It stays

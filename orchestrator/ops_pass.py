@@ -1322,6 +1322,7 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
                  storage_engine: str = "InnoDB",
                  iterative_scan: Optional[Union[str, Sequence[str]]] = None,
                  bulk_vector_index_build: bool = True,
+                 vector_index_replace: bool = True,
                  build: Optional[Dict[str, Any]] = None,
                  build_selection: Optional[Dict[str, Any]] = None
                  ) -> List[str]:
@@ -1333,6 +1334,13 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
     mean today's behaviour. The only call site derives it from the engine
     config, so the default is reached by hand-built calls and by tests, both
     of which are about engines whose bulk build works.
+
+    `vector_index_replace` is the churn repair's own reading,
+    `cli.py:_vector_index_replace`, which falls back to the bulk-build
+    reading when an engine declares nothing separate. Its default is True for
+    the same reason. It is a SEPARATE parameter, and a separate flag, because
+    the two statements stopped sharing a verdict: at Percona's current pin
+    the bulk build is verified and the index replace is not.
 
     `iterative_scan` takes one mode or several. One is emitted verbatim and
     several are comma-joined for the workload to loop, which is the shape
@@ -1373,27 +1381,39 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
         "--storage-engine", storage_engine,
         "--build-mode", build_mode,
         # Emitted only when the engine declares its bulk vector index build
-        # BROKEN. That makes it the SECOND conditional flag in this list --
-        # `--quantization` three lines below is the other -- and the only one
-        # of the two that carries no value. The "emit unconditionally" rule
+        # BROKEN -- VillageSQL alone now, whose driver uses it only to name
+        # the known crash before an explicitly requested `post` build. Like
+        # `--no-vector-index-replace` just below, it is a conditional flag
+        # that carries no value; `--quantization` further down is the
+        # conditional one that does. The "emit unconditionally" rule
         # `--ef-mode`, `--churn-readers` and `--filtered-budget` follow is
         # about keys that carry a VALUE a profile chose, where an omitted flag
         # would leave a reader inferring the workload's default at the time.
-        # This one is a declaration, and exactly one engine config makes it,
-        # so mirroring the config -- six engines say nothing, and absence
-        # there reads as "the bulk build works" -- keeps one fact with one
-        # default on both sides of the container boundary rather than two
-        # spellings of it.
+        # This one is a declaration that few engine configs make, so
+        # mirroring the config -- most engines say nothing, and absence there
+        # reads as "the bulk build works" -- keeps one fact with one default
+        # on both sides of the container boundary rather than two spellings
+        # of it.
         #
-        # **The flag itself is not the readable artefact, and it would be
-        # wrong to claim it is: NOTHING in this repo writes the harness argv
-        # to disk or to the phase log.** What a reader actually sees is
-        # `PerconaDriver.maintain()`'s own print, which does reach the phase
-        # log and names the statement, the capability and the measurement.
-        # This flag's job is only to carry the host's decision across the
-        # container boundary.
+        # **Neither flag is the readable artefact, and it would be wrong to
+        # claim it is: NOTHING in this repo writes the harness argv to disk
+        # or to the phase log.** What a reader actually sees is the driver's
+        # own print -- `PerconaDriver.maintain()` for the repair,
+        # `VillageSQLDriver.create_index` for the build -- which does reach
+        # the phase log. The flags' job is only to carry the host's decision
+        # across the container boundary.
         *([] if bulk_vector_index_build
           else ["--no-bulk-vector-index-build"]),
+        # The churn repair's withdrawal, on its own reading. It used to ride
+        # on `--no-bulk-vector-index-build`, which was right while both
+        # statements failed at Percona's old pin and became wrong the moment
+        # the bulk build was re-verified on its own: flipping one key would
+        # have restored a repair that at the old pin was a 1-4 ms no-op the
+        # report published as `after ALTER TABLE (index replace)`, and that
+        # nobody has re-tested since. Same polarity and the same absence
+        # rule as the flag above, for the same reason.
+        *([] if vector_index_replace
+          else ["--no-vector-index-replace"]),
         "--churn-budget", _budget_arg(ops, "churn_budget_s",
                                       DEFAULT_CHURN_BUDGET_S),
         # Read from the same extras render_config uses for the recall path, so

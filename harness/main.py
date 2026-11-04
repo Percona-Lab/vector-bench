@@ -167,19 +167,38 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     # that had to be spelled out for all seven engines would be a second
     # place for that default to live, and the two would drift.
     #
-    # **It gates the churn REPAIR and not `--build-mode post`.** Both issue
-    # the same `ALTER TABLE ... ADD VECTOR KEY ... ALGORITHM=INPLACE`, but an
-    # explicit `post` is deliberately honoured with a warning so a newer
-    # server can be tested for the fix without editing the engine config
-    # (`cli.py:_ops_build_modes`) -- it fails loudly, killing the server, and
-    # publishes nothing. The repair failed silently: a 1 ms no-op whose
-    # "after" record the report published as a repair. See
-    # `PerconaDriver.declare_bulk_vector_index_build`.
+    # **It does NOT gate `--build-mode post`, and no longer gates the churn
+    # repair either.** An explicit `post` is deliberately honoured with a
+    # warning so a newer server can be tested for the fix without editing the
+    # engine config (`cli.py:_ops_build_modes`); the only driver that reads
+    # this flag now is `VillageSQLDriver`, to name the known crash in the
+    # phase log before it runs a bulk build a profile asked for. The repair
+    # withdrawal it used to carry is `--no-vector-index-replace` below.
     p.add_argument("--no-bulk-vector-index-build", action="store_true",
                    help="the engine's bulk vector index build is unusable at "
-                        "its pinned version; a driver whose repair path "
-                        "rebuilds the index declares no repair path instead "
-                        "of timing a statement that cannot work")
+                        "its pinned version; a driver that knows the symptom "
+                        "names it before running an explicitly requested "
+                        "post build")
+    # The churn REPAIR's withdrawal, as `cli.py:_vector_index_replace` reads
+    # it -- `capabilities.vector_index_replace`, falling back to the bulk-build
+    # key when an engine declares nothing separate. Same negative polarity and
+    # `store_true` as the flag above, for the same reason: absent means
+    # today's behaviour, which is a driver running whatever repair it has.
+    #
+    # **A SEPARATE FLAG BECAUSE IT IS A SEPARATE STATEMENT.** `maintain()`'s
+    # `ALTER TABLE ... DROP KEY vi, ADD VECTOR KEY ..., ALGORITHM=INPLACE`
+    # replaces an EXISTING index; `--build-mode post` adds one to a table
+    # that has none. At Percona's old pin the first returned in 1-4 ms as a
+    # no-op the report published as a repair, while the second killed the
+    # server; at the current pin the second builds and the first has not been
+    # re-tested. Riding on one flag would have restored the unverified one
+    # the moment the verified one was enabled. See
+    # `PerconaDriver.declare_vector_index_replace`.
+    p.add_argument("--no-vector-index-replace", action="store_true",
+                   help="replacing the vector index on an indexed table is "
+                        "not a verified repair at the engine's pinned "
+                        "version; a driver whose repair path is that replace "
+                        "declares no repair path instead of timing it")
     # Percona Search is the only engine that compresses indexed vectors. Without
     # this the ops path always built unquantized while the recall path built
     # whatever the profile asked for, so one run measured two different indexes.
@@ -377,25 +396,29 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     def driver_factory():
         driver = get_driver(args.engine, spec, args.driver)
-        # The one host-side capability applied AFTER construction rather than
-        # handed to `get_driver`: that function takes the connection spec and
+        # The two host-side capabilities applied AFTER construction rather
+        # than handed to `get_driver`: that function takes the connection spec and
         # the driver class name, and widening its signature is a change to
         # `harness/drivers/postgres.py`, which every engine's driver is built
         # through. Read through `getattr`, the way the churn workload reads
-        # Valkey's optional sync hooks -- a driver with no repair path to
-        # withdraw has no such method, and most do not.
+        # Valkey's optional sync hooks -- a driver with nothing to withdraw
+        # has no such method, and most do not. Today `VillageSQLDriver` alone
+        # has the first and `PerconaDriver` alone the second.
         #
         # No runtime warning for the "flag given, nobody listened" case, on
         # purpose: that would fire once per client connection (up to 32 in the
         # concurrency pool) and it is a WIRING fault, which belongs in the
         # suite rather than in a run's log.
         # `tests/test_e13_percona_churn_repair_is_a_noop.py` pins that every
-        # engine whose config declares the capability false has a driver that
-        # can act on it, so a declaration cannot silently reach a driver that
-        # would ignore it.
+        # engine whose host reading withdraws the replace and whose driver
+        # class HAS a repair path can act on it, so a declaration cannot
+        # silently reach a driver that would ignore it.
         declare = getattr(driver, "declare_bulk_vector_index_build", None)
         if declare is not None:
             declare(not args.no_bulk_vector_index_build)
+        withdraw = getattr(driver, "declare_vector_index_replace", None)
+        if withdraw is not None:
+            withdraw(not args.no_vector_index_replace)
         return driver
 
     # The mode is known now and is true of every record this run writes; the
