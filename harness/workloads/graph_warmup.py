@@ -41,9 +41,21 @@ expanded on the way to the same answer, plus more; the node sets are not a
 strict superset query by query (the layer-0 descent order can differ once
 the candidate lists differ), but they are close to one, and the top ef's set
 is the largest a later phase will ask for. So one pass at that ef faults in
-what calibration and the timed workloads will touch, with no plateau
-heuristic deciding when the graph "looks warm" -- which, unlike this, would
-stop at a different point on every run.
+what CALIBRATION will touch, with no plateau heuristic deciding when the
+graph "looks warm" -- which, unlike this, would stop at a different point on
+every run.
+
+**WHAT IT DOES NOT COVER, stated rather than implied.** Only calibration's
+query set is warmed. Concurrency draws from its own `--concurrency-queries`
+budget, filtered search adds a predicate that walks the graph differently,
+and churn queries a graph its own writes are changing; nodes only those
+reach are still faulted in inside their windows. Concurrency's discarded
+warm-up window absorbs some of it, and the gauge is not re-read after any
+later phase, so how much remains is not measured. And an ops invocation
+whose workloads omit `build` -- one run against a table an earlier
+invocation built -- gets no warm-up and carries no `graph_warmup_status`
+at all: no shipped profile does that, and a record without the key must not
+be read as warm.
 
 Results are DISCARDED and nothing is scored. Its wall time is NOT build time:
 `build.run` has already computed `build_wall_s` from the load and the
@@ -145,6 +157,10 @@ def warm(driver, warmup: WarmupPlan, k: int,
         return {"status": STATUS_SKIPPED, "reason": "no query vectors",
                 "queries": 0, "ef_search": warmup.ef_search}
 
+    # Printed BEFORE the pass: on a cold 1M-row graph it is minutes of
+    # queries at the top ef with nothing else in the log, which reads as a hang.
+    print(f"[{driver.name}] graph warm-up: {len(queries):,} discarded queries "
+          f"at ef={warmup.ef_search} (the graph is faulted in lazily)")
     completed = 0
     error: Optional[str] = None
     started = time.perf_counter()

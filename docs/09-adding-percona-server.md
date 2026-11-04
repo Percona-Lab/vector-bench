@@ -633,8 +633,12 @@ module's `plan` takes — at the highest ef_search any later phase can use, the
 top of the calibration grid or the profile's `ef_search`, whichever is larger
 (`top_ef`), because a search at a larger ef expands
 roughly a superset of the nodes a smaller ef expands for the same query, so one
-pass at the top faults in what calibration and the timed phases need, with no
-plateau heuristic. Results are not scored; the pass's time is not in
+pass at the top faults in what calibration needs, with no plateau heuristic.
+It does not cover everything later: concurrency's own query budget, filtered
+search's predicate and churn's changing graph can still reach nodes the pass
+did not, inside their windows, and how much is not measured. An ops invocation
+without the `build` workload gets no warm-up and no `graph_warmup_status`, so a
+record without that key must not be read as warm. Results are not scored; the pass's time is not in
 `build_wall_s`. The `index_build` record keeps `extra.server_status` as the
 after-build reading (still `0` for a `post` build) and adds
 `extra.graph_warmup` — query count, ef, wall seconds, status, and the gauge
