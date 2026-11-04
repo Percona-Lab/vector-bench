@@ -636,7 +636,7 @@ class TestOptIn:
         assert "villagesql" in cli.KNOWN_ENGINES
         assert "villagesql" not in cli.DEFAULT_ENGINES
         # villagesql84, the same extension on the MySQL 8.4 server line, is
-        # opt-in for the same reason (tests/test_e29_villagesql84_engine.py).
+        # opt-in for the same reason (tests/test_e30_villagesql84_engine.py).
         assert cli.OPT_IN_ENGINES == ("villagesql", "villagesql84")
         # Nothing else is opt-in: the default list is the registry minus them.
         assert list(cli.DEFAULT_ENGINES) == [

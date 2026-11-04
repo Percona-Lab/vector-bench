@@ -2151,7 +2151,7 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
     "bac885dd2bf43347c80dc9d9c4fa86ca0a596957": (
         ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
          "config/engines/villagesql84.yml",
-         "tests/test_e29_villagesql84_engine.py",
+         "tests/test_e30_villagesql84_engine.py",
          "docs/04-engine-notes.md", SELF_REL),
         "a different engine's pin, not a copy of Percona's: vsql-vector "
         "`main` at bac885d (villagesql/vsql-vector), which "
@@ -2164,7 +2164,7 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
         "prepare_villagesql can refuse a moved tag."),
     "689c74a9f88c91ae035f57e0ae8915a168274112": (
         ("config/engines/villagesql84.yml",
-         "tests/test_e29_villagesql84_engine.py",
+         "tests/test_e30_villagesql84_engine.py",
          "docs/04-engine-notes.md", SELF_REL),
         "VillageSQL's publish/mysql-8.4_0.0.7 tag (the same commit as "
         "release/0.0.7), the MySQL 8.4 server tree villagesql84 compiles the "
