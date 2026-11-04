@@ -602,6 +602,49 @@ it is the only engine here that reports its graph's live memory, and
 *hnsw_memory_used.result* shows it reading `0` after a restart (the graph
 is loaded lazily) and rising on the first search.
 
+**It reads `0` after a `post` build too, and the ops pass warms the graph
+because of it.** Two facts, one from the source and one from the vendor:
+
+- *vec_runtime_load* in *vec0hnsw.cc*, at the pin, says of itself: "Only the
+  entry point is read here. Every other node is faulted in on demand when
+  traversal reaches it" — there is no preload, so a graph that has left memory
+  comes back one node per search that reaches it.
+- **The server team stated (2026-11-04) that `ALTER TABLE … ADD VECTOR KEY`
+  evicts the table as part of the ALTER.** That statement is the `post` build
+  (`create_index`), so the graph a `post` build produces leaves memory the
+  moment it is finished.
+
+Measured on this framework's records: `extra.server_status` on the
+`index_build` record read `Innodb_hnsw_memory_used = 0` in 95 of 95 `post`
+builds (20,000, 60,000 and 1,000,000 rows), while an `incremental` build of the
+same 60,000-row corpus read 207,407,472 B. The first calibration grid point
+after a `post` build was visibly slower than after an `incremental` one, so the
+within-engine post-vs-incremental latency comparison was a cold graph against a
+warm one.
+
+So `build.run` runs one discarded pass over the query set before the
+`index_build` record is written, for a driver declaring
+`EngineDriver.warm_graph_after_build` — `PerconaDriver` alone
+(`harness/workloads/graph_warmup.py`). It runs in **both** build modes, so the
+within-engine comparison stays symmetric; for `incremental` it faults in
+nothing and its reading is the control. The queries are the ones calibration
+will use — `dataset.test` capped at `--max-queries`, which is what that
+module's `plan` takes — at the highest ef_search any later phase can use, the
+top of the calibration grid or the profile's `ef_search`, whichever is larger
+(`top_ef`), because a search at a larger ef expands
+roughly a superset of the nodes a smaller ef expands for the same query, so one
+pass at the top faults in what calibration and the timed phases need, with no
+plateau heuristic. Results are not scored; the pass's time is not in
+`build_wall_s`. The `index_build` record keeps `extra.server_status` as the
+after-build reading (still `0` for a `post` build) and adds
+`extra.graph_warmup` — query count, ef, wall seconds, status, and the gauge
+**re-read after the pass** under its own `server_status`. Every later record of
+that unit carries `extra.graph_warmup_status`. A build-only unit
+(`percona-bulk-repro`, `percona-bulk-1m`) runs the pass too, so those runs get
+a memory figure for the graph they built. The same floor caveat applies to the
+after-warm-up reading as to every reading of this gauge (§3). Ops measurement
+version 11 marks the change.
+
 The **hypergraph optimizer** row is the one trap in this table that is a
 behaviour and not a knob. *percona-hnsw.md*, on the read path: "The read path is the
 old optimizer's, with no cost model. A session using the hypergraph optimizer

@@ -32,6 +32,7 @@ from .workloads import calibrate as calibrate_workload  # noqa: E402
 from .workloads import churn as churn_workload  # noqa: E402
 from .workloads import concurrency as concurrency_workload  # noqa: E402
 from .workloads import filtered as filtered_workload  # noqa: E402
+from .workloads import graph_warmup  # noqa: E402
 from .workloads.context import RunContext  # noqa: E402
 from .workloads.server_waits import sampler_disclosure  # noqa: E402
 
@@ -466,10 +467,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[vb-harness] connected to {args.engine}: {driver.server_version()}")
 
         if "build" in workloads:
-            build_workload.run(
+            # The warm-up plan is built for every engine and used only by a
+            # driver that declares `warm_graph_after_build`; `build.run`
+            # decides. Calibration's query slice (`dataset.test[:max_queries]`)
+            # at the top ef any later phase can ask for -- see
+            # `graph_warmup.top_ef`.
+            warmed = build_workload.run(
                 ctx, driver, dataset, index,
                 load_threads=args.load_threads, subset_rows=args.subset_rows,
+                warmup=graph_warmup.plan(
+                    dataset.test, max_queries=args.max_queries,
+                    ef_grid=_ints(args.ef_grid), ef_search=args.ef_search),
             )
+            if warmed is not None:
+                # From here on, every record -- calibration, concurrency,
+                # filtered, churn -- says it was measured on a graph this
+                # harness warmed, and whether the warm-up completed. Declared
+                # AFTER `build.run` returns, so the ingest and index_build
+                # records do not carry it: they were measured before it ran,
+                # and the index_build one has the full detail instead.
+                recorder.declare_run_extra(
+                    **{graph_warmup.RUN_EXTRA_KEY: warmed["status"]})
             # The authoritative row count comes from the engine, not from the
             # profile: ground truth must describe what was actually indexed.
             # A profile that loads a subset (smoke uses 20,000 of 60,000) would
