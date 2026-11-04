@@ -1,0 +1,159 @@
+# VillageSQL on its MySQL 8.4 base -- the second VillageSQL engine.
+#
+# Identical to config/engines/villagesql.yml in everything but the SERVER the
+# extension is compiled into: the same vsql-vector commit (`source.tag`), the
+# same driver, the same SQL, the same capabilities and the same opt-in, built
+# by the same Dockerfile (`alias_of`). VillageSQL's team asked for their 8.4
+# build to be the one benchmarked rather than 9.7; keeping both makes the
+# server line the only variable between two curves.
+#
+# Why a separate engine rather than a re-pinned `villagesql` -- the two
+# collisions `webui/engines.py` refuses, resolved the way mariadb123 resolves
+# them:
+#
+#   * ann_constructor `VillageSQL84`. ann-benchmarks keys result files on the
+#     algorithm name and index parameters, and the ann tree's fingerprint holds
+#     no source tag (CLAUDE.md, "The ann results tree ... is shared"), so a
+#     re-pin of `villagesql` would find 9.7's result files and reuse them under
+#     8.4's engine_version.
+#   * image names `vector-bench/villagesql84-*`. Both engines' images are
+#     tagged with `source.tag`, the vsql-vector commit, and that commit is the
+#     same in both -- so under the 9.7 image names an 8.4 build would overwrite
+#     `villagesql-runtime:bac885dd...` and every manifest that recorded that
+#     tag would name the other server.
+#
+# `alias_of` points prepare-sources.sh (`prepare_villagesql`, called with this
+# engine's name), build-images.sh (the VILLAGESQL_* build args) and the
+# auxiliary files (entrypoint, init.sql) at docker/villagesql/.
+alias_of: villagesql
+
+# WHAT THIS PIN CAN AND CANNOT DO: see the long header of
+# config/engines/villagesql.yml. The 8.4 tree carries the same extension
+# framework and the same KNN recognition at 0.0.7 -- `FindCustomKnnIndexOnField`
+# requires HAS_ROW_REF on the 8.4 branch exactly as on the 9.7 one -- so the
+# same refusal applies; docs/04-engine-notes.md has the evidence for this line.
+name: villagesql84
+display_name: VillageSQL on MySQL 8.4 (vsql_vector)
+family: mysql
+
+source:
+  # The vsql-vector commit, the SAME one config/engines/villagesql.yml pins:
+  # only the server differs between the two engines.
+  tag: bac885dd2bf43347c80dc9d9c4fa86ca0a596957
+  upstream: https://github.com/villagesql/vsql-vector.git
+  # VillageSQL 0.0.7 on its MySQL 8.4 base (8.4.x upstream LTS line). The
+  # same commit as `release/0.0.7`; there is also a Percona Server 8.4 based
+  # line, deliberately not this one.
+  server_tag: publish/mysql-8.4_0.0.7
+  # Asserted by `prepare_villagesql`: a moved tag is a different server under
+  # the same label.
+  server_commit: 689c74a9f88c91ae035f57e0ae8915a168274112
+  server_upstream: https://github.com/villagesql/villagesql-server.git
+
+image:
+  # Distinct names: the tag is the vsql-vector commit, shared with the 9.7
+  # engine (see the header).
+  runtime: vector-bench/villagesql84-runtime
+  bench: vector-bench/villagesql84-bench
+  base: ubuntu:24.04
+
+build:
+  # As config/engines/villagesql.yml: the server RelWithDebInfo, the extension
+  # always Release with its -O level and -march checked by the Dockerfile.
+  type: RelWithDebInfo
+  march: x86-64-v3
+  # The 9.7 engine's list, unchanged: every flag exists in the 8.4 tree's
+  # cmake files, and keeping the list identical keeps the build out of the
+  # comparison.
+  cmake_flags:
+    - -DWITH_PACKAGE_FLAGS=OFF
+    - -DWITH_ROUTER=OFF
+    - -DWITH_MYSQLX=OFF
+    - -DWITH_NDB=OFF
+    - -DWITH_NDBCLUSTER=OFF
+    - -DWITH_RAPID=OFF
+    - -DWITH_UNIT_TESTS=OFF
+    - -DWITH_SSL=system
+    - -DWITH_ZLIB=bundled
+    - -DWITH_ZSTD=bundled
+  extra_cxxflags: ""
+
+# There is deliberately no `sql:` block -- see config/engines/mariadb.yml and
+# tests/test_c1_engine_sql.py. Every statement is built in
+# harness/drivers/villagesql.py.
+
+server:
+  common:
+    - --skip-name-resolve
+    # The preview gate, which the 8.4 tree declares too
+    # (`vsql_allow_preview_extensions`).
+    - --vsql-allow-preview-extensions=ON
+  normalized:
+    - --innodb-buffer-pool-size={buffer_bytes}
+    - --innodb-flush-log-at-trx-commit=2
+    - --innodb-doublewrite=0
+  tuned:
+    - --innodb-buffer-pool-size={buffer_bytes}
+    - --innodb-flush-log-at-trx-commit=0
+    - --innodb-doublewrite=0
+    - --innodb-flush-method=O_DIRECT
+    - --skip-log-bin
+  # As config/engines/villagesql.yml.
+  wait_instruments:
+    - --performance-schema=ON
+    - --performance-schema-instrument=wait/synch/mutex/%=ON
+    - --performance-schema-instrument=wait/synch/rwlock/%=ON
+    - --performance-schema-instrument=wait/synch/sxlock/%=ON
+
+storage_engines:
+  normalized: [InnoDB]
+  tuned: [InnoDB]
+
+# The 9.7 engine's capabilities, for the reasons its config gives: the
+# extension is the same commit, and DELETE / UPDATE-of-an-indexed-column are
+# refused by the server's custom-index DML layer, which the 8.4 tree shares.
+capabilities:
+  ef_construction_tunable: true
+  m_per_index: true
+  requires_read_committed: false
+  filtered_search: false
+  churn: false
+  # FALSE for the reason config/engines/villagesql.yml gives (the bulk
+  # CREATE INDEX deadlocked and aborted the 9.7 server); the storage ABI is
+  # the same code on 8.4 and nothing here has shown the 8.4 server immune.
+  bulk_vector_index_build: false
+
+runtime:
+  order: 91
+  # OPT-IN, for the reason config/engines/villagesql.yml gives.
+  default_selected: false
+  driver: VillageSQLDriver
+  # Distinct from the 9.7 engine's `VillageSQL` (see the header).
+  ann_constructor: VillageSQL84
+  port: 3306
+  data_mount: /var/lib/vbench
+  server_data_mount: /server-data/data
+  # The same path as the 9.7 engine: `alias_of: villagesql` means this engine
+  # is started by docker/villagesql/entrypoint-villagesql.sh, whose LOG_FILE
+  # default this must equal (tests/test_e10_failures_explain_themselves.py).
+  error_log: /var/lib/vbench/villagesql.err
+  credentials:
+    user: "bench"
+    password: "bench"
+  group: extra
+  probe:
+    - "sh"
+    - "-c"
+    - "/opt/villagesql/bin/mysql -ubench -pbench --socket=/var/run/vbench/villagesql.sock -e 'SELECT 1' >/dev/null 2>&1"
+  chart:
+    # The 9.7 engine's hue, lighter, so the two server lines read as related;
+    # a different marker and dash so they stay apart in greyscale.
+    color: "#c49c94"
+    marker: "H"
+    linestyle: "-."
+    label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)"
+  label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)"
+  # As config/engines/villagesql.yml.
+  reference_build:
+    m: 16
+    ef_construction: ops

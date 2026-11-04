@@ -108,6 +108,8 @@ ann:
   # put a second knob under the M response this profile isolates.
   m_values_by_engine:
     villagesql: [8, 16, 24, 32]
+    # The same extension on the MySQL 8.4 server line, the same rule.
+    villagesql84: [8, 16, 24, 32]
   ef_search: [10, 20, 40, 80, 120, 200, 400, 800]
   insert_threads: 8
   mariadb_storage_engines: [InnoDB]

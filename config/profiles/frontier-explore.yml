@@ -84,6 +84,10 @@
 #                                 stays in the grid so that the first pin
 #                                 whose index is used is explored with
 #                                 everything else, not added by hand.
+#   villagesql84                  The same 15 builds, from the same
+#                                 `villagesql_ef_construction` key: the same
+#                                 extension on the MySQL 8.4 server line, and
+#                                 opt-in for the same reason.
 #   mongodb (Percona Search)      quantization scalar and none = 2 builds. mongot
 #                                 exposes no graph degree to this framework, so
 #                                 M is pinned to one label (16) below rather

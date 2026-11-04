@@ -770,6 +770,8 @@ def _driver_table() -> Dict[str, Any]:
         "percona": classes["PerconaDriver"],
         "myvector": classes["MyVectorDriver"],
         "villagesql": classes["VillageSQLDriver"],
+        # The same extension on the MySQL 8.4 server line; the driver is identical.
+        "villagesql84": classes["VillageSQLDriver"],
     }
 
 

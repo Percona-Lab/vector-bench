@@ -18,8 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import docker_ctl
 from . import engines as engines_mod
-from .ann_knobs import (efc_run_groups, excluded_builds, knob_problems,
-                        restrict_to_builds)
+from .ann_knobs import (VILLAGESQL_ENGINES, efc_run_groups, excluded_builds,
+                        knob_problems, restrict_to_builds)
 from .config import ResolvedResources, server_args, server_env
 
 # Re-exported, not just imported: `cli.py` and a dozen tests reach these
@@ -323,7 +323,10 @@ def render_config(engine: str, profile: Dict[str, Any],
             "efConstruction": ef_constructions,
         }, engine, query_args))
 
-    elif engine == "villagesql":
+    elif engine in VILLAGESQL_ENGINES:
+        # Both VillageSQL server lines, one extension: the same grid and the
+        # same `villagesql_ef_construction` key, so a profile cannot build the
+        # 8.4 graph at a different ef_construction from the 9.7 one.
         # MyVector's shape: a build-time knob (`ef_construction` in the index
         # options) and a query-time one (`vsql_vector.ef_search`). Pinned in
         # the normalized pass at the value every engine with the knob is built

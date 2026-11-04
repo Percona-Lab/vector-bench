@@ -136,7 +136,10 @@ class TestTheEngineDeclaresWhatItCannotDo:
         # VillageSQL is the second: its bulk CREATE INDEX intermittently
         # deadlocks and aborts the server at its pin (config/engines/
         # villagesql.yml), pinned in tests/test_e26_villagesql_engine.py.
-        assert declared == {"percona": True, "villagesql": False}, declared
+        # villagesql84 is the same extension on the 8.4 server line and
+        # declares the same, for the same storage ABI.
+        assert declared == {"percona": True, "villagesql": False,
+                            "villagesql84": False}, declared
 
 
 # ---------------------------------------------------------------------------

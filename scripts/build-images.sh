@@ -7,7 +7,8 @@
 #   <engine>-bench    runtime + the ann-benchmarks Python stack
 #
 # Usage:
-#   scripts/build-images.sh [--engine mariadb|mariadb123|alisql|pgvector|webui|all]
+#   scripts/build-images.sh [--engine mariadb|mariadb123|alisql|pgvector|percona|myvector|
+#                                     villagesql|villagesql84|mongodb|valkey|webui|all]
 #                           [--target runtime|bench|all]
 #                           [--march x86-64-v3|native|...]
 #                           [--jobs N] [--no-cache] [--pull]
@@ -157,12 +158,15 @@ build_engine() {
     # the manifest's source record. docker/myvector/Dockerfile declares both.
     myvector) bargs+=(--build-arg "MYVECTOR_TAG=${tag}"
                       --build-arg "MYSQL_SERVER_TAG=$(yq_get "$cfg" source.server_tag unknown)") ;;
-    # Nothing compiled: the module is copied out of its own published image.
-    # The vsql_vector commit (the value of `source.tag`) plus the
+    # The server and the extension are both compiled from source. The
+    # vsql_vector commit (the value of `source.tag`) plus the
     # villagesql-server tag it is compiled against; docker/villagesql/
-    # Dockerfile declares both.
+    # Dockerfile declares both. `villagesql84` arrives here through its
+    # `alias_of`, with its own server_tag; its images are named apart in its
+    # config because this tag, the extension commit, is the same in both.
     villagesql) bargs+=(--build-arg "VILLAGESQL_TAG=${tag}"
-                        --build-arg "VILLAGESQL_SERVER_TAG=$(yq_get "$cfg" source.server_tag unknown)") ;;
+                        --build-arg "VILLAGESQL_SERVER_TAG=$(yq_get "$cfg" source.server_tag unknown)"
+                        --build-arg "VB_ENGINE_NAME=${engine}") ;;
     mongodb)  bargs+=(--build-arg "MONGOT_IMAGE=$(yq_get "$cfg" source.mongot_image "")") ;;
     # Nothing compiled: installed from a Percona repository. The package list
     # comes from the config, so a name that does not resolve is one edit away
@@ -244,6 +248,9 @@ case "$ENGINE" in
   # VillageSQL compiled from source plus the vsql_vector extension. Opt-in
   # for the same reason: another full MySQL-sized build.
   villagesql) build_engine villagesql ;;
+  # The same extension on VillageSQL's MySQL 8.4 server line, through the
+  # same Dockerfile (`alias_of: villagesql`). Opt-in for the same reason.
+  villagesql84) build_engine villagesql84 ;;
   mariadb|alisql|pgvector) build_engine "$ENGINE" ;;
   *) die "unknown engine: $ENGINE" ;;
 esac

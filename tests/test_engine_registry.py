@@ -63,14 +63,23 @@ GOLDEN = {
     # own; the rest is the MySQL family's port, mounts and account.
     "villagesql": ("VillageSQLDriver", "VillageSQL", 3306, "/var/lib/vbench",
                    "/server-data/data", ("bench", "bench"), "extra",
-                   "#8c564b", "h", "--", "VillageSQL 0.0.7 (vsql_vector HNSW)",
-                   "VillageSQL 0.0.7 (vsql_vector HNSW)"),
+                   "#8c564b", "h", "--",
+                   "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector HNSW)",
+                   "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector HNSW)"),
+    # The same extension commit on VillageSQL's MySQL 8.4 server line.
+    # `VillageSQL84` and not `VillageSQL` for the reason `mariadb123` is not
+    # `MariaDB`: a shared constructor would hand 8.4 the 9.7 result files.
+    "villagesql84": ("VillageSQLDriver", "VillageSQL84", 3306,
+                     "/var/lib/vbench", "/server-data/data", ("bench", "bench"),
+                     "extra", "#c49c94", "H", "-.",
+                     "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)",
+                     "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)"),
 }
 
 # The order a run iterates and a report presents: the original three, then the
 # engines added later. Directory discovery is alphabetical and would not.
 GOLDEN_ORDER = ("mariadb", "alisql", "pgvector", "mariadb123", "mongodb",
-                "valkey", "percona", "myvector", "villagesql")
+                "valkey", "percona", "myvector", "villagesql", "villagesql84")
 
 
 @pytest.fixture(scope="module")
@@ -126,7 +135,7 @@ class TestRegistry:
         # than passing silently, which is what a `>=` or an `in` would do.
         assert engines_mod.engines_in_group("extra") == \
             ("mariadb123", "mongodb", "valkey", "percona", "myvector",
-             "villagesql")
+             "villagesql", "villagesql84")
 
     def test_get_unknown_names_the_alternatives(self):
         with pytest.raises(ValueError) as excinfo:

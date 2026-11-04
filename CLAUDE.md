@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repository.
 
 ## What this is
 
-`vector-bench` benchmarks **built-in vector search across nine database engines**, all
+`vector-bench` benchmarks **built-in vector search across ten database engines**, all
 running HNSW, so the comparison isolates implementation quality rather than algorithm
 choice. It is a measurement instrument: the most damaging bugs here do not crash — they
 quietly hand one engine a different budget, grid or dataset and produce a credible-looking
@@ -23,6 +23,7 @@ The repo root is `vector-bench/` (git repo, branch `master`). All commands below
 | `percona` | Percona Server, InnoDB HNSW | `9.7` series, commit `56124b03` |
 | `myvector` | MyVector plugin (hnswlib) on MySQL 9.7.2 | release v1.26.9, commit `384d9df7` |
 | `villagesql` | VillageSQL 0.0.7 + vsql_vector extension (HNSW custom index), MySQL 9.7.2 base | server `publish/mysql-9.7_0.0.7` (`533ab4b5`), vsql-vector `main` at `bac885dd` |
+| `villagesql84` | The same extension commit on VillageSQL's MySQL 8.4 base (`alias_of: villagesql`) | server `publish/mysql-8.4_0.0.7` (`689c74a9`), vsql-vector `main` at `bac885dd` |
 
 `KNOWN_ENGINES` is whatever `config/engines/*.yml` holds — there is no list in Python to keep
 in step with it. `orchestrator/engines.py` is the registry everything derives from.
@@ -157,10 +158,11 @@ reports the first's recall — this is why `mariadb123` exists) and a duplicate 
 
 These are the reasons the code looks over-defensive. Do not relax them.
 
-- **Never mix `-march` between engines.** The seven built from source compile SIMD distance
+- **Never mix `-march` between engines.** The eight built from source compile SIMD distance
   kernels — `mariadb`, `mariadb123`, `alisql`, `pgvector`, `percona`, `myvector` (whose
-  kernels are hnswlib's, inside the plugin) and `villagesql` (whose kernels are in the
-  `vsql_vector.veb` extension, compiled Release and checked for -O3), all at `x86-64-v3`;
+  kernels are hnswlib's, inside the plugin), `villagesql` and `villagesql84` (whose kernels
+  are in the `vsql_vector.veb` extension, compiled Release and checked for -O3), all at
+  `x86-64-v3`;
   `mongodb` and `valkey` are installed from packages and declare `march: none`. A different
   flag on one turns the benchmark into a comparison of compiler flags.
 - **`harness/` and `report/` must not import `orchestrator`.** Each runs in a container that
@@ -281,7 +283,12 @@ These are the reasons the code looks over-defensive. Do not relax them.
   **opt-in** (`runtime.default_selected: false`, read through the registry as
   `cli.DEFAULT_ENGINES`): a run that names no engines leaves it out and prints so, because the
   plan check runs only after the corpus is loaded and every default run would pay those loads
-  for no points. See `docs/04-engine-notes.md`.
+  for no points. **`villagesql84` is the same extension commit on the MySQL 8.4 server line
+  and behaves the same**: 8.4's `FindCustomKnnIndexOnField` carries the identical HAS_ROW_REF
+  gate, so everything in this bullet applies to it, and it is opt-in too. Its own
+  `ann_constructor` (`VillageSQL84`) and image names keep it from reading the 9.7 engine's
+  result files or overwriting its image, whose tag is the same extension commit. See
+  `docs/04-engine-notes.md`.
 
 ## Cost awareness
 
@@ -293,7 +300,8 @@ command measures when `--engines` is omitted. VillageSQL, the ninth, is **opt-in
 (`runtime.default_selected: false`): a run that names no engines leaves it out and says so,
 because at its pin every ann build would load a corpus only to refuse every query. Named with
 `--engines` it adds ~4 h (its concurrency windows; it declines filtered search and churn) and
-no ingest figure. **The two figures do not cover the same engines.** The
+no ingest figure. `villagesql84`, the tenth, is the same on the MySQL 8.4 server line: opt-in,
+and another ~4 h when named. **The two figures do not cover the same engines.** The
 run-time figure covers all eight; the ingest figure covers the seven with a measured rate.
 MyVector, the eighth, has none: the estimator names it in `engines_without_ingest_rate` and
 prints that the ingest total is a floor, and its query terms (concurrency windows, churn) are

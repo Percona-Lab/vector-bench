@@ -190,7 +190,9 @@ def _exposed_by(text: str) -> str:
     survived it.
     """
     row = _row(text, EF)
-    clause = re.search(r"exposed (?:only )?by ([^|.]*)", row)
+    # A `.` ends the clause unless a digit follows it: "MySQL 8.4" in
+    # villagesql84's prose name is a version, not the end of a sentence.
+    clause = re.search(r"exposed (?:only )?by ((?:[^|.]|\.(?=\d))*)", row)
     assert clause, f"the row makes no 'exposed by' claim at all:\n{row}"
     return clause.group(1)
 
@@ -238,7 +240,12 @@ def _configured_tunable_engines() -> List[str]:
 #: tunable engine fail this file instead of being silently unchecked.
 DOC_NAME = {"pgvector": "pgvector", "valkey": "Valkey",
             "percona": "Percona", "myvector": "MyVector",
-            "villagesql": "VillageSQL"}
+            "villagesql": "VillageSQL",
+            # The same extension on the 8.4 server line. Its own string, not
+            # "VillageSQL" again, so the row must name the 8.4 line to pass;
+            # the report's prose name (`report/render.py` `_PROSE_NAME`) is
+            # "VillageSQL on MySQL 8.4", which contains it.
+            "villagesql84": "MySQL 8.4"}
 
 
 class TestAPerconaRunIsNotToldTheKnobBelongsToPgvector:
