@@ -1,13 +1,19 @@
 #
-# VillageSQL (MySQL 9.7.2 base) + the vsql_vector extension (SVECTOR type and
-# HNSW custom index), both compiled from pinned sources.
+# VillageSQL + the vsql_vector extension (SVECTOR type and HNSW custom index),
+# both compiled from pinned sources. Two engines build from this file:
+# `villagesql` (server on the MySQL 9.7.2 base) and `villagesql84` (`alias_of:
+# villagesql`, server on the MySQL 8.4 base). The steps are the same for both:
+# the 8.4 tree takes every cmake flag the 9.7 one does, carries its Boost in
+# extra/boost as 9.7 does, and stages a byte-identical extension SDK
+# (villagesql/sdk), so only `source.server_tag` -- and therefore the tarball
+# prepare-sources.sh exports -- differs.
 #
 # Targets:
 #   runtime  — mysqld, the client, and vsql_vector.veb, nothing else.
 #   bench    — runtime + the Python stack ann-benchmarks and the ops harness drive.
 #
-# Build context is work/buildctx/villagesql/, produced by
-# `scripts/prepare-sources.sh --engine villagesql`. It holds ONE tarball with
+# Build context is work/buildctx/<engine>/, produced by
+# `scripts/prepare-sources.sh --engine <engine>`. It holds ONE tarball with
 # two trees: `source/` is villagesql-server at `source.server_tag`, and
 # `vsql-vector/` is the extension at `source.tag` (a commit SHA on `main`).
 #
@@ -17,8 +23,10 @@
 #     docker/myvector/Dockerfile runs for its MySQL 9.7.2 tree -- the same
 #     CFLAGS, the same cmake flags in config/engines/villagesql.yml -- so the
 #     two 9.7.2-based servers here differ in their vector implementation and
-#     not in how they were compiled. The `sdk` target is part of `all` at
-#     this tag (villagesql/CMakeLists.txt: `add_custom_target(sdk ALL ...)`)
+#     not in how they were compiled; villagesql84 compiles its 8.4 tree with
+#     the same flags, so the two VillageSQL lines differ in their server
+#     line alone. The `sdk` target is part of `all` at both tags
+#     (villagesql/CMakeLists.txt: `add_custom_target(sdk ALL ...)`)
 #     and stages `villagesql-extension-sdk-*/` in the build tree, which is
 #     what the extension's FindVillageSQL looks for.
 #  2. The extension, against the server's BUILD tree (`VillageSQL_BUILD_DIR`)
@@ -125,7 +133,10 @@ FROM ${BASE_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="vector-bench VillageSQL + vsql_vector runtime"
 ARG VILLAGESQL_TAG=unknown
 ARG VILLAGESQL_SERVER_TAG=unknown
-ENV VB_ENGINE=villagesql \
+# `villagesql` or `villagesql84` -- the image's own name for itself, for a
+# by-hand `docker run` (docs/03); a run sets VB_ENGINE from the orchestrator.
+ARG VB_ENGINE_NAME=villagesql
+ENV VB_ENGINE=${VB_ENGINE_NAME} \
     VB_ENGINE_TAG=${VILLAGESQL_TAG} \
     VB_VILLAGESQL_SERVER_TAG=${VILLAGESQL_SERVER_TAG} \
     VB_ROOT_DIR=/opt/villagesql \

@@ -582,6 +582,54 @@ Server `villagesql/villagesql-server` tag `publish/mysql-9.7_0.0.7`
    Unexplained; the framework restarts the server per configuration, so it
    does not reach a measurement, but a hand-run loop will see it.
 
+### The MySQL 8.4 line — `villagesql84`
+
+VillageSQL's team asked for their 8.4 build to be benchmarked rather than 9.7, so
+`villagesql84` compiles the **same** vsql-vector commit (`bac885d`) against server tag
+`publish/mysql-8.4_0.0.7` (`689c74a9f88c91ae035f57e0ae8915a168274112`, the same commit as
+`release/0.0.7`; MySQL 8.4.11 base — not the Percona Server 8.4 based line). Its config is
+`alias_of: villagesql`: the same Dockerfile, entrypoint, init.sql, driver, cmake flags,
+server flags and capabilities, so the server line is the only difference between the two
+curves. It has its own `ann_constructor` (`VillageSQL84`) and its own image names
+(`vector-bench/villagesql84-*`), because both engines' images are tagged with the extension
+commit and would otherwise overwrite each other.
+
+What was checked in the 8.4 tree, and found the same as 9.7:
+
+- **The build.** Every cmake flag in the 9.7 config exists in 8.4, Boost is bundled in
+  `extra/boost` (1.84) as it is in 9.7, and `villagesql/sdk` — the headers the extension
+  includes, dev ABI and all — is byte-identical between the two tags (all 69 blobs). The
+  extension therefore needs no change and its pin did not move.
+- **The server surface the driver uses.** `vsql_allow_preview_extensions`, the DELETE /
+  UPDATE refusal text, `EXPLAIN FORMAT=TREE`, `information_schema.INNODB_TABLESPACES`
+  and the performance_schema wait instruments all exist. `L2_DISTANCE` /
+  `COSINE_DISTANCE` are the extension's functions, not the server's, so 8.4's lack of a
+  native vector type does not matter. 8.4 still ships `mysql_native_password`, disabled;
+  the bench account stays on `caching_sha2_password` as on 9.7.
+- **Trap 1 holds on 8.4.** `FindCustomKnnIndexOnField` in
+  `villagesql/sql/custom_index_knn_recognition.cc` is the same file on both tags and skips
+  any index without `VEF_INDEX_STORAGE_HAS_ROW_REF`; vsql_vector `bac885d` declares
+  `HAS_COLUMN_REF | REF_LOOKUP` (`src/vector.cc`). The only differences in `villagesql/`
+  between the tags are build scripts and the 8.4 iterator API (`Init`/`Read` where 9.7
+  has `DoInit`/`DoRead` in `custom_index_knn_scan.cc`). So the KNN query is a filesort
+  over a full scan on 8.4 as well, the plan check refuses it, and `villagesql84` is
+  opt-in for the same reason. **Measured** on the built image (2026-11-04,
+  `8.4.11-villagesql-0.0.7-dev-vector-bench`, 2,000 × 16 rows, index declared inline at
+  M=16, ef_construction=200): `EXPLAIN FORMAT=TREE SELECT id FROM t1 ORDER BY
+  L2_DISTANCE(v, '[…]') LIMIT 10` is `Limit` → `Sort: vsql_vector.l2_distance(…)` →
+  `Stream results` → `Table scan on t1`, TRADITIONAL is `type ALL … Using temporary;
+  Using filesort`, the same at `vsql_vector.ef_search = 10`, and `DELETE` fails with the 9.7
+  text. One difference from 9.7: the hypergraph optimizer cannot be switched on at all in a
+  non-debug 8.4 build (`ERROR 3999 … does not yet support 'use in non-debug builds'`), so
+  "both optimizers" is one optimizer here. The `dev` profile on this engine produced its
+  `ingest` and `index_build` records (incremental, 595 and 1,130 rows/s on the 4,000 × 16
+  tiny corpus in the normalized and tuned passes) and the concurrency workload raised
+  `BruteForceRefused` in both passes, as designed.
+- **Trap 3** (the bulk-build deadlock) was measured on 9.7 only. Every file under
+  `storage/innobase/villagesql/` — `storage_abi.cc`, where the two latches were taken,
+  among them — is byte-identical between the tags, so `bulk_vector_index_build: false` is
+  kept rather than assumed fixed.
+
 ---
 
 ## Things that are true of all of them

@@ -635,10 +635,13 @@ class TestOptIn:
         assert engines_mod.get("villagesql").default_selected is False
         assert "villagesql" in cli.KNOWN_ENGINES
         assert "villagesql" not in cli.DEFAULT_ENGINES
-        assert cli.OPT_IN_ENGINES == ("villagesql",)
-        # Nothing else is opt-in: the default list is the registry minus it.
+        # villagesql84, the same extension on the MySQL 8.4 server line, is
+        # opt-in for the same reason (tests/test_e30_villagesql84_engine.py).
+        assert cli.OPT_IN_ENGINES == ("villagesql", "villagesql84")
+        # Nothing else is opt-in: the default list is the registry minus them.
         assert list(cli.DEFAULT_ENGINES) == [
-            e for e in cli.KNOWN_ENGINES if e != "villagesql"]
+            e for e in cli.KNOWN_ENGINES
+            if e not in ("villagesql", "villagesql84")]
 
     @pytest.mark.parametrize("value", ["false", 0, "no"])
     def test_a_non_boolean_flag_is_refused(self, value):

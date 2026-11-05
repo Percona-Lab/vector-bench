@@ -207,7 +207,7 @@ class TestListing:
         names = [e["name"] for e in listed]
         assert names == ["mariadb", "alisql", "pgvector", "mariadb123",
                          "mongodb", "valkey", "percona", "myvector",
-                         "villagesql"]
+                         "villagesql", "villagesql84"]
 
     def test_carries_what_the_table_shows(self):
         listed = engines_mod.listing(os.path.join(VB_ROOT, "config"))

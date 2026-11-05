@@ -1,6 +1,8 @@
 """Ops-harness driver for VillageSQL + vsql_vector (SVECTOR, HNSW custom index).
 
-VillageSQL is a MySQL 9.7.2 fork, driven through the same MariaDB
+VillageSQL is a MySQL fork -- 9.7.2 for `villagesql`, 8.4 for
+`villagesql84`, which this driver serves unchanged (the extension commit is
+the same and so is every statement below) -- driven through the same MariaDB
 Connector/C as every other MySQL-family engine here, so connection handling,
 the threaded load and sizing come from `MySQLFamilyDriver`. Four things
 differ, and each is forced by the server or the extension at the pin in

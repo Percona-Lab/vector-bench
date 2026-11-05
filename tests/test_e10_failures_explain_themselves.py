@@ -84,6 +84,8 @@ FILE_LOGGING = {
     "mongodb": ("mongodb", "/var/lib/vbench/mongot/mongot.log"),
     "myvector": ("myvector", "/var/lib/vbench/myvector.err"),
     "villagesql": ("villagesql", "/var/lib/vbench/villagesql.err"),
+    # `alias_of: villagesql`: the same entrypoint, the same path.
+    "villagesql84": ("villagesql", "/var/lib/vbench/villagesql.err"),
 }
 
 #: Engines whose every log reaches the container's stdout, so `docker logs`
@@ -2037,6 +2039,10 @@ class TestSection410StillDescribesRenderConfig:
         assert 'elif engine == "mongodb":' not in body[start:end]
 
 
+#: The branch condition for an engine whose branch is shared by a tuple.
+BRANCH_HEADS = {"villagesql": "elif engine in VILLAGESQL_ENGINES:"}
+
+
 def _branch_span(body: str, engine: str):
     """`(start, end)` offsets of one `elif engine == "<name>":` branch.
 
@@ -2044,9 +2050,14 @@ def _branch_span(body: str, engine: str):
     function's trailing `return`. Offsets rather than line numbers, because a
     line number is the thing this whole section stopped using.
     """
-    head = f'elif engine == "{engine}":'
+    # VillageSQL's branch serves both of its server lines (`villagesql`,
+    # `villagesql84`) and so tests a tuple, the way the MariaDB one tests
+    # `MARIADB_ENGINES`; it is still one branch and one span.
+    head = (BRANCH_HEADS.get(engine)
+            or f'elif engine == "{engine}":')
     assert head in body, f"render_config has no {engine} branch"
     start = body.index(head)
-    later = [m.start() for m in re.finditer(r'elif engine == "\w+":', body)
+    later = [m.start() for m in re.finditer(
+                 r'elif engine (?:== "\w+"|in [A-Z_]+):', body)
              if m.start() > start]
     return start, (min(later) if later else len(body))

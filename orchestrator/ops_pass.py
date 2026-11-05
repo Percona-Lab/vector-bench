@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import docker_ctl
 from . import engines as engines_mod
+from .ann_knobs import VILLAGESQL_ENGINES
 from .config import (ResolvedResources, engine_wait_instruments,
                      engine_wait_sampler_interval, ops_wait_instruments,
                      ops_wait_sampler, profile_window_clients,
@@ -1502,9 +1503,10 @@ def ops_ef_construction(engine: str, profile: Dict[str, Any]) -> Optional[int]:
         # plugin's own default of 100, half what every other engine with the
         # knob is built at.
         return int(ann.get("myvector_ef_construction", 200))
-    if engine == "villagesql":
+    if engine in VILLAGESQL_ENGINES:
         # The same key and default `ann_pass.render_config`'s villagesql
-        # branch reads, so both paths build the graph at one ef_construction.
+        # branch reads (one key for both server lines), so both paths build
+        # the graph at one ef_construction.
         # Never clamped: a combination outside [M, 32 x M] is refused before
         # the run (`reference_build.ops_build_problems`) and by the driver.
         return int(ann.get("villagesql_ef_construction", 200))

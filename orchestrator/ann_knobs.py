@@ -104,7 +104,18 @@ KNOB_BOUNDS: Dict[str, Dict[str, Tuple[Optional[int], Optional[int]]]] = {
     "myvector": {"M": (2, 10000)},
     "valkey": {"M": (2, 10000)},
     "villagesql": {"M": (2, 128), "efConstruction": (2, 4096)},
+    # The same vsql-vector commit on the MySQL 8.4 server line: the bounds are
+    # the extension's, not the server's.
+    "villagesql84": {"M": (2, 128), "efConstruction": (2, 4096)},
 }
+
+#: The engines whose index is vsql_vector's HNSW: one per VillageSQL server
+#: line, the same extension commit in each. Every engine-keyed branch that
+#: is about the EXTENSION (its ef_construction rule, its ann grid, the ops
+#: ef_construction) takes this tuple rather than one name, as
+#: `ann_pass.MARIADB_ENGINES` does for the two MariaDB versions, so a branch
+#: written for `villagesql` alone cannot silently skip `villagesql84`.
+VILLAGESQL_ENGINES = ("villagesql", "villagesql84")
 
 #: Engines whose HNSW is hnswlib's, which raises ef_construction to M silently.
 HNSWLIB_ENGINES = ("myvector", "valkey")
@@ -158,7 +169,7 @@ def excluded_builds(engine: str, m_values: Iterable[int],
                 out.append((m, efc, REASON_PGVECTOR_2M))
             elif engine in HNSWLIB_ENGINES and efc < m:
                 out.append((m, efc, REASON_HNSWLIB_EFC))
-            elif engine == "villagesql" and not (
+            elif engine in VILLAGESQL_ENGINES and not (
                     m <= efc <= VILLAGESQL_EFC_FACTOR * m):
                 out.append((m, efc, REASON_VILLAGESQL_EFC))
     return out

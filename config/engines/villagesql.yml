@@ -44,7 +44,7 @@
 #     and VillageSQL's own August adapter measured ~0.1 recall for a WHERE
 #     beside the KNN ORDER BY -- declined until it can be.
 name: villagesql
-display_name: VillageSQL (vsql_vector)
+display_name: VillageSQL on MySQL 9.7 (vsql_vector)
 family: mysql
 
 source:
@@ -188,8 +188,8 @@ runtime:
     color: "#8c564b"
     marker: "h"
     linestyle: "--"
-    label: "VillageSQL 0.0.7 (vsql_vector HNSW)"
-  label: "VillageSQL 0.0.7 (vsql_vector HNSW)"
+    label: "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector HNSW)"
+  label: "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector HNSW)"
   # The index the ops pass builds, and the fallback under
   # `ops.build_selection: frontier` when the ann phase gives no usable point
   # -- which at this pin is always: the module refuses every query because

@@ -1643,7 +1643,7 @@ class TestAnUnmeasuredIngestRateIsNamedAndNotModelled:
         # MyVector is the registry's own unmeasured engine now, so the probe is
         # named beside it, in registry order, on the one disclosure line.
         assert (f"No measured ingest rate for myvector, villagesql, "
-                f"{self.UNMEASURED}" in _flat(out))
+                f"villagesql84, {self.UNMEASURED}" in _flat(out))
         # The engine that gained a rate is on the per-engine line instead of
         # in the disclosure, which is the whole difference this change makes
         # to what an operator reads.
@@ -2150,6 +2150,8 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
         "Percona re-pin."),
     "bac885dd2bf43347c80dc9d9c4fa86ca0a596957": (
         ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
+         "config/engines/villagesql84.yml",
+         "tests/test_e30_villagesql84_engine.py",
          "docs/04-engine-notes.md", SELF_REL),
         "a different engine's pin, not a copy of Percona's: vsql-vector "
         "`main` at bac885d (villagesql/vsql-vector), which "
@@ -2160,6 +2162,14 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
         "VillageSQL's publish/mysql-9.7_0.0.7 tag, the server tree vsql-vector "
         "is compiled against. Pinned by commit as well as by tag so "
         "prepare_villagesql can refuse a moved tag."),
+    "689c74a9f88c91ae035f57e0ae8915a168274112": (
+        ("config/engines/villagesql84.yml",
+         "tests/test_e30_villagesql84_engine.py",
+         "docs/04-engine-notes.md", SELF_REL),
+        "VillageSQL's publish/mysql-8.4_0.0.7 tag (the same commit as "
+        "release/0.0.7), the MySQL 8.4 server tree villagesql84 compiles the "
+        "same vsql-vector commit against. Pinned by commit as well as by tag "
+        "so prepare_villagesql can refuse a moved tag."),
     "008e09c2834b98143a8c067d4d225c90953050cf": (
         ("config/engines/myvector.yml", "tests/test_e24_myvector_disclosures.py",
          SELF_REL),

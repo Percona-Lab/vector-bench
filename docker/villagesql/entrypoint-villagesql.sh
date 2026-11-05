@@ -7,8 +7,9 @@
 #   vb-entrypoint client [args...]                open a client on the unix socket
 #   vb-entrypoint <anything else>                 exec it verbatim
 #
-# The shape of entrypoint-myvector.sh -- both are MySQL 9.7.2 trees, so
-# initialisation is `mysqld --initialize-insecure` -- with the extension
+# The shape of entrypoint-myvector.sh -- MySQL trees (9.7.2 for villagesql,
+# 8.4 for villagesql84), so initialisation is `mysqld --initialize-insecure`
+# on both -- with the extension
 # installed once, at initialisation, instead of a plugin loaded per start:
 #
 # 1. `INSTALL EXTENSION vsql_vector` RUNS ON A SHORT-LIVED, SOCKET-ONLY
@@ -34,6 +35,10 @@
 #    it so the client stack matched MariaDB's; MySQL 9.7 has removed the
 #    plugin, so the bench account takes caching_sha2_password exactly as the
 #    Percona and MyVector accounts on the same server line do (init.sql).
+#    The 8.4 line (`villagesql84`, which this entrypoint also starts) still
+#    ships the plugin, disabled by default, and is left on
+#    caching_sha2_password too, so the two VillageSQL engines authenticate
+#    the same way and the server line is the only difference between them.
 
 set -euo pipefail
 

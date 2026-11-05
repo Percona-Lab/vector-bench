@@ -532,6 +532,8 @@ class TestOnlyTheDriverDecidesTheStorageEngine:
         # VillageSQL's table is InnoDB too; the SVECTOR storage and the HNSW
         # graph are extension segments inside the same tablespace.
         "villagesql": "InnoDB",
+        # The same extension on the MySQL 8.4 server line.
+        "villagesql84": "InnoDB",
     }
 
     @staticmethod
@@ -562,7 +564,7 @@ class TestOnlyTheDriverDecidesTheStorageEngine:
         assert set(self.EXPECTED) == set(table)
         # Both branches are populated, so neither test below runs over an
         # empty collection and passes by doing nothing.
-        assert sum(1 for v in self.EXPECTED.values() if v is not None) == 6
+        assert sum(1 for v in self.EXPECTED.values() if v is not None) == 7
         assert sum(1 for v in self.EXPECTED.values() if v is None) == 3
         spec = ConnectionSpec(host="h", port=1)
         return {engine: cls(spec) for engine, cls in table.items()}

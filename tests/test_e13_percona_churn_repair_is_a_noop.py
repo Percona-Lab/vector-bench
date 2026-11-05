@@ -116,7 +116,8 @@ def _other_engines():
     # false and it gets this flag too; see
     # `test_villagesql_gets_both_flags_off_its_one_key` below and
     # tests/test_e26_villagesql_engine.py.
-    return tuple(sorted(set(KNOWN_ENGINES) - {"percona", "villagesql"}))
+    return tuple(sorted(set(KNOWN_ENGINES)
+                        - {"percona", "villagesql", "villagesql84"}))
 
 
 OTHER_ENGINES = _other_engines()
@@ -760,7 +761,8 @@ class TestTheDecisionIsPassedInAndNotImported:
         print(f"engines whose replace reading is false = {withdrawing}")
         print(f"of those, with a repair path = {at_risk}; "
               f"carrying {HOOK}() = {actionable}")
-        assert withdrawing == ["percona", "villagesql"], withdrawing
+        assert withdrawing == ["percona", "villagesql", "villagesql84"], \
+            withdrawing
         assert at_risk == ["percona"], at_risk
         assert actionable == at_risk, (
             f"{sorted(set(at_risk) - set(actionable))} withdraw the replace "
