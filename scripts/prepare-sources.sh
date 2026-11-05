@@ -460,12 +460,11 @@ PY
 # MyVector's shape (prepare_myvector), and for the same reason: the extension
 # is built against the server's own build tree, so the context tarball carries
 # the server as `source/` and the extension beside it as `vsql-vector/`. The
-# extension is pinned to a SHA on `main` because the HNSW index it is being
-# measured for is not in any vsql-vector release (its only tag, 0.0.1,
-# predates it). Both are shallow fetches into sources/ -- nothing here touches
-# a vendor checkout. The manifest's `engines.<engine>.source` is this
-# function's JSON, so the server tag and commit are recorded beside the
-# extension commit.
+# extension is vsql-vector-pk, pinned by the commit SHA of its release tag
+# (config/engines/villagesql.yml says why -pk and not vsql-vector). Both are
+# shallow fetches into sources/ -- nothing here touches a vendor checkout. The
+# manifest's `engines.<engine>.source` is this function's JSON, so the server
+# tag and commit are recorded beside the extension commit.
 prepare_villagesql() {
   # Takes the engine name, as prepare_mariadb does, so a second VillageSQL
   # server line (`villagesql84`, `alias_of: villagesql`) reuses this routine
@@ -477,7 +476,7 @@ prepare_villagesql() {
   local cfg="$VB_CONFIG/engines/$engine.yml"
   local sha; sha="$(yq_get "$cfg" source.tag "")"
   [[ -n "$sha" ]] || die "$engine: $cfg has no source.tag"
-  local upstream; upstream="$(yq_get "$cfg" source.upstream https://github.com/villagesql/vsql-vector.git)"
+  local upstream; upstream="$(yq_get "$cfg" source.upstream https://github.com/villagesql/vsql-vector-pk.git)"
   local server_tag; server_tag="$(yq_get "$cfg" source.server_tag "")"
   [[ -n "$server_tag" ]] || die "$engine: $cfg has no source.server_tag"
   local server_pin; server_pin="$(yq_get "$cfg" source.server_commit "")"
@@ -490,6 +489,11 @@ prepare_villagesql() {
     git init --quiet "$ext_repo"
     git -C "$ext_repo" remote add origin "$upstream"
   fi
+  # The extension's repository is part of the pin (vsql-vector and
+  # vsql-vector-pk are both installed as `vsql_vector`), so a checkout made for
+  # an earlier pin follows `source.upstream` rather than fetching from the
+  # repository it was created for.
+  git -C "$ext_repo" remote set-url origin "$upstream"
   git -C "$ext_repo" cat-file -e "${sha}^{commit}" 2>/dev/null \
     || git -C "$ext_repo" fetch --quiet --depth 1 origin "$sha" \
     || die "$engine: cannot fetch commit $sha from $upstream"

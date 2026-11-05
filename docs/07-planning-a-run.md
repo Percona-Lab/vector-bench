@@ -243,11 +243,9 @@ why `maxEdges` is not used). Seven builds are left out by name, each printed
 before the run (`orchestrator/ann_knobs.py`) and never clamped: pgvector
 refuses ef_construction < 2·M, so M=48 at 64 is dropped, and vsql_vector
 refuses ef_construction > 32·M, so VillageSQL loses 200 and 400 at M=4 and 6
-and 400 at M=8 and 12. At its pin VillageSQL's ann phase then produces no
-point at all -- no query reaches its index, and the module refuses to time
-the full scan instead -- so its 15 builds would buy build records only. It
-is therefore opt-in (`runtime.default_selected: false`): a bare run leaves it
-out and says so, and only `--engines ...,villagesql` measures it. `runs: 2`, because the
+and 400 at M=8 and 12. VillageSQL is opt-in
+(`runtime.default_selected: false`): a bare run leaves it out and says so, and
+only `--engines ...,villagesql` measures it. `runs: 2`, because the
 selection is made on QPS too and a single cold draw can push a build off the
 frontier.
 

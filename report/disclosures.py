@@ -29,7 +29,7 @@ SCALAR_DISTANCE = "scalar"
 
 #: `extra.vector_binding` values that mean the vector crosses the wire as text
 #: and is parsed by the server -- every other MySQL-family engine binds packed
-#: float32 (VillageSQL's SVECTOR has no binary input).
+#: float32 (VillageSQL sends its SVECTOR values as text).
 TEXT_BINDING = "text"
 
 #: `extra.extension_status` values that mean the vector support is a preview

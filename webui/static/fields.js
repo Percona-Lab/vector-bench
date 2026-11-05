@@ -21,8 +21,8 @@ const ENGINE_LABEL = {
   // one report the other's recall.
   percona: "Percona Server (InnoDB HNSW)",
   myvector: "MyVector (MySQL 9.7 plugin, hnswlib)",
-  villagesql: "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector HNSW)",
-  villagesql84: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)",
+  villagesql: "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector-pk HNSW)",
+  villagesql84: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector-pk HNSW)",
 };
 // Fallback colours for series that are NOT engines -- `app.js` reads
 // `ENGINE_COLOR[name] || PALETTE[index % PALETTE.length]`, so this is only

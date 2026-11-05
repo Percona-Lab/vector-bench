@@ -1,10 +1,10 @@
 # VillageSQL on its MySQL 8.4 base -- the second VillageSQL engine.
 #
 # Identical to config/engines/villagesql.yml in everything but the SERVER the
-# extension is compiled into: the same vsql-vector commit (`source.tag`), the
-# same driver, the same SQL, the same capabilities and the same opt-in, built
-# by the same Dockerfile (`alias_of`). VillageSQL's team asked for their 8.4
-# build to be the one benchmarked rather than 9.7; keeping both makes the
+# extension is compiled into: the same vsql-vector-pk commit (`source.tag`),
+# the same driver, the same SQL, the same capabilities and the same opt-in,
+# built by the same Dockerfile (`alias_of`). VillageSQL's team asked for their
+# 8.4 build to be the one benchmarked rather than 9.7; keeping both makes the
 # server line the only variable between two curves.
 #
 # Why a separate engine rather than a re-pinned `villagesql` -- the two
@@ -17,10 +17,10 @@
 #     re-pin of `villagesql` would find 9.7's result files and reuse them under
 #     8.4's engine_version.
 #   * image names `vector-bench/villagesql84-*`. Both engines' images are
-#     tagged with `source.tag`, the vsql-vector commit, and that commit is the
-#     same in both -- so under the 9.7 image names an 8.4 build would overwrite
-#     `villagesql-runtime:bac885dd...` and every manifest that recorded that
-#     tag would name the other server.
+#     tagged with `source.tag`, the vsql-vector-pk commit, and that commit is
+#     the same in both -- so under the 9.7 image names an 8.4 build would
+#     overwrite `villagesql-runtime:93ed0087...` and every manifest that
+#     recorded that tag would name the other server.
 #
 # `alias_of` points prepare-sources.sh (`prepare_villagesql`, called with this
 # engine's name), build-images.sh (the VILLAGESQL_* build args) and the
@@ -28,23 +28,23 @@
 alias_of: villagesql
 
 # WHAT THIS PIN CAN AND CANNOT DO: see the long header of
-# config/engines/villagesql.yml. The 8.4 tree carries the same extension
-# framework and the same KNN recognition at 0.0.7 -- `FindCustomKnnIndexOnField`
-# requires HAS_ROW_REF on the 8.4 branch exactly as on the 9.7 one -- so the
-# same refusal applies. Measured on the built image on 2026-11-04: the KNN
-# query plans as `Sort` over `Table scan on t1` and the dev profile's
-# concurrency workload raises BruteForceRefused; docs/04-engine-notes.md has
-# the evidence. (The hypergraph optimizer cannot be enabled in a non-debug
-# 8.4 build at all, so only the classic one was observed.)
+# config/engines/villagesql.yml, measured on this 8.4 build. The 8.4 tree
+# carries the same extension framework and the same KNN recognition at 0.0.7 --
+# `FindCustomKnnIndexOnField` requires HAS_ROW_REF on the 8.4 branch exactly as
+# on the 9.7 one -- and vsql-vector-pk declares it, so the KNN query plans as
+# `Custom index distance scan on vi`. (The hypergraph optimizer cannot be
+# enabled in a non-debug 8.4 build at all, so only the classic one was
+# observed.) At the previous pin, plain vsql-vector bac885d, it planned as
+# `Sort` over `Table scan on t1`; docs/04-engine-notes.md has both.
 name: villagesql84
 display_name: VillageSQL on MySQL 8.4 (vsql_vector)
 family: mysql
 
 source:
-  # The vsql-vector commit, the SAME one config/engines/villagesql.yml pins:
+  # The vsql-vector-pk commit, the SAME one config/engines/villagesql.yml pins:
   # only the server differs between the two engines.
-  tag: bac885dd2bf43347c80dc9d9c4fa86ca0a596957
-  upstream: https://github.com/villagesql/vsql-vector.git
+  tag: 93ed00873dd65f64c0788c80576d5cf3fba39831
+  upstream: https://github.com/villagesql/vsql-vector-pk.git
   # VillageSQL 0.0.7 on its MySQL 8.4 base (8.4.x upstream LTS line). The
   # same commit as `release/0.0.7`; there is also a Percona Server 8.4 based
   # line, deliberately not this one.
@@ -55,7 +55,7 @@ source:
   server_upstream: https://github.com/villagesql/villagesql-server.git
 
 image:
-  # Distinct names: the tag is the vsql-vector commit, shared with the 9.7
+  # Distinct names: the tag is the vsql-vector-pk commit, shared with the 9.7
   # engine (see the header).
   runtime: vector-bench/villagesql84-runtime
   bench: vector-bench/villagesql84-bench
@@ -129,7 +129,7 @@ capabilities:
 
 runtime:
   order: 91
-  # OPT-IN, for the reason config/engines/villagesql.yml gives.
+  # OPT-IN, as config/engines/villagesql.yml.
   default_selected: false
   driver: VillageSQLDriver
   # Distinct from the 9.7 engine's `VillageSQL` (see the header).
@@ -155,8 +155,8 @@ runtime:
     color: "#c49c94"
     marker: "H"
     linestyle: "-."
-    label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)"
-  label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector HNSW)"
+    label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector-pk HNSW)"
+  label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector-pk HNSW)"
   # As config/engines/villagesql.yml.
   reference_build:
     m: 16

@@ -1,14 +1,16 @@
-"""VillageSQL 0.0.7 + vsql_vector: the engine's wiring and the behaviours that
-keep it honest.
+"""VillageSQL + vsql_vector (built from vsql-vector-pk): the engine's wiring
+and the behaviours that keep it honest.
 
 No server is started here. What is pinned are the things that fail SILENTLY
-against the real build, each measured on it (2026-10-30):
+against a real build:
 
-* the server answers every KNN query by sorting a full scan (the HNSW index
-  is never chosen), so a driver that merely warned would publish exact
-  brute force as ANN recall/QPS -- the driver and the ann module must REFUSE;
-* SVECTOR has only a text input, so the encoding must round-trip float32
-  exactly or every stored vector is silently perturbed;
+* with plain vsql-vector (the engine's first pin, measured 2026-10-30) the
+  server answers every KNN query by sorting a full scan, and a driver that
+  merely warned would publish exact brute force as ANN recall/QPS -- so the
+  driver and the ann module check the plan and REFUSE a query that does not
+  use the index, whichever pin is built;
+* vectors are sent as text, so the encoding must round-trip float32 exactly
+  or every stored vector is silently perturbed;
 * the extension refuses ef_construction < M and > 32 x M, so a profile's
   200 at M=6 is not buildable -- the render drops it by name and the driver
   and module refuse it, because a clamped build under the requested label is
@@ -35,20 +37,21 @@ sys.path.insert(0, VB_ROOT)
 from harness.drivers.base import ConnectionSpec, IndexSpec  # noqa: E402
 from harness.drivers import villagesql as vs  # noqa: E402
 
-EXTENSION_PIN = "bac885dd2bf43347c80dc9d9c4fa86ca0a596957"
+EXTENSION_PIN = "93ed00873dd65f64c0788c80576d5cf3fba39831"
 SERVER_PIN = "533ab4b58d2744b79bb45e41f44fa928f190a655"
 
-#: EXPLAIN FORMAT=TREE as the pinned build printed it for
-#: `SELECT id FROM t1 ORDER BY L2_DISTANCE(v, '[..]') LIMIT 10` (vector
-#: shortened): a sort over a table scan, the brute force this file is about.
+#: EXPLAIN FORMAT=TREE as the engine's first pin (plain vsql-vector) printed
+#: it for `SELECT id FROM t1 ORDER BY L2_DISTANCE(v, '[..]') LIMIT 10` (vector
+#: shortened): a sort over a table scan, the brute force the guard refuses.
 MEASURED_BRUTE_FORCE_PLAN = (
     "-> Limit: 10 row(s)\n    -> Sort: vsql_vector.l2_distance(t1.v,'[-0.93,"
     "0.87]'), limit input to 10 row(s) per chunk  (cost=505 rows=5000)\n"
     "        -> Table scan on t1  (cost=505 rows=5000)\n")
-#: What the server prints when it does drive the index
-#: (`explain_access_path.cc`: "Custom index distance scan on " + key name).
-INDEX_PLAN = ("-> Limit: 10 row(s)\n    -> Custom index distance scan on vi "
-              "using vsql_vector.l2_distance  (rows=10)\n")
+#: What the pinned build printed when it drove the index, for a 201-row
+#: table and LIMIT 5 (`explain_access_path.cc`: "Custom index distance scan
+#: on " + key name).
+INDEX_PLAN = ("-> Limit: 5 row(s)  (cost=20.4 rows=5)\n    -> Custom index "
+              "distance scan on vi  (cost=20.4 rows=201)\n")
 
 
 def _read(rel: str) -> str:
@@ -119,6 +122,7 @@ class TestWiring:
         assert source["tag"] == EXTENSION_PIN
         assert source["server_commit"] == SERVER_PIN
         assert source["server_tag"] == "publish/mysql-9.7_0.0.7"
+        assert source["upstream"].endswith("/vsql-vector-pk.git")
 
     def test_the_driver_is_registered_by_class_name(self):
         from harness.drivers.postgres import _driver_classes, _driver_table
@@ -353,10 +357,10 @@ class TestDisclosures:
     def test_the_ann_attributes_reach_the_record(self):
         from report import disclosures
         got = disclosures.query_path_extra(
-            {"vector_binding": b"text literal (SVECTOR has no binary input)",
+            {"vector_binding": b"text literal ('[a,b,...]', parsed by strtof)",
              "extension_status": "preview (x)"})
         assert got == {"vector_binding":
-                       "text literal (SVECTOR has no binary input)",
+                       "text literal ('[a,b,...]', parsed by strtof)",
                        "extension_status": "preview (x)"}
         assert disclosures.query_path_extra({}) == {}
 
@@ -498,7 +502,7 @@ class TestTheBulkBuildDeclaration:
 # §6 what master's engine contract asks of it: knob bounds, reference build
 # ---------------------------------------------------------------------------
 
-#: vsql-vector as `scripts/prepare-sources.sh` fetches it: a bare-object
+#: vsql-vector-pk as `scripts/prepare-sources.sh` fetches it: a bare-object
 #: repository (`git fetch --depth 1 origin <sha>`, then `git archive` into the
 #: build context) with NO working tree, so the pinned files are read from the
 #: commit object, never from a checkout. Generated and gitignored; the
@@ -636,7 +640,7 @@ class TestOptIn:
         assert "villagesql" in cli.KNOWN_ENGINES
         assert "villagesql" not in cli.DEFAULT_ENGINES
         # villagesql84, the same extension on the MySQL 8.4 server line, is
-        # opt-in for the same reason (tests/test_e30_villagesql84_engine.py).
+        # opt-in too (tests/test_e30_villagesql84_engine.py).
         assert cli.OPT_IN_ENGINES == ("villagesql", "villagesql84")
         # Nothing else is opt-in: the default list is the registry minus them.
         assert list(cli.DEFAULT_ENGINES) == [

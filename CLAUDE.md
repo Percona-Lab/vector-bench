@@ -22,8 +22,8 @@ The repo root is `vector-bench/` (git repo, branch `master`). All commands below
 | `valkey` | Valkey + valkey-search | Percona repo `valkey-91` |
 | `percona` | Percona Server, InnoDB HNSW | `9.7` series, commit `56124b03` |
 | `myvector` | MyVector plugin (hnswlib) on MySQL 9.7.2 | release v1.26.9, commit `384d9df7` |
-| `villagesql` | VillageSQL 0.0.7 + vsql_vector extension (HNSW custom index), MySQL 9.7.2 base | server `publish/mysql-9.7_0.0.7` (`533ab4b5`), vsql-vector `main` at `bac885dd` |
-| `villagesql84` | The same extension commit on VillageSQL's MySQL 8.4 base (`alias_of: villagesql`) | server `publish/mysql-8.4_0.0.7` (`689c74a9`), vsql-vector `main` at `bac885dd` |
+| `villagesql` | VillageSQL 0.0.7 + vsql_vector extension (HNSW custom index, built from vsql-vector-pk), MySQL 9.7.2 base | server `publish/mysql-9.7_0.0.7` (`533ab4b5`), vsql-vector-pk release `0.0.3` (`93ed0087`) |
+| `villagesql84` | The same extension commit on VillageSQL's MySQL 8.4 base (`alias_of: villagesql`) | server `publish/mysql-8.4_0.0.7` (`689c74a9`), vsql-vector-pk release `0.0.3` (`93ed0087`) |
 
 `KNOWN_ENGINES` is whatever `config/engines/*.yml` holds — there is no list in Python to keep
 in step with it. `orchestrator/engines.py` is the registry everything derives from.
@@ -267,28 +267,27 @@ These are the reasons the code looks over-defensive. Do not relax them.
   workload (`EngineDriver.declined_workloads`); churn re-inserts reach its graph through an
   explicit `myvector_index_refresh`, and deleted rows never leave it until a full rebuild —
   see `docs/04-engine-notes.md`.
-- **VillageSQL at its pin cannot be measured as ANN search, and the code refuses to.** Server
-  0.0.7 drives its KNN distance scan only from a custom index that stores row references
-  (HAS_ROW_REF); vsql_vector's HNSW stores column references, so every `ORDER BY
-  L2_DISTANCE(v, '[..]') LIMIT k` is a filesort over a full scan, in both optimizers, with
-  recall 1.000 at every ef_search. `VillageSQLDriver` and the ann module check EXPLAIN FORMAT=TREE
-  for "Custom index distance scan on vi" and raise rather than time the query, so the build
-  workload is the only one that produces records. DELETE is rejected on a table with a custom
-  index (churn declined), filtered search cannot be verified (declined), vectors are text
-  literals (no binary input), and the bulk `CREATE INDEX` intermittently deadlocks and aborts
-  the server, so `capabilities.bulk_vector_index_build: false` makes `incremental` its build
-  mode. vsql_vector refuses `ef_construction` outside `[M, 32 x M]`, so 200 is unbuildable at
-  M=6: the combination is dropped from the render by name (`ann_knobs.excluded_builds`), never
-  clamped under a label it was not built with, and `m-sweep` gives it M 8..32. It is
-  **opt-in** (`runtime.default_selected: false`, read through the registry as
-  `cli.DEFAULT_ENGINES`): a run that names no engines leaves it out and prints so, because the
-  plan check runs only after the corpus is loaded and every default run would pay those loads
-  for no points. **`villagesql84` is the same extension commit on the MySQL 8.4 server line
-  and behaves the same**: 8.4's `FindCustomKnnIndexOnField` carries the identical HAS_ROW_REF
-  gate, so everything in this bullet applies to it, and it is opt-in too. Its own
-  `ann_constructor` (`VillageSQL84`) and image names keep it from reading the 9.7 engine's
-  result files or overwriting its image, whose tag is the same extension commit. See
-  `docs/04-engine-notes.md`.
+- **VillageSQL's index is used only because the extension is vsql-vector-pk, and the code
+  checks.** The server drives its KNN distance scan only from a custom index that stores row
+  references (HAS_ROW_REF). Plain vsql-vector's HNSW stores column references, so on the
+  engine's first pin every `ORDER BY L2_DISTANCE(v, ..) LIMIT k` was a filesort over a full
+  scan with recall 1.000; vsql-vector-pk's declares HAS_ROW_REF and plans as "Custom index
+  distance scan on vi". `VillageSQLDriver` and the ann module check EXPLAIN FORMAT=TREE for
+  that and raise rather than time a query without it. DELETE is rejected on a table with a
+  custom index (churn declined), a WHERE beside the KNN ORDER BY is a post-filter (filtered
+  declined), vectors are text literals (the query vector inlined, a constant the KNN
+  recognition needs), and the bulk `CREATE INDEX` can crash the server, so
+  `capabilities.bulk_vector_index_build: false` makes `incremental` its build mode. vsql_vector
+  refuses `ef_construction` outside `[M, 32 x M]`, so 200 is unbuildable at M=6: the
+  combination is dropped from the render by name (`ann_knobs.excluded_builds`), never clamped
+  under a label it was not built with, and `m-sweep` gives it M 8..32. It is **opt-in**
+  (`runtime.default_selected: false`, read through the registry as `cli.DEFAULT_ENGINES`): a
+  run that names no engines leaves it out and prints so. **`villagesql84` is the same extension
+  commit on the MySQL 8.4 server line and behaves the same**: 8.4's `FindCustomKnnIndexOnField`
+  carries the identical HAS_ROW_REF gate, so everything in this bullet applies to it, and it is
+  opt-in too. Its own `ann_constructor` (`VillageSQL84`) and image names keep it from reading
+  the 9.7 engine's result files or overwriting its image, whose tag is the same extension
+  commit. See `docs/04-engine-notes.md`.
 
 ## Cost awareness
 
@@ -297,12 +296,11 @@ rows/s on 1M rows), and **every M value reloads the whole corpus**. `--profile f
 --resource-pass both` is ~796 h of ingest before a single query runs, and ~1,824 h of run time
 in the worst case once querying is counted — all eight default engines, which is what that
 command measures when `--engines` is omitted. VillageSQL, the ninth, is **opt-in**
-(`runtime.default_selected: false`): a run that names no engines leaves it out and says so,
-because at its pin every ann build would load a corpus only to refuse every query. Named with
-`--engines` it adds ~4 h (its concurrency windows; it declines filtered search and churn) and
-no ingest figure. `villagesql84`, the tenth, is the same on the MySQL 8.4 server line: opt-in,
-and another ~4 h when named. **The two figures do not cover the same engines.** The
-run-time figure covers all eight; the ingest figure covers the seven with a measured rate.
+(`runtime.default_selected: false`): a run that names no engines leaves it out and says so.
+Named with `--engines` it adds ~4 h (its concurrency windows; it declines filtered search and
+churn) and no ingest figure. `villagesql84`, the tenth, is the same on the MySQL 8.4 server
+line: opt-in, and another ~4 h when named. **The two figures do not cover the same engines.**
+The run-time figure covers all eight; the ingest figure covers the seven with a measured rate.
 MyVector, the eighth, has none: the estimator names it in `engines_without_ingest_rate` and
 prints that the ingest total is a floor, and its query terms (concurrency windows, churn) are
 in the 1,824 h — its filtered-search term is not, because its driver declines that workload.
