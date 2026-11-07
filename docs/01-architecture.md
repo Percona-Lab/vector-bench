@@ -267,7 +267,7 @@ sequenceDiagram
     E-->>U: build wall/CPU time, peak RSS (cgroup), index bytes
     U->>E: concurrency sweep 1→32 clients
     E-->>U: QPS + p50/p95/p99
-    U->>E: filtered search @ 1% / 10% / 50% selectivity
+    U->>E: filtered search @ 1% / 5% / 10% / 50% selectivity
     E-->>U: recall vs recomputed filtered ground truth
     U->>E: churn 10% / 25%, re-measure
     U->>R: results/ops/*.jsonl

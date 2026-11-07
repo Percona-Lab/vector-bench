@@ -116,7 +116,8 @@ ops:
   # thing here to repeat: about fifteen extra minutes per engine on a run that
   # takes days.
   concurrency_repeats: 3
-  selectivities: [0.10, 0.01]
+  # 5% for the reason main.yml gives: the break between 10% and 1%.
+  selectivities: [0.10, 0.05, 0.01]
   churn_fractions: [0.10]
   # Two hours, not the thirty-minute default.
   #

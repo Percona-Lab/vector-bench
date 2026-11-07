@@ -64,7 +64,8 @@ ops:
   # warm-up. `concurrency_queries` stays unset here too — its default is the
   # whole test set, and setting it is the way back to a small pool.
   concurrency_repeats: 3
-  selectivities: [0.01, 0.10, 0.50]
+  # 5% for the reason main.yml gives: the break between 10% and 1%.
+  selectivities: [0.01, 0.05, 0.10, 0.50]
   churn_fractions: [0.10, 0.25]
   # pgvector 0.8 only. Filtered search behaves very differently per mode, so
   # the mode is stated rather than left at the vendor default -- and both of

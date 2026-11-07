@@ -424,11 +424,14 @@ _PER_QUERY_OPS_COSTS: Dict[str, Tuple[str, ...]] = {
         # Hence one rate for both of main's datasets, flat to a few hundred
         # dims and rising sub-linearly beyond.
         #
-        # Total: glove is 11,835 + 118,351 + 591,757 = 721,943 qualifying
-        # rows per column and sift 610,000, so both columns of both datasets
-        # are ~217 + ~183 = ~400 s (6.7 min) against main's printed 4.0 h
-        # filtered ceiling -- 2.8%. Small, cached and shared, and in neither
-        # printed figure, which is the only reason it is named at all.
+        # Total: glove is 11,835 + 59,176 + 118,351 + 591,757 = 781,119
+        # qualifying rows per column and sift 660,000, so both columns of both
+        # datasets are ~234 + ~198 = ~432 s (7.2 min) against main's printed
+        # 8.0 h filtered ceiling -- 1.5%. (~400 s against 6.0 h before `main`
+        # added the 5% point: the ceiling grew by a third, this by 8%.) The
+        # counts are `tag`'s; `ctag` delivers a little more than nominal, so
+        # its share is a little higher. Small, cached and shared, and in
+        # neither printed figure, which is the only reason it is named at all.
         "filtered ground truth: exact top-k recomputed by brute force over "
         "the qualifying rows of every (column, selectivity), over the whole "
         "test set rather than ops.max_queries and outside "
@@ -436,7 +439,7 @@ _PER_QUERY_OPS_COSTS: Dict[str, Tuple[str, ...]] = {
         "threshold, rows) and shared across engines, ops units and passes, "
         "so paid once each -- measured at ~150 s per million qualifying rows "
         "(5-8% spread, near dimension-independent below ~256), which is "
-        "~6.7 min for main's two datasets x two columns",
+        "~7.2 min for main's two datasets x two columns",
     ),
 }
 # Named, not quantified: there is no measured single-client ann QPS to
@@ -818,22 +821,23 @@ def _filtered_search(plan: _QueryPlan) -> Optional[_QueryTerm]:
     abandon the query already running.
 
     **Both figures below are per ops unit, matched to a per-unit
-    denominator.** `main` runs SIX filtered points per ops unit on an engine
-    with one mode -- two columns x three selectivities -- and TWELVE on
+    denominator.** `main` runs EIGHT filtered points per ops unit on an engine
+    with one mode -- two columns x four selectivities -- and SIXTEEN on
     pgvector, which declares two. With three engines that is 8 ops units
     (mariadb 1 + alisql 1 + pgvector 2 build modes, over 2 datasets), so
-    4 x 6 + 4 x 12 = 72 points per profile. Pairing the per-unit overrun
+    4 x 8 + 4 x 16 = 96 points per profile. Pairing the per-unit overrun
     against the per-profile ceiling is the error that has cost this repo the
     most: docs once said 46 h where the code said 51.1, and CLAUDE.md was out
     by 270 h.
 
-    At the 1.1 s a query measured for `tag` at 1%, the overrun is 6 x 1.1 =
-    **6.6 s against the 0.50 h a one-mode unit's six points can spend** --
+    At the 1.1 s a query measured for `tag` at 1%, the overrun is 8 x 1.1 =
+    **8.8 s against the 0.67 h a one-mode unit's eight points can spend** --
     0.37%, and the same 0.37% on pgvector, where both halves of the ratio
-    double. The same ratio per profile is 72 x 1.1 = 79.2 s against the
-    printed 6.0 h. Either pairing is honest; mixing them understates it
-    twelvefold -- 72 points over 6, where before the mode factor it was
-    eightfold over 48.
+    double. The same ratio per profile is 96 x 1.1 = 105.6 s against the
+    printed 8.0 h. Either pairing is honest; mixing them understates it
+    twelvefold -- 96 points over 8, where before the mode factor it was
+    eightfold over 64. (Six, twelve and 72 points before `main` added the
+    5% selectivity; the ratios did not move.)
 
     **The iterative-scan modes ARE in the arithmetic now, and the factor is
     pgvector's alone.** `cli.py:_ops_iterative_scan` used to resolve the FIRST
