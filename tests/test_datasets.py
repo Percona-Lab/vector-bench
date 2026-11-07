@@ -696,6 +696,36 @@ class TestTagThresholdIsMeasuredToo:
             assert t == ds.selectivity_to_threshold(nominal, 100)
 
 
+class TestTheFivePercentPointIsItsOwnPoint:
+    """`main` and `full` measure 1%, 5% and 10%. On `tag` 5% is five exact
+    buckets; on `ctag` it is however many whole clusters reach 5%, and a lumpy
+    partition could in principle land 5% on the same cluster count as 1% or
+    10%. Then two nominal points would share a threshold, a ground-truth cache
+    file and a measured share, and the curve would plot one measurement
+    twice under two labels. This pins that at the shipped bucket and cluster
+    counts the three requests are three different filters."""
+
+    NOMINALS = (0.01, 0.05, 0.10)
+
+    def test_tag_gives_three_distinct_thresholds(self):
+        tags = ds.assign_tags(20_000)
+        got = [ds.tag_threshold_for(tags, n) for n in self.NOMINALS]
+        assert [g.threshold for g in got] == [1, 5, 10]
+        assert [g.actual_selectivity for g in got] == [0.01, 0.05, 0.10]
+
+    def test_ctag_gives_three_distinct_increasing_shares(self):
+        ctags = ds.assign_ctags(_mixed_norm_corpus(20_000, 8, seed=23),
+                                ds.EUCLIDEAN, n_clusters=ds.CTAG_CLUSTERS,
+                                seed=ds.CTAG_SEED)
+        got = [ds.ctag_threshold_for(ctags, n) for n in self.NOMINALS]
+        thresholds = [t for t, _ in got]
+        shares = [a for _, a in got]
+        assert thresholds == sorted(set(thresholds)), got
+        assert shares == sorted(set(shares)), got
+        for nominal, share in zip(self.NOMINALS, shares):
+            assert share >= nominal, (nominal, share)
+
+
 class TestThresholdForDispatch:
     def test_tag_and_ctag_route_to_their_own_rule(self):
         tags = ds.assign_tags(1000, buckets=100)

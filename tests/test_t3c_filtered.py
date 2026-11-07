@@ -1657,8 +1657,10 @@ class TestTheProfileKeysReachTheHarness:
         for argv in seen:
             assert argv[argv.index("--filtered-budget") + 1] == "300"
             assert argv[argv.index("--filter-columns") + 1] == "tag,ctag"
-            # main.yml restored the 1% point; §3.4 item 4.
-            assert argv[argv.index("--selectivities") + 1] == "0.01,0.1,0.5"
+            # main.yml restored the 1% point (§3.4 item 4) and later added
+            # 5%, between the 10% and 1% where post-filtering falls off.
+            assert (argv[argv.index("--selectivities") + 1]
+                    == "0.01,0.05,0.1,0.5")
 
     def test_main_hands_the_budget_and_the_columns_to_the_workload(self):
         """The middle link, and two mutants survived until this existed.
@@ -1734,12 +1736,12 @@ class TestTheProfileKeysReachTheHarness:
             fw.DEFAULT_COLUMNS)
 
     def test_main_yml_declares_what_the_spec_asks_for(self):
-        """PR 3 §3.4 item 4, as configuration."""
+        """PR 3 §3.4 item 4, as configuration, plus the 5% point."""
         import yaml
         ops = yaml.safe_load(
             open(os.path.join(VB_ROOT, "config", "profiles",
                               "main.yml")))["ops"]
-        assert ops["selectivities"] == [0.01, 0.10, 0.50]
+        assert ops["selectivities"] == [0.01, 0.05, 0.10, 0.50]
         assert ops["filtered_budget_s"] == 300
 
 

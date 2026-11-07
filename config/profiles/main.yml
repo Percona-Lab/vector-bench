@@ -176,11 +176,19 @@ ops:
   # minutes whatever the engine does inside them and the record says how many
   # of the 500 queries it managed. A truncated point is greyed out in the
   # report rather than averaged in.
-  selectivities: [0.01, 0.10, 0.50]
+  #
+  # 5% because the curve breaks somewhere between 10% and 1% and two points
+  # cannot say where: MariaDB and AliSQL post-filter and keep walking the
+  # graph, and fall from a usable rate at 10% to 0.3-0.5 QPS at 1%. A reader
+  # pointed out that Lucene's HNSW is at its WORST at 5%, before a smaller
+  # bitset flips its filter strategy -- so the shape between the two is not
+  # safe to interpolate for any engine. `tag` is `row_id % 100`, so 5% is
+  # five exact buckets and needs no new column.
+  selectivities: [0.01, 0.05, 0.10, 0.50]
   # Five minutes per (column, selectivity, iterative-scan mode) point. The
-  # worst case this profile can reach per engine-dataset is 2 columns x 3
-  # selectivities x 300 s = 30 minutes at one mode, which is every engine but
-  # pgvector, and 60 minutes at pgvector's two -- against the ~51 h of ingest
+  # worst case this profile can reach per engine-dataset is 2 columns x 4
+  # selectivities x 300 s = 40 minutes at one mode, which is every engine but
+  # pgvector, and 80 minutes at pgvector's two -- against the ~51 h of ingest
   # it pays before a single query runs. Without it the same grid was
   # unbounded: the run estimate printed its shape and refused to call the
   # total a ceiling, which is the honest thing to print and a bad thing to

@@ -82,7 +82,7 @@ running a benchmark does not install anything onto the machine being measured.
 | Recall vs QPS | ann-benchmarks | The standard ANN quality/speed frontier |
 | Index build cost | ops harness | Build time, peak server RSS, index size on disk |
 | Concurrency scaling | ops harness | QPS and p50/p95/p99 at 1→32 clients |
-| Filtered (hybrid) search | ops harness | Vector search + `WHERE` at 1% / 10% / 50% selectivity |
+| Filtered (hybrid) search | ops harness | Vector search + `WHERE` at 1% / 5% / 10% / 50% selectivity |
 | Churn | ops harness | Recall drift after 10% / 25% delete+reinsert |
 
 Only the first is what ann-benchmarks provides. The rest are what separate a

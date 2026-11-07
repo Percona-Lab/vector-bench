@@ -139,5 +139,6 @@ ops:
   # 1% is the hard case and the one worth having: on glove-100 MariaDB fell to
   # 0.9 QPS there against 326 unfiltered, a 360x penalty that is itself a
   # result. It is slow to measure for the same reason, so budget for it.
-  selectivities: [0.10, 0.01]
+  # 5% says where between the two MariaDB falls off; see main.yml.
+  selectivities: [0.10, 0.05, 0.01]
   churn_fractions: [0.10]

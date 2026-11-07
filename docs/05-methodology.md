@@ -685,9 +685,12 @@ formulation of it, summing the spans, is blind to this very case.
 
 ### 2.4 Filtered / hybrid search (ops harness)
 
-Vector search with a scalar `WHERE` predicate, at three selectivities (~1%, ~10%,
-~50% of rows passing) on **two different predicates**. Six points per engine,
-dataset and index configuration.
+Vector search with a scalar `WHERE` predicate on **two different predicates**,
+at four selectivities in `main` and `full` (~1%, ~5%, ~10% and ~50% of rows
+passing: eight points per engine, dataset and index configuration) and three in
+`tuned-complete` and `mariadb-blog`, which have no 50% point (six). The 5% point
+is there because post-filtering engines fall off somewhere between 10% and 1%,
+and those two points cannot say where.
 
 #### The two filter modes
 
@@ -817,9 +820,9 @@ what dominates is the dimension-independent work instead: materialising the
 `n_test × n_qualifying` score matrix and partially sorting it. One rate
 therefore covers both of `main`'s datasets.
 
-For `main` that is ~3.6 minutes for glove's two-column grid and ~3.1 for
-sift's — **~6.7 minutes for the profile**, against the 4.0 h filtered ceiling
-it prints, so ~2.8%. Paid once per (dataset, metric, k, column, threshold,
+For `main` that is ~3.9 minutes for glove's two-column grid and ~3.3 for
+sift's — **~7.2 minutes for the profile**, against the 8.0 h filtered ceiling
+it prints, so ~1.5%. Paid once per (dataset, metric, k, column, threshold,
 rows) and then shared across every engine, ops unit and resource pass. The run
 estimate names it under the costs neither of its figures includes.
 

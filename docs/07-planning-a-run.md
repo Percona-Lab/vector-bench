@@ -124,9 +124,9 @@ engines:
 | `dev` | 1 | ~0.0 h | ~0.01 h | ~0.2 h | **~0.21 h** |
 | `smoke` | 1 | ~0.3 h | ~0.07 h | ~8.7 h | **~9.01 h** |
 | `quick` | 1 | ~36.2 h | ~2.69 h | ~36.4 h | **~72.61 h** |
-| `main` | 1 | ~68.1 h | ~5.78 h | ~39.5 h | **~107.58 h** |
-| `full` | 2 | ~532.0 h | ~79.33 h | ~473.6 h | **~1005.63 h** |
-| `mariadb-blog` | 1 | ~21.3 h | ~1.69 h | ~7.6 h | **~28.95 h** |
+| `main` | 1 | ~68.1 h | ~5.78 h | ~41.5 h | **~109.58 h** |
+| `full` | 2 | ~532.0 h | ~79.33 h | ~497.6 h | **~1029.63 h** |
+| `mariadb-blog` | 1 | ~21.3 h | ~1.69 h | ~8.1 h | **~29.45 h** |
 
 The ingest column differs from the table above it because that one was computed
 by hand from §1's three headline rates, while the estimator uses the measured
@@ -173,15 +173,15 @@ estimated ingest time (loading only, before any queries):
 estimated query time (the parts the profile puts a clock on):
   concurrency windows    ~1.3 h
                            5 client count(s) x 30s x 3 repeat(s) + one warm-up window each per ops unit, fixed by the profile not by the engine
-  filtered search        ~0.0 h typical, ~6.0 h worst case
-                           e.g. 2 filter column(s) x 3 selectivities x 1 iterative-scan mode x 500 queries = 3,000 queries per ops unit, at a rate nothing here has measured; 300s cap/point bounds it
+  filtered search        ~0.0 h typical, ~8.0 h worst case
+                           e.g. 2 filter column(s) x 4 selectivities x 1 iterative-scan mode x 500 queries = 4,000 queries per ops unit, at a rate nothing here has measured; 300s cap/point bounds it
   churn re-insert        ~4.3 h typical, ~32.0 h worst case
                            e.g. 295,878 rows written back at ~147 rows/s (the load rate; re-insert can be far slower), 7200s cap/step
   churn reader baseline  ~0.1 h
                            2 churn fraction(s) x 30s of 4 reader(s) before each step's deletes, fixed by the profile not by the engine
-  subtotal ~5.8 h typical, ~39.5 h worst case
+  subtotal ~5.8 h typical, ~41.5 h worst case
 
-estimated run time ~73.9 h typical, ~107.6 h worst case
+estimated run time ~73.9 h typical, ~109.6 h worst case
   Plan against the worst case: a run materially longer than it is a bug.
   Each budgeted term tests its deadline before starting work, so it can overrun
     by the one query or slice already running when the budget expires.
@@ -192,7 +192,7 @@ estimated run time ~73.9 h typical, ~107.6 h worst case
       churn delete: ops.churn_fractions of the corpus removed per step, with no budget bounding the delete itself
       churn repair path: on an engine that has one it can execute at its pinned version (pgvector's VACUUM (ANALYZE); Percona Server's index replace only while capabilities.vector_index_replace is true -- it is false at the pinned version, where the driver declares no repair path, runs nothing and pays neither cost), driver.maintain() per churn fraction plus a third ops.max_queries measurement of the repaired index -- the repair has no measured rate at any corpus size and nothing caps either
       concurrency warm-up: 50 queries per client before each measured window
-      filtered ground truth: exact top-k recomputed by brute force over the qualifying rows of every (column, selectivity), over the whole test set rather than ops.max_queries and outside ops.filtered_budget_s; cached per (dataset, metric, k, column, threshold, rows) and shared across engines, ops units and passes, so paid once each -- measured at ~150 s per million qualifying rows (5-8% spread, near dimension-independent below ~256), which is ~6.7 min for main's two datasets x two columns
+      filtered ground truth: exact top-k recomputed by brute force over the qualifying rows of every (column, selectivity), over the whole test set rather than ops.max_queries and outside ops.filtered_budget_s; cached per (dataset, metric, k, column, threshold, rows) and shared across engines, ops units and passes, so paid once each -- measured at ~150 s per million qualifying rows (5-8% spread, near dimension-independent below ~256), which is ~7.2 min for main's two datasets x two columns
 ```
 
 Read it. It is the cheapest part of the whole exercise.

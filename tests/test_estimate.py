@@ -431,8 +431,9 @@ class TestTotalHoursStillMeansIngest:
         # step (was 1800) and every client count pays one discarded
         # warm-up window, so the figures below moved from the ones the
         # docstring narrates; the arithmetic is the same with those two
-        # inputs.
-        assert e["worst_case_total_hours"] == 21.64
+        # inputs. 22.98 and not 21.64 since `main` added the 5% selectivity:
+        # 4 pgvector ops units x 2 modes x 2 columns x 300 s = 1.33 h.
+        assert e["worst_case_total_hours"] == 22.98
         assert e["long_run"] is False
 
 
@@ -1352,7 +1353,10 @@ class TestTheWholeQueryEstimateForMain:
         # `_charged_scan_modes` exists to refuse.
         # Unmoved by the eighth engine: MyVector's driver declines filtered
         # search, and `_runs_filtered_search` keeps it out of this term.
-        assert term(e, "filtered search")["worst_hours"] == 10.00
+        # 13.33 and not 10.00 since `main` added the 5% selectivity: four
+        # selectivities, so 16 points on pgvector and 8 elsewhere -- 4/3 of
+        # every unit's ceiling.
+        assert term(e, "filtered search")["worst_hours"] == 13.33
         # 2 fractions x 30 s x 16 ops units across main's SEVEN engines and
         # two datasets = 960 s = 0.267 h, and it is both the typical figure
         # and the ceiling because the window is a fixed span. Over six
@@ -1371,8 +1375,10 @@ class TestTheWholeQueryEstimateForMain:
         # +0.33 / +0.34 with VillageSQL's concurrency windows (it declines
         # filtered search and churn, so those terms charge it nothing).
         # +0.34 / +0.33 again with villagesql84's, for the same reason.
+        # +0 / +3.33 when `main` added the 5% selectivity: filtered search's
+        # ceiling, 10.00 h -> 13.33 h, and nothing typical.
         assert e["query_hours"] == 10.32
-        assert e["query_hours_worst"] == 86.30
+        assert e["query_hours_worst"] == 89.63
         # The totals move with the ENGINE LIST as well as with the ann M
         # grid. Over six engines these were 100.16 and 116.39, before the
         # iterative-scan modes added 2.0 h to pgvector alone. The INGEST half
@@ -1381,9 +1387,10 @@ class TestTheWholeQueryEstimateForMain:
         # is 100.44 over seven now that its rate is measured, and the 7.38 h
         # of the difference is ingest and not query time.
         # 110.42 / 186.41 with VillageSQL's concurrency windows; 110.76 /
-        # 186.74 with villagesql84's.
+        # 186.74 with villagesql84's; 190.07 worst once `main` added the 5%
+        # selectivity (+3.33 h of filtered ceiling, nothing typical).
         assert e["typical_total_hours"] == 110.76
-        assert e["worst_case_total_hours"] == 186.74
+        assert e["worst_case_total_hours"] == 190.07
 
     def test_the_totals_are_the_sums_a_reader_can_do_on_the_printed_lines(self):
         e = est("main")
@@ -1725,18 +1732,18 @@ class TestThePrintedOutput:
         because the worst case sits on the same line."""
         out = printed("main")
         # Padded to the longest term name, `mongot index-size settle`.
-        assert ("filtered search           ~0.0 h typical, ~10.0 h worst case"
+        assert ("filtered search           ~0.0 h typical, ~13.3 h worst case"
                 in out)
-        # Anchored on the `=`, because "3,000 queries per ops unit" is a
-        # substring of "13,000 queries per ops unit" -- the shape that has
+        # Anchored on the `=`, because "4,000 queries per ops unit" is a
+        # substring of "14,000 queries per ops unit" -- the shape that has
         # cost this series four tests.
-        assert "= 3,000 queries per ops unit" in out
+        assert "= 4,000 queries per ops unit" in out
         assert "at a rate nothing here has measured" in out
 
     def test_the_total_is_printed(self):
         out = printed("main")
-        # + mongot settle, + VillageSQL, + villagesql84
-        assert "~186.7 h worst case" in out
+        # + mongot settle, + VillageSQL, + villagesql84, + the 5% selectivity
+        assert "~190.1 h worst case" in out
         assert "~110.8 h typical" in out
 
     def test_the_bug_criterion_is_only_claimed_when_it_holds(self, monkeypatch):
