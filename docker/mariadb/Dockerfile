@@ -98,23 +98,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libmariadb-dev libhdf5-dev pkg-config
 
 # The MySQL-family engines deliberately share one client stack — MariaDB
-# Connector/C via the `mariadb` Python driver — so their ingest and query
-# numbers are not skewed by different client implementations. Connector/C
-# speaks the MySQL protocol, so the same driver serves AliSQL.
+# Connector/Python 2.0, pure Python, binary-protocol prepared statements — so
+# their ingest and query numbers are not skewed by different client
+# implementations or by one client behaving differently per server. See
+# requirements-mysql.txt for why 2.0 and why pure Python; the build fails if
+# any other implementation is what imports.
 COPY requirements-bench.txt requirements-mysql.txt /tmp/
-# MARIADB_CONFIG must point at the distro's mariadb_config, not at the one on
-# PATH. In the MariaDB image PATH starts with /opt/mariadb/bin, whose
-# mariadb_config describes the server's own bundled Connector/C (3.4.9 in
-# 11.8.8) and links against /opt/mariadb/lib — which is not in the loader path,
-# so at runtime the distro's libmariadb.so.3 (3.3.17) is loaded instead and the
-# extension refuses to import. Pinning both images to the distro's Connector/C
-# fixes that and keeps the two MySQL-family engines on a genuinely identical
-# client, which is the whole point of sharing one driver.
-RUN MARIADB_CONFIG=/usr/bin/mariadb_config \
-    pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir --break-system-packages \
         -r /tmp/requirements-bench.txt -r /tmp/requirements-mysql.txt \
     && rm -f /tmp/requirements-bench.txt /tmp/requirements-mysql.txt \
-    && python3 -c "import mariadb; print('Connector/Python', mariadb.__version__, 'OK')"
+    && python3 -c "import mariadb; v = mariadb.__version__; assert v.startswith('2.0.0rc2') and v.endswith('+native'), v; print('Connector/Python', v, 'OK')"
 
 
 WORKDIR /home/app

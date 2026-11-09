@@ -605,16 +605,20 @@ class TestAnnResultFingerprint:
         finally:
             ann_pass.ANN_MEASUREMENT_VERSION = original
 
-    def test_the_index_warm_up_is_version_3(self):
+    def test_the_mysql_family_client_is_version_4(self):
         """Pinned so the next bump is a decision, not a side effect: 3 is the
         one-time index warm-up, and every tree keyed by 2 holds a cold first
         point (full-20260825: ef_search 10 below 20 on every MySQL-family
-        curve). Raising it re-measures every recall point of every engine."""
+        curve). 4 is the MySQL-family client: every tree keyed by 3 holds
+        MySQL-family QPS measured through a connector that re-prepared every
+        query and pipelined it only for MariaDB. Raising it re-measures every
+        recall point of every engine."""
         from orchestrator import ann_pass
-        assert ann_pass.ANN_MEASUREMENT_VERSION == 3
+        assert ann_pass.ANN_MEASUREMENT_VERSION == 4
         source = open(os.path.join(VB_ROOT, "orchestrator",
                                    "ann_pass.py")).read()
         assert "3 -- the one-time index warm-up" in source
+        assert "4 -- the MySQL-family client" in source
 
     def test_results_dir_is_namespaced_by_config(self, tmp_path):
         from orchestrator.ann_pass import annb_results_dir, ann_fingerprint

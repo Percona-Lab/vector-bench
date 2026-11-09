@@ -58,7 +58,7 @@ import numpy
 
 from .base import (DATABASE, FILTER_TAG, TABLE, ConnectionSpec, IndexSpec,
                    LoadResult, RowAttrs, checked_filter_column)
-from .mysql_family import (INSERT_SQL, PROGRESS_INTERVAL_S, MySQLDialect,
+from .mysql_family import (PROGRESS_INTERVAL_S, insert_batch, MySQLDialect,
                            MySQLFamilyDriver)
 
 #: The EXPLAIN FORMAT=TREE text the server prints for a distance scan
@@ -303,7 +303,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
                     batch: int = 500, report: bool = False) -> None:
         """`MySQLFamilyDriver._load_range` with the vector as text.
 
-        Same batch size, same `executemany`, same progress reporting, so the
+        Same batch size, same `insert_batch`, same progress reporting, so the
         only difference from the other MySQL-family engines is the value
         encoding the server forces.
         """
@@ -314,7 +314,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
         for i in range(lo, hi):
             rows.append((start_id + i, *attrs.row(i), text_literal(vectors[i])))
             if len(rows) >= batch:
-                cur.executemany(INSERT_SQL, rows)
+                insert_batch(cur, rows)
                 rows = []
                 now = time.perf_counter()
                 if report and now >= next_report:
@@ -325,8 +325,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
                           f"{rate:,.0f} rows/s, ETA {eta / 60:.1f} min",
                           flush=True)
                     next_report = now + PROGRESS_INTERVAL_S
-        if rows:
-            cur.executemany(INSERT_SQL, rows)
+        insert_batch(cur, rows)
         cur.execute("COMMIT")
 
     def insert_rows(self, ids: Sequence[int], vectors: numpy.ndarray,
@@ -336,7 +335,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
         rows = [(int(row_id), *attrs.row(i), text_literal(vectors[i]))
                 for i, row_id in enumerate(ids)]
         for start in range(0, len(rows), 500):
-            self._cur.executemany(INSERT_SQL, rows[start:start + 500])
+            insert_batch(self._cur, rows[start:start + 500])
         self._cur.execute("COMMIT")
 
     def delete_ids(self, ids: Sequence[int]) -> None:
@@ -367,7 +366,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
                 f"_select's filtered argument is a flag, not a column; got "
                 f"{filtered!r}. Did you mean column={filtered!r}?")
         assert self._index is not None, "create_schema must run before querying"
-        where = (f"WHERE {checked_filter_column(column)} < %s "
+        where = (f"WHERE {checked_filter_column(column)} < ? "
                  if filtered else "")
         _profile, function = self._profile(self._index)
         literal = "'" + text_literal(vector) + "'"
@@ -451,7 +450,7 @@ class VillageSQLDriver(MySQLFamilyDriver):
         try:
             self._cur.execute(
                 "SELECT FILE_SIZE FROM information_schema.INNODB_TABLESPACES "
-                "WHERE NAME = %s", (f"{DATABASE}/{TABLE}",))
+                "WHERE NAME = ?", (f"{DATABASE}/{TABLE}",))
             row = self._cur.fetchone()
             return int(row[0]) if row and row[0] else 0
         except Exception:

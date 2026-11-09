@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional
 import numpy
 
 from ...vb_mysql import (DATABASE, INSERT_BATCH, PROGRESS_INTERVAL_S, TABLE,
-                         Dialect, VBMySQLBase)
+                         Dialect, VBMySQLBase, insert_batch)
 
 # vsql-vector-pk 93ed008, src/index/hnsw/storage.h (`Options::DEFAULT_M`,
 # `DEFAULT_EF_CONSTRUCTION`, `MAX_M`, `MAX_EF_CONSTRUCTION_FACTOR`) and
@@ -155,7 +155,6 @@ class VillageSQL(VBMySQLBase):
     def _insert_serial(self, cur, X: numpy.ndarray, offset: int = 0,
                        label: str = "") -> None:
         """`VBMySQLBase._insert_serial` with the vector as text."""
-        sql = f"INSERT INTO {TABLE} (id, tag, v) VALUES (%s, %s, %s)"
         total = len(X)
         started = time.time()
         next_report = started + PROGRESS_INTERVAL_S
@@ -164,7 +163,7 @@ class VillageSQL(VBMySQLBase):
             idx = offset + i
             rows.append((idx, idx % 100, text_literal(embedding)))
             if len(rows) >= INSERT_BATCH:
-                cur.executemany(sql, rows)
+                insert_batch(cur, rows)
                 cur.execute("COMMIT")
                 rows = []
                 now = time.time()
@@ -173,8 +172,7 @@ class VillageSQL(VBMySQLBase):
                     print(f"[vb] {label}{i + 1:,}/{total:,} rows, "
                           f"{rate:,.0f} rows/s", file=sys.stderr)
                     next_report = now + PROGRESS_INTERVAL_S
-        if rows:
-            cur.executemany(sql, rows)
+        insert_batch(cur, rows)
         cur.execute("COMMIT")
 
     # ------------------------------------------------------------------

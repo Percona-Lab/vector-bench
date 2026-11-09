@@ -98,12 +98,13 @@ INSERT INTO items VALUES (2, 1, VEC_FromText('[0.2, 0.1, 0.4]'));
 From an application, bind a 4×dim byte string. In Python:
 
 ```python
-import numpy, mariadb
-conn = mariadb.connect(host="127.0.0.1", port=3306, user="bench", password="bench")
+import numpy, mariadb   # Connector/Python 2.0, as the harness uses it
+conn = mariadb.connect(host="127.0.0.1", port=3306, user="bench", password="bench",
+                       binary=True)
 cur = conn.cursor()
 cur.execute("USE demo")
 vec = numpy.array([0.1, 0.2, 0.3], dtype="<f4").tobytes()
-cur.execute("INSERT INTO items (id, tag, v) VALUES (%s, %s, %s)", (3, 0, vec))
+cur.execute("INSERT INTO items (id, tag, v) VALUES (?, ?, ?)", (3, 0, vec))
 conn.commit()
 ```
 
@@ -212,13 +213,14 @@ INSERT INTO items VALUES (1, 0, VEC_FROMTEXT('[0.1,0.2,0.3]'));
 ```
 
 ```python
-import numpy, mariadb   # MariaDB Connector/C speaks the MySQL protocol
-conn = mariadb.connect(host="127.0.0.1", port=3307, user="bench", password="bench")
+import numpy, mariadb   # Connector/Python 2.0 speaks the MySQL protocol
+conn = mariadb.connect(host="127.0.0.1", port=3307, user="bench", password="bench",
+                       binary=True)   # what the harness uses; see docs/05 §3
 cur = conn.cursor()
 cur.execute("SET SESSION transaction_isolation = 'READ-COMMITTED'")
 cur.execute("USE demo")
 vec = numpy.array([0.1, 0.2, 0.3], dtype="<f4").tobytes()
-cur.execute("INSERT INTO items (id, tag, v) VALUES (%s, %s, %s)", (2, 0, vec))
+cur.execute("INSERT INTO items (id, tag, v) VALUES (?, ?, ?)", (2, 0, vec))
 conn.commit()
 ```
 

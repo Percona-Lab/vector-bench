@@ -1,19 +1,39 @@
-# Client stack for the MySQL-family bench images (MariaDB and AliSQL).
+# Client stack for the MySQL-family bench images (MariaDB, AliSQL, Percona
+# Server, MyVector, VillageSQL).
 #
-# MariaDB Connector/Python is used for BOTH engines on purpose. Connector/C
-# speaks the MySQL protocol, so one driver with binary-protocol prepared
-# statements talks to MariaDB 11.8 and to AliSQL 8.0.44 alike. Driving the two
-# engines through different clients would put part of any measured difference
-# in the client rather than in the server.
+# MariaDB Connector/Python is used for EVERY MySQL-family engine on purpose.
+# It speaks the MySQL protocol, so one driver talks to all of them, and
+# driving the engines through different clients would put part of any
+# measured difference in the client rather than in the server.
 #
-# --no-binary is required, not a preference. The published wheels are compiled
-# against a specific MariaDB Connector/C and refuse to load against another:
+# 2.0.0rc2, a release candidate, and not 1.1.x, because one driver is only
+# one client if it also BEHAVES the same on every server, and 1.1.10 did not:
+# with `%s` placeholders it re-prepared every query, and only against MariaDB
+# was the re-prepare pipelined into the execute's round trip. Percona and
+# AliSQL -- and VillageSQL's filtered queries -- paid two round trips and a
+# server-side prepare per query that MariaDB did not. (MyVector's and
+# VillageSQL's KNN queries inline the vector and bind nothing, so they went
+# over the text protocol and were unaffected.) The counts, and why
+# `binary=True` fixes it, are in harness/drivers/mysql_family.py
+# `connect_kwargs`.
 #
-#   ImportError: MariaDB Connector/Python was build with MariaDB Connector/C
-#   3.4.9, while the loaded MariaDB Connector/C library has version 3.3.17.
+# The PURE-PYTHON implementation, with neither the `binary` nor the `c` extra.
+# The `mariadb-binary` wheel at this version cannot authenticate to MySQL 8+
+# (it looks for caching_sha2_password.so under the path it was built at), so
+# it would hand MariaDB one client and Percona none. Both code paths also set
+# MARIADB_PYTHON_CONNECTOR=python before importing, and every image's build
+# asserts the `+native` implementation, so an extra that sneaks in through a
+# later edit fails the build rather than changing the client.
 #
-# Building from source makes the extension compile against whatever
-# libmariadb-dev the image actually has, so the image works on any base whose
-# Connector/C version happens to differ from the wheel's.
---no-binary mariadb
-mariadb==1.1.10
+# Pure Python means no Connector/C and nothing to compile, which retired the
+# old `--no-binary` / MARIADB_CONFIG arrangement that kept the 1.1 C extension
+# linked against the distro's libmariadb.
+#
+# The dependencies are pinned too: `cryptography` performs the
+# caching_sha2_password RSA exchange Percona's TCP connections need.
+mariadb==2.0.0rc2
+cachetools==8.0.0
+cffi==2.1.1
+cryptography==50.0.2
+packaging==26.3
+pycparser==3.12

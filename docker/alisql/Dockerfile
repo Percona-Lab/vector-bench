@@ -215,24 +215,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-dev build-essential git \
       libmariadb-dev libhdf5-dev pkg-config
 
-# Same client stack as the MariaDB bench image on purpose: MariaDB Connector/C
-# speaks the MySQL protocol, so both MySQL-family engines are driven through an
-# identical driver with binary-protocol prepared statements. Differences in the
-# numbers then belong to the servers, not to the clients.
+# Same client stack as the MariaDB bench image on purpose: MariaDB
+# Connector/Python 2.0 (pure Python) speaks the MySQL protocol, so every
+# MySQL-family engine is driven through an identical driver with
+# binary-protocol prepared statements. Differences in the numbers then belong
+# to the servers, not to the clients. See requirements-mysql.txt.
 COPY requirements-bench.txt requirements-mysql.txt /tmp/
-# MARIADB_CONFIG must point at the distro's mariadb_config, not at the one on
-# PATH. In the MariaDB image PATH starts with /opt/mariadb/bin, whose
-# mariadb_config describes the server's own bundled Connector/C (3.4.9 in
-# 11.8.8) and links against /opt/mariadb/lib — which is not in the loader path,
-# so at runtime the distro's libmariadb.so.3 (3.3.17) is loaded instead and the
-# extension refuses to import. Pinning both images to the distro's Connector/C
-# fixes that and keeps the two MySQL-family engines on a genuinely identical
-# client, which is the whole point of sharing one driver.
-RUN MARIADB_CONFIG=/usr/bin/mariadb_config \
-    pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir --break-system-packages \
         -r /tmp/requirements-bench.txt -r /tmp/requirements-mysql.txt \
     && rm -f /tmp/requirements-bench.txt /tmp/requirements-mysql.txt \
-    && python3 -c "import mariadb; print('Connector/Python', mariadb.__version__, 'OK')"
+    && python3 -c "import mariadb; v = mariadb.__version__; assert v.startswith('2.0.0rc2') and v.endswith('+native'), v; print('Connector/Python', v, 'OK')"
 
 
 WORKDIR /home/app

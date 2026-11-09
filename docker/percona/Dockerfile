@@ -868,31 +868,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gdb
 
 # The same client stack as the MariaDB and AliSQL bench images, for the same
-# reason: MariaDB Connector/C speaks the MySQL protocol, so all three
-# MySQL-family engines are driven through an identical client with
-# binary-protocol prepared statements, and differences in the numbers belong to
-# the servers. requirements-mysql.txt pins mariadb==1.1.10 with --no-binary.
+# reason: MariaDB Connector/Python 2.0 (pure Python) speaks the MySQL
+# protocol, so every MySQL-family engine is driven through an identical client
+# with binary-protocol prepared statements, and differences in the numbers
+# belong to the servers. requirements-mysql.txt pins mariadb==2.0.0rc2 and
+# says why.
 #
-# MARIADB_CONFIG points at the distro's mariadb_config and not at the one on
-# PATH, exactly as in the MariaDB and AliSQL images. Here PATH starts with
-# /opt/percona/bin, which carries no mariadb_config at all, so the pin is
-# belt-and-braces rather than load-bearing — but it keeps the three images
-# compiling the extension against one Connector/C, which is the point.
-#
-# ONE UNPROVEN THING, and it is the auth handshake rather than the build:
-# this base has no mysql_native_password (see init.sql), so the bench account
-# authenticates with caching_sha2_password. Over the unix socket the ann pass
-# uses (vb_mysql.py passes unix_socket=) that is a cleartext exchange the server
-# permits. Over the TCP connection the ops harness uses
-# (mysql_family.py passes host=/port=) it is not, and Connector/C must either
-# negotiate TLS or fetch the server's RSA public key. docs/09 §7 item 2 lists this as
-# the first thing the smoke run has to settle.
+# The auth handshake: this base has no mysql_native_password (see init.sql),
+# so the bench account authenticates with caching_sha2_password. Over the unix
+# socket the ann pass uses that is a cleartext exchange the server permits;
+# over the TCP connection the ops harness uses, the client fetches the
+# server's RSA public key, which is what the pinned `cryptography` is for.
+# Verified with 2.0.0rc2 against this image's server over TCP on 2026-11-09.
+# The prebuilt `mariadb-binary` wheel is the one that fails here, which is
+# one reason it is not installed.
 COPY requirements-bench.txt requirements-mysql.txt /tmp/
-RUN MARIADB_CONFIG=/usr/bin/mariadb_config \
-    pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir --break-system-packages \
         -r /tmp/requirements-bench.txt -r /tmp/requirements-mysql.txt \
     && rm -f /tmp/requirements-bench.txt /tmp/requirements-mysql.txt \
-    && python3 -c "import mariadb; print('Connector/Python', mariadb.__version__, 'OK')"
+    && python3 -c "import mariadb; v = mariadb.__version__; assert v.startswith('2.0.0rc2') and v.endswith('+native'), v; print('Connector/Python', v, 'OK')"
 
 WORKDIR /home/app
 ENV PERCONA_ROOT_DIR=/opt/percona \

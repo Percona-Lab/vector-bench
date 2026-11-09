@@ -1225,6 +1225,43 @@ Every engine gets identical constraints:
   the pgvector `shared_buffers` allocation.
 - Identical `M` grid and identical `ef_search` grid.
 - Single client (for the recall/QPS pass).
+- **The same client doing the same work on every MySQL-family server.** All
+  of them are driven through MariaDB Connector/Python, and since ann
+  measurement version 4 and ops measurement version 12 that is 2.0.0rc2, pure
+  Python, with `binary=True` and `?` placeholders: a query is prepared once
+  and then sent as one COM_STMT_EXECUTE, and a load batch is one multi-row
+  `INSERT`. Before that it was 1.1.10 with `%s` placeholders, and the same
+  driver behaved differently per server. Counted on 2026-11-09 with the
+  server's `Com_stmt_*` counters and a packet capture, over 1,000 identical
+  KNN queries and one 500-row batch:
+
+  | | Percona Server, 1.1.10 | MariaDB 11.8, 1.1.10 | either, 2.0.0rc2 `binary=True` |
+  | --- | --- | --- | --- |
+  | Per query | close + prepare + execute, **2 round trips** | close + prepare + execute, **1 round trip** (pipelined) | 1 execute, 1 round trip |
+  | 500-row `executemany` | 500 executes | 1 bulk execute | 500 on Percona, 1 on MariaDB — hence the multi-row `INSERT` |
+
+  The re-prepare was a 1.1.10 bug (the `%s` -> `?` rewrite defeated its
+  statement reuse), and only MariaDB's capability flags let the connector hide
+  it in one round trip, so every other engine whose query binds a parameter —
+  Percona, AliSQL, and VillageSQL's filtered query — paid a round trip and a
+  server-side prepare per query that MariaDB did not; and every non-MariaDB
+  engine loaded one row per round trip, and one autocommitted transaction per
+  row, where MariaDB sent a batch. Reported by VillageSQL, who measured 10–15%
+  more QPS on fashion-mnist from the switch. MyVector's and VillageSQL's KNN queries were never affected: they inline the vector (their servers need a constant), bind nothing, and go over the text protocol under both versions.
+
+  Two costs come with the switch and are stated rather than removed. **The
+  client is pure Python**, so it spends more CPU per query than the 1.1 C
+  extension did; in the ops harness the clients are separate processes in
+  their own container, but in the ann pass the client runs in the server's
+  container and cpuset, so that cost lands on the MySQL-family ann curves and
+  not on pgvector's (psycopg) or Valkey's. **The ann pass connects over
+  loopback TCP**, not the unix socket, because 2.0.0rc2 cannot complete a
+  caching_sha2_password login over a socket (`VBMySQLBase._conn_kwargs` has
+  the trace); pgvector's ann module still uses its socket. Numbers measured before the two versions are
+  not comparable with numbers after them, MariaDB's included, and the report
+  refuses to put them on one series. The rationale for the pin is in
+  `docker/_shared/requirements-mysql.txt`, the counts beside
+  `harness/drivers/mysql_family.py`'s `connect_kwargs`.
 
 ### Tuned pass
 
@@ -1488,7 +1525,8 @@ particular client library releases the interpreter lock around its socket wait
 is a property of that library's C extension, and no measurement in this
 repository settles it: these tests start no server. The engines do not share a
 library — pgvector goes through **psycopg3** and both MySQL-family engines
-through **MariaDB Connector/Python** over Connector/C, which
+through **MariaDB Connector/Python** — over Connector/C at the time of this
+run, pure Python since ops measurement version 12 (§3) — which
 `docker/_shared/requirements-mysql.txt` explains is deliberate so the two are
 not compared through different clients. This section used to say the next real
 run would settle it for free, and name the shape: pgvector near 1.0 at four

@@ -30,6 +30,12 @@ import numpy
 from .algorithms.base.module import BaseANN
 from .vb_warmup import IndexWarmupMixin
 
+# Pure-Python Connector/Python 2.0 on every image, whatever else pip
+# installed. `harness/drivers/mysql_family.py` (`connect_kwargs`, and the
+# setdefault above its import) has the measurement and the reason; the two
+# paths cannot import each other, so the decision is stated in both.
+os.environ.setdefault("MARIADB_PYTHON_CONNECTOR", "python")
+
 try:  # pragma: no cover - exercised only inside the bench images
     import mariadb as _connector
 except ImportError:  # pragma: no cover
@@ -41,12 +47,29 @@ SERVER_STOP_TIMEOUT_S = int(os.environ.get("VB_SERVER_STOP_TIMEOUT", "300"))
 ENTRYPOINT = os.environ.get("VB_ENTRYPOINT", "/usr/local/bin/vb-entrypoint")
 # How often a long load reports progress, in seconds.
 PROGRESS_INTERVAL_S = float(os.environ.get("VB_PROGRESS_INTERVAL", "20"))
-# Rows per executemany. The ops harness uses the same value; matching them
-# keeps the two measurement paths comparable on ingest.
+# Rows per multi-row INSERT. The ops harness uses the same value; matching
+# them keeps the two measurement paths comparable on ingest.
 INSERT_BATCH = int(os.environ.get("VB_INSERT_BATCH", "500"))
 
 TABLE = "t1"
 DATABASE = "ann"
+
+INSERT_HEAD = f"INSERT INTO {TABLE} (id, tag, v) VALUES "
+
+
+def insert_batch(cur, rows) -> None:
+    """Write `rows` as ONE multi-row INSERT -- never `executemany`.
+
+    `executemany` is batched only against MariaDB (COM_STMT_BULK_EXECUTE);
+    against every other MySQL-family server the connector loops one execute
+    per row -- 1 against 500 for a 500-row batch, measured 2026-11-09 under
+    Connector/Python 1.1.10 and 2.0.0rc2 alike. The ops harness's
+    `mysql_family.insert_batch` is the same function for the same reason.
+    """
+    if not rows:
+        return
+    cur.execute(INSERT_HEAD + ", ".join(["(?, ?, ?)"] * len(rows)),
+                [value for row in rows for value in row])
 
 
 def to_binary_f32(vector) -> bytes:
@@ -235,14 +258,41 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
         """Connection parameters.
 
         The server runs with grants enabled (see the entrypoint: --skip-grant-tables
-        would implicitly disable networking on MySQL 8), so a real account is used
-        even over the unix socket. Identical for both MySQL-family engines.
+        would implicitly disable networking on MySQL 8), so a real account is used.
+        Identical for every MySQL-family engine.
+
+        **Loopback TCP, not the unix socket** -- the server is in this
+        container (network "none" still has `lo`), so this costs a loopback
+        round trip where the socket cost a socket one. It is forced: under
+        Connector/Python 2.0.0rc2 a caching_sha2_password login over the unix
+        socket FAILS. The pure-Python client does not count a socket as a
+        secure transport, so on the server's "perform full authentication" it
+        asks for the RSA key; the server, which does count it as secure, reads
+        that request as the cleartext password and answers "Access denied"
+        (traced 2026-11-09 against Percona 9.7: client 0x02, server ERR 1045;
+        the same exchange over TCP gets the PEM and succeeds). That is every
+        MySQL 8+ engine here -- Percona, MyVector, VillageSQL. Upstream fixed it
+        on its 2.0 branch after rc2 (CONPY-340, `_is_connection_secure`); when
+        a release carries it, the socket can come back, under a new
+        ANN_MEASUREMENT_VERSION because the transport is part of the figure.
+        MariaDB and AliSQL could use the socket and are kept on TCP too, so the
+        five engines are measured over one transport. pgvector's ann module
+        still uses its socket, and Valkey and MongoDB were always TCP.
+
+        `binary=True`: every parameterised query is prepared once and then
+        sent as one COM_STMT_EXECUTE, on every server. Under Connector/Python
+        1.1.10 with `%s` placeholders each query was re-prepared, and only
+        MariaDB got prepare and execute pipelined into one round trip -- see
+        `harness/drivers/mysql_family.py` `connect_kwargs` for the counts.
+        Placeholders are `?`: the binary path sends the SQL unaltered.
         """
         return {
-            "unix_socket": self._socket,
+            "host": "127.0.0.1",
+            "port": int(os.environ.get("VB_DB_PORT", "3306")),
             "user": os.environ.get("VB_DB_USER", "bench"),
             "password": os.environ.get("VB_DB_PASSWORD", "bench"),
             "autocommit": True,
+            "binary": True,
         }
 
     def _connect(self):
@@ -313,7 +363,6 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
         767 rows/s for the batched path the ops harness uses. Same server, same
         client, same data; the loop was the whole difference.
         """
-        sql = f"INSERT INTO {TABLE} (id, tag, v) VALUES (%s, %s, %s)"
         total = len(X)
         started = time.time()
         next_report = started + PROGRESS_INTERVAL_S
@@ -323,7 +372,7 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
             idx = offset + i
             rows.append((idx, idx % 100, to_binary_f32(embedding)))
             if len(rows) >= INSERT_BATCH:
-                cur.executemany(sql, rows)
+                insert_batch(cur, rows)
                 cur.execute("COMMIT")
                 rows = []
                 now = time.time()
@@ -336,8 +385,7 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
                         file=sys.stderr,
                     )
                     next_report = now + PROGRESS_INTERVAL_S
-        if rows:
-            cur.executemany(sql, rows)
+        insert_batch(cur, rows)
         cur.execute("COMMIT")
 
     def _insert_parallel(self, X: numpy.ndarray) -> None:
@@ -409,7 +457,7 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
         hint = f" {self.dialect.force_index_hint}" if force_index else ""
         return (
             f"SELECT id FROM {TABLE}{hint} "
-            f"ORDER BY vec_distance_{self._metric_fn}(v, %s) LIMIT {k}"
+            f"ORDER BY vec_distance_{self._metric_fn}(v, ?) LIMIT {k}"
         )
 
     def _verify_plan(self, k: int = 10) -> bool:
@@ -437,7 +485,7 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
     def _dim_from_table(self) -> int:
         self._cur.execute(
             "SELECT CHARACTER_OCTET_LENGTH FROM information_schema.COLUMNS "
-            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_NAME='v'",
+            "WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME='v'",
             (DATABASE, TABLE),
         )
         row = self._cur.fetchone()

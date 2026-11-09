@@ -501,8 +501,28 @@ def pg_index_kinds(statements):
     return kinds
 
 
+def mysql_inserted_rows(cur):
+    """Every row a MySQL-family driver wrote through `cur`, in order.
+
+    The MySQL-family write path is one multi-row INSERT per batch
+    (`mysql_family.insert_batch`), never `executemany`, so the rows are the
+    flat parameter list of each INSERT cut back into `INSERT_ROW`-sized
+    tuples. `cur.many` staying empty is asserted, because a row that went
+    through `executemany` would be one this helper does not see.
+    """
+    assert not cur.many, "MySQL-family writes must not use executemany"
+    width = mysql_mod.INSERT_ROW.count("?")
+    rows = []
+    for sql, params in cur.statements:
+        if sql.startswith(mysql_mod.INSERT_HEAD):
+            assert len(params) % width == 0, sql
+            rows.extend(tuple(params[i:i + width])
+                        for i in range(0, len(params), width))
+    return rows
+
+
 def insert_columns_and_placeholders(sql: str):
-    """(column names, number of %s) for an INSERT ... VALUES statement."""
+    """(column names, placeholders) for an INSERT ... VALUES statement."""
     found = re.search(r"\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)", sql,
                       re.IGNORECASE)
     assert found, f"not an INSERT ... VALUES: {sql!r}"
@@ -1159,15 +1179,15 @@ class TestMySQLFamilyStatements:
     def test_the_filtered_select_is_exactly_one_predicate(self):
         """Regression: a second predicate appended, or the threshold dropped.
 
-        `re.fullmatch`, because `"WHERE ctag < %s" in sql` is satisfied by a
+        `re.fullmatch`, because `"WHERE ctag < ?" in sql` is satisfied by a
         statement that also carries `AND tag < 0`.
         """
         driver = mysql_driver()
         for column in COLUMNS:
             sql = driver._select(K, True, column=column)
             assert re.fullmatch(
-                rf"SELECT id FROM t1 WHERE {column} < %s "
-                rf"ORDER BY vec_distance_euclidean\(v, %s\) LIMIT {K}",
+                rf"SELECT id FROM t1 WHERE {column} < \? "
+                rf"ORDER BY vec_distance_euclidean\(v, \?\) LIMIT {K}",
                 sql), sql
 
     def test_the_unfiltered_select_mentions_neither_column(self):
@@ -1185,9 +1205,9 @@ class TestMySQLFamilyStatements:
         order. Mutant (a column added to the list only): 4 and 3.
         """
         columns, placeholders = insert_columns_and_placeholders(
-            mysql_mod.INSERT_SQL)
+            mysql_mod.INSERT_HEAD + mysql_mod.INSERT_ROW)
         assert len(columns) == len(placeholders) == 2 + len(COLUMNS)
-        assert set(placeholders) == {"%s"}
+        assert set(placeholders) == {"?"}
         assert [c for c in columns if c in COLUMNS] == list(COLUMNS)
         assert columns[0] == "id" and columns[-1] == "v"
 
@@ -1202,7 +1222,7 @@ class TestMySQLFamilyStatements:
         attrs = distinct_attrs(rows)
         driver = mysql_driver()
         driver.load(numpy.zeros((rows, DIM), dtype=numpy.float32), attrs)
-        sent = [row for _sql, batch in driver._cur.many for row in batch]
+        sent = mysql_inserted_rows(driver._cur)
         assert len(sent) == rows
         for i, row in enumerate(sent):
             assert len(row) == 2 + len(COLUMNS)
@@ -1214,8 +1234,8 @@ class TestMySQLFamilyStatements:
     def test_the_load_and_the_reinsert_send_the_same_statement(self):
         """Regression: the column added to one write path only.
 
-        Character-identical, which is the property the shared `INSERT_SQL`
-        gives. Honest: equal. Mutant (`insert_rows` restored to its pre-T3b
+        Character-identical, which is the property the shared `INSERT_HEAD`
+        and `INSERT_ROW` give. Honest: equal. Mutant (`insert_rows` restored to its pre-T3b
         three-column statement): the two differ, and the re-insert fails
         against a four-column table -- after the delete has already happened.
         """
@@ -1228,13 +1248,17 @@ class TestMySQLFamilyStatements:
         churn = mysql_driver()
         churn.insert_rows(list(range(100, 100 + rows)), vectors, attrs)
 
-        assert bulk._cur.many[0][0] == churn._cur.many[0][0]
-        assert bulk._cur.many[0][0] == mysql_mod.INSERT_SQL
+        def first_insert(cur):
+            return next(sql for sql, _ in cur.statements
+                        if sql.startswith(mysql_mod.INSERT_HEAD))
+
+        assert first_insert(bulk._cur) == first_insert(churn._cur)
+        assert first_insert(bulk._cur) == (
+            mysql_mod.INSERT_HEAD + ", ".join([mysql_mod.INSERT_ROW] * rows))
         # And the re-insert kept its own ids while using the shared statement.
-        assert [row[0] for row in churn._cur.many[0][1]] == \
-            list(range(100, 105))
-        assert [row[2] for row in churn._cur.many[0][1]] == \
-            [int(t) for t in attrs.ctag]
+        reinserted = mysql_inserted_rows(churn._cur)
+        assert [row[0] for row in reinserted] == list(range(100, 105))
+        assert [row[2] for row in reinserted] == [int(t) for t in attrs.ctag]
 
     def test_explain_sends_the_same_predicate_the_query_does(self):
         """Regression: the plan checked for one column and the measurement

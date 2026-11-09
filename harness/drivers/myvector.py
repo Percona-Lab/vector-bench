@@ -300,7 +300,7 @@ class MyVectorDriver(MySQLFamilyDriver):
     def _table_present(self) -> bool:
         self._cur.execute(
             "SELECT COUNT(*) FROM information_schema.TABLES "
-            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s", (DATABASE, TABLE))
+            "WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", (DATABASE, TABLE))
         row = self._cur.fetchone()
         return bool(row and int(row[0]))
 
