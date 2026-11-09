@@ -460,7 +460,7 @@ class TestTheNewDialectFieldsDefaultToTodaysBehaviour:
         assert bare.pk_type == "INT"
         assert bare.index_clause == (
             "VECTOR INDEX {name} (v) M={m} DISTANCE={metric}")
-        assert bare.distance_expr == "vec_distance_{metric}(v, %s)"
+        assert bare.distance_expr == "vec_distance_{metric}(v, ?)"
         assert bare.plan_marker == ""
         assert bare.ef_construction is None
 
@@ -561,8 +561,8 @@ class TestTheDDLEachEngineActuallySends:
 class TestTheSelectEachEngineActuallySends:
 
     def test_the_existing_engines_still_use_one_function_per_metric(self):
-        for cls, want in ((MariaDBDriver, "vec_distance_cosine(v, %s)"),
-                          (AliSQLDriver, "vec_distance_cosine(v, %s)")):
+        for cls, want in ((MariaDBDriver, "vec_distance_cosine(v, ?)"),
+                          (AliSQLDriver, "vec_distance_cosine(v, ?)")):
             driver = driver_with(cls, index=spec(metric="angular"))
             assert want in driver._select(10, False)
 
@@ -571,7 +571,7 @@ class TestTheSelectEachEngineActuallySends:
         mandatory. Uppercase here is for the reader -- the server matches it
         case-insensitively."""
         driver = driver_with(PerconaDriver, index=spec(metric="angular"))
-        assert "DISTANCE(v, %s, 'COSINE')" in driver._select(10, False)
+        assert "DISTANCE(v, ?, 'COSINE')" in driver._select(10, False)
 
     def test_the_metric_stays_a_literal_and_not_a_bound_parameter(self):
         """One placeholder in the unfiltered form and two in the filtered one,
@@ -580,8 +580,9 @@ class TestTheSelectEachEngineActuallySends:
         `(threshold, vector)` because the predicate precedes the ORDER BY."""
         for cls in (MariaDBDriver, AliSQLDriver, PerconaDriver):
             driver = driver_with(cls, index=spec(metric="euclidean"))
-            assert driver._select(10, False).count("%s") == 1, cls
-            assert driver._select(10, True).count("%s") == 2, cls
+            assert driver._select(10, False).count("?") == 1, cls
+            assert driver._select(10, True).count("?") == 2, cls
+            assert "%s" not in driver._select(10, True), cls
 
     def test_percona_builds_the_index_and_queries_it_with_one_metric_name(self):
         """A cosine index serves only 'COSINE' and an L2 index only

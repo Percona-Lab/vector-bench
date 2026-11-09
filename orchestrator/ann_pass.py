@@ -67,7 +67,25 @@ MARIADB_ENGINES = ("mariadb", "mariadb123")
 #        1M x 1536) still measured ef_search 10 slower than 20 on all six
 #        MariaDB/AliSQL curves (1.69x-2.13x) and on both Percona Search curves
 #        (1.13x). A curve measured at 2 has that cold first point in it.
-ANN_MEASUREMENT_VERSION = 3
+#   4 -- the MySQL-family client: MariaDB Connector/Python 2.0.0rc2 with
+#        `binary=True` and `?` placeholders, replacing 1.1.10 with `%s`.
+#        1.1.10 re-prepared every query, and pipelined the re-prepare into
+#        the execute's round trip only against MariaDB, so Percona's and
+#        AliSQL's curves paid a round trip and a server prepare per query
+#        that MariaDB's did not (counts in harness/drivers/mysql_family.py
+#        `connect_kwargs`). MyVector's and VillageSQL's inline the vector and
+#        bind nothing, so the protocol half does not touch them. Two more
+#        things move every MySQL-family curve, MariaDB's included: the client
+#        is now pure Python and runs inside the server's container and
+#        cpuset, so it costs more CPU per query than the 1.1 C extension; and
+#        the connection is loopback TCP instead of the unix socket, because
+#        rc2 cannot log in to a caching_sha2_password server over a socket
+#        (`VBMySQLBase._conn_kwargs`). pgvector, Valkey and MongoDB do not
+#        move, which is the cost of the engine-invariant fingerprint: their
+#        curves are re-measured unchanged. The load also became one multi-row
+#        INSERT per batch (`vb_mysql.insert_batch`), but the ann pass
+#        publishes no ingest figure, so that half moves nothing here.
+ANN_MEASUREMENT_VERSION = 4
 
 
 def ann_fingerprint(resolved: Any) -> str:

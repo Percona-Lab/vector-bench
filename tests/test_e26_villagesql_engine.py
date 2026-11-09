@@ -90,6 +90,22 @@ class ScriptedCursor:
         self.statements.append(sql)
         self.many.append(list(rows))
 
+    def inserted_rows(self, width: int) -> List[tuple]:
+        """The rows written through multi-row INSERTs, `width` values each.
+
+        Every MySQL-family write path sends one `INSERT ... VALUES (..),(..)`
+        per batch and never `executemany` (CLAUDE.md, the MySQL-family client
+        invariant), so `many` staying empty is part of the claim.
+        """
+        assert not self.many, "MySQL-family writes must not use executemany"
+        rows: List[tuple] = []
+        for sql, params in zip(self.statements, self.params):
+            if sql.startswith("INSERT INTO t1"):
+                assert sql.count("?") == len(params), sql
+                rows.extend(tuple(params[i:i + width])
+                            for i in range(0, len(params), width))
+        return rows
+
     def fetchall(self):
         rows, self._rows = self._rows, []
         return rows
@@ -259,7 +275,7 @@ class TestTextBinding:
         x = numpy.arange(12, dtype="<f4").reshape(3, 4)
         d.load(x, numpy.array([1, 2, 3]))
         d.insert_rows([10], x[:1], numpy.array([4]))
-        rows = [r for batch in d._cur.many for r in batch]
+        rows = d._cur.inserted_rows(4)
         assert len(rows) == 4
         assert all(isinstance(r[-1], str) and r[-1].startswith("[")
                    for r in rows)
@@ -306,7 +322,7 @@ class TestBruteForceIsRefused:
         d = driver(plan=INDEX_PLAN)
         d.query_filtered(numpy.ones(4), 10, 7, column="ctag")
         assert d._cur.statements[-1].startswith(
-            "SELECT id FROM t1 WHERE ctag < %s ORDER BY")
+            "SELECT id FROM t1 WHERE ctag < ? ORDER BY")
         assert d._cur.params[-1] == (7,)
         with pytest.raises(ValueError):
             d.query_filtered(numpy.ones(4), 10, 7, column="tag; DROP")
@@ -423,7 +439,7 @@ class TestAnnModule:
                 "WITH (M = 6, ef_construction = 192)") in create
         assert not any(s.startswith("CREATE INDEX")
                        for s in algo._cur.statements)
-        rows = [r for batch in algo._cur.many for r in batch]
+        rows = algo._cur.inserted_rows(3)
         assert rows[0] == (0, 0, "[1.0,1.0,1.0,1.0]")
 
     def test_a_brute_force_plan_is_refused_not_measured(self, annmod):

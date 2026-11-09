@@ -1058,7 +1058,7 @@ AliSQL already do so neither engine changes:
 |---|---|---|
 | `pk_type: str` | `"INT"` | `"BIGINT UNSIGNED"` |
 | `index_clause: str` | `"VECTOR INDEX {name} (v) M={m} DISTANCE={metric}"` | `"VECTOR KEY {name} (v) TYPE hnsw (M = {m}, ef_construction = {ef_construction}, metric = {metric})"` |
-| `distance_expr: str` | `"vec_distance_{metric}(v, %s)"` | `"DISTANCE(v, %s, '{metric_upper}')"` |
+| `distance_expr: str` | `"vec_distance_{metric}(v, ?)"` | `"DISTANCE(v, ?, '{metric_upper}')"` |
 | `plan_marker: str` | `""` (meaning "use `index_name`") | `"vector_ann"` |
 | `ef_construction: Optional[int]` | `None` | from `IndexSpec` |
 
@@ -1068,7 +1068,9 @@ Then:
   `index_clause` instead of hard-coding `id INT PRIMARY KEY` and the MariaDB
   index clause, and `_index_clause` builds the clause itself.
 - `_select` interpolates `distance_expr` instead of hard-coding
-  `vec_distance_{...}(v, %s)`. Note the **parameter order changes**: MariaDB's
+  `vec_distance_{...}(v, ?)` (`%s` until ops measurement version 12; the
+  binary-protocol client sends SQL unaltered, so `?` is the only spelling).
+  Note the **parameter order changes**: MariaDB's
   filtered form binds `(threshold, vector)` because the predicate precedes the
   `ORDER BY`; Percona's is the same order, because the metric is a literal and
   not a parameter. Keep it that way — making the metric a bound parameter would
@@ -1864,15 +1866,25 @@ unknowns look less urgent.
    returning `ERROR HY000: Plugin 'mysql_native_password' is not loaded` — so
    copying `docker/alisql/init.sql`'s line would make the container fail to
    boot, and `docker/percona/init.sql` uses the server default
-   `caching_sha2_password` instead. The **ann pass** connects over a unix socket
-   (`VBMySQLBase._conn_kwargs`, which passes `unix_socket`), where the cleartext
-   exchange is allowed.
+   `caching_sha2_password` instead. The **ann pass** connected over a unix socket,
+   where the cleartext exchange is allowed, until ann measurement version 4: it
+   now connects over loopback TCP (`VBMySQLBase._conn_kwargs`, which passes
+   `"host": "127.0.0.1",`), because Connector/Python 2.0.0rc2 cannot complete
+   that cleartext exchange over a socket (it asks for the RSA key instead, and
+   the server reads the request as the password).
    The **ops harness** connects over TCP (`MySQLFamilyDriver.connect`, which
-   passes `host=self.spec.host` and a port),
+   passes `connect_kwargs(self.spec)`, and `connect_kwargs` passes
+   `"host": spec.host, "port": spec.port`),
    where `caching_sha2_password` needs TLS or the server's RSA public key.
    `caching_sha2_password_auto_generate_rsa_keys` defaults ON so the key exists;
    whether Connector/C 3.3.x asks for it without an explicit option is untested.
    **This is the first thing to check, because it blocks every ops measurement.**
+   *Since ops measurement version 12 the client is Connector/Python 2.0.0rc2's
+   pure-Python implementation, not Connector/C; it fetched the RSA key and
+   authenticated the bench account over TCP against this image's server on
+   2026-11-09 (`cryptography` is pinned for it in
+   `docker/_shared/requirements-mysql.txt`). Its prebuilt `mariadb-binary`
+   wheel did not, which is one reason it is not installed.*
 3. **Does a `bytes` parameter arrive with the binary charset?** §2.1: `cs !=
    &my_charset_bin` is a hard refusal in *field.cc*'s *Field_vector::store*.
    Expected to work,

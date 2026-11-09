@@ -204,6 +204,22 @@ These are the reasons the code looks over-defensive. Do not relax them.
   hatch on `_check_free_disk`, so it silently disables the free-disk refusal, which is the one
   a core-dump campaign most needs. Bumping `ANN_MEASUREMENT_VERSION` is not the remedy either:
   it moves every pass's tree and re-measures every recall point for all seven engines.
+- **The MySQL-family client must do the same work on every server.** One driver
+  is one client only if it behaves the same everywhere, and Connector/Python
+  1.1.10 did not: with `%s` placeholders it re-prepared every query, pipelined
+  into one round trip only against MariaDB, and `executemany` was a bulk
+  execute on MariaDB and one execute per row everywhere else — so the other
+  engines that bind a query parameter (Percona, AliSQL, VillageSQL's filtered
+  query) paid for the client; MyVector's and VillageSQL's KNN queries inline
+  the vector as text and were unaffected. The fix is Connector/Python
+  2.0.0rc2, pure Python (`MARIADB_PYTHON_CONNECTOR=python`; the build asserts
+  `+native`), `binary=True` on every connection (`mysql_family.connect_kwargs`,
+  `VBMySQLBase._conn_kwargs`), `?` placeholders (2.0's binary path sends SQL
+  unaltered, so a `%s` is a server syntax error), and one multi-row INSERT per
+  batch (`insert_batch`, in both paths). Do not reintroduce `executemany` or
+  `%s` in MySQL-family SQL. The ann pass connects over loopback TCP, because
+  rc2 cannot log in to a caching_sha2_password server over the unix socket.
+  Ann measurement version 4 / ops version 12.
 - **Filtered ground truth is recomputed** (`harness/datasets.py`) — a `WHERE` predicate changes
   the correct answer set, and reusing unfiltered neighbours scores every engine against the
   wrong targets.

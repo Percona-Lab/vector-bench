@@ -1,10 +1,12 @@
 """Ops-harness drivers for MariaDB (MHNSW), AliSQL (VIDX) and Percona (InnoDB
 HNSW).
 
-All three are driven through MariaDB Connector/C via the `mariadb` Python
-package. Connector/C speaks the MySQL protocol, so one client library serves
-every server here — which is the point: if the engines were driven through
-different clients, part of any measured difference would belong to the clients.
+All three are driven through MariaDB Connector/Python 2.0 (`mariadb`, its
+pure-Python implementation), which speaks the MySQL protocol, so one client
+library serves every server here — which is the point: if the engines were
+driven through different clients, part of any measured difference would belong
+to the clients. **That is only true if the client also behaves the same on
+every server**, and Connector/Python 1.1 did not; see `connect_kwargs`.
 
 **Differences live in the `Dialect` values at the bottom of this file wherever
 they can.** For MariaDB and AliSQL that is all of them, and Percona moved three
@@ -40,10 +42,64 @@ from .base import (DATABASE, FILTER_CTAG, FILTER_TAG, TABLE, ConnectionSpec,
 
 PROGRESS_INTERVAL_S = float(os.environ.get("VB_PROGRESS_INTERVAL", "20"))
 
+# Connector/Python 2.0 picks an implementation at import time -- the
+# prebuilt `mariadb-binary` wheel, a compiled `mariadb-c`, or pure Python --
+# from whatever happens to be installed. Pinned to pure Python here so the
+# client is the same code on every image whatever pip resolved: the binary
+# wheel at 2.0.0rc2 cannot even authenticate to MySQL 8+ (it looks for
+# caching_sha2_password.so under the path it was BUILT at,
+# /host/tmp/mariadb-connector-c.build/...), so "whatever is installed" would
+# pick a different client for MariaDB than for Percona. Must precede the import.
+os.environ.setdefault("MARIADB_PYTHON_CONNECTOR", "python")
+
 try:
     import mariadb as _connector
 except ImportError:  # pragma: no cover - only the bench image has it
     _connector = None
+
+
+def connect_kwargs(spec: ConnectionSpec) -> Dict[str, Any]:
+    """The one set of connection options every MySQL-family connection uses.
+
+    **`binary=True` is the measurement decision.** It makes every
+    parameterised `execute` a server-side prepared statement that the client
+    prepares ONCE per distinct SQL string and then executes with a single
+    COM_STMT_EXECUTE. Measured on 2026-11-09 against Percona Server 9.7 and
+    MariaDB 11.8 by counting the server's Com_stmt_* counters and the
+    client's TCP send bursts over 1,000 identical KNN queries:
+
+        Connector/Python 1.1.10, `%s` placeholders (what this harness ran):
+            Percona  close+prepare+execute per query, 2 round trips
+            MariaDB  close+prepare+execute per query, 1 round trip
+        Connector/Python 2.0.0rc2, `binary=True`, `?` placeholders:
+            both     1 execute per query, 1 round trip, prepared once
+
+    1.1.10 rewrote `%s` to `?` and then compared the REWRITTEN statement with
+    the next call's `%s` string, so it never recognised a repeat and
+    re-prepared every query; MariaDB alone hid the cost, because Connector/C
+    pipelines prepare and execute into one round trip only against a server
+    that advertises MariaDB's capabilities. Every other engine whose query
+    BINDS a parameter -- Percona and AliSQL, and VillageSQL's filtered query
+    -- paid an extra round trip and a server-side prepare per query that
+    MariaDB did not. Reported by VillageSQL (Tomas), reproduced here.
+
+    The exception, which this does not change: MyVector's and VillageSQL's
+    KNN queries inline the query vector as a literal, because their servers
+    need a constant there (`VillageSQLDriver._select`, MyVector's `@vb_q`),
+    bind nothing, and so go over the text protocol under 1.1 and 2.0 alike,
+    re-parsing a several-KB literal per query. Same client, different work,
+    forced by the servers and stated in docs/04.
+
+    Placeholders are therefore `?` throughout: 2.0's binary path hands the
+    SQL to the server unaltered, and a `%s` is a syntax error there.
+    """
+    return {
+        "host": spec.host, "port": spec.port,
+        "user": spec.user, "password": spec.password,
+        "autocommit": True, "connect_timeout": 30,
+        "binary": True,
+    }
+
 
 # One INSERT for both write paths. The bulk load and churn's re-insert each
 # held their own copy of this string, naming the same columns by coincidence
@@ -51,10 +107,28 @@ except ImportError:  # pragma: no cover - only the bench image has it
 # the edit where one copy gets missed. The column names come from
 # `datasets.FILTER_COLUMNS` via base.py rather than being spelled here, so the
 # statement cannot name a column the dataset module does not compute.
-INSERT_SQL = (
-    f"INSERT INTO {TABLE} (id, {FILTER_TAG}, {FILTER_CTAG}, v) "
-    f"VALUES (%s, %s, %s, %s)"
-)
+INSERT_HEAD = f"INSERT INTO {TABLE} (id, {FILTER_TAG}, {FILTER_CTAG}, v) VALUES "
+INSERT_ROW = "(?, ?, ?, ?)"
+
+
+def insert_batch(cur, rows: Sequence[Tuple[Any, ...]]) -> None:
+    """Write `rows` as ONE multi-row INSERT -- never `executemany`.
+
+    `executemany` is batched only against MariaDB: the connector uses
+    MariaDB's COM_STMT_BULK_EXECUTE when the server advertises it and
+    otherwise loops one COM_STMT_EXECUTE per row. Measured on 2026-11-09 with
+    500 rows, under 1.1.10 and 2.0.0rc2 alike: MariaDB 1 execute, Percona 500.
+    So every engine but MariaDB loaded one round trip per row. A single
+    `INSERT ... VALUES (...),(...)` is one statement on every server, which is
+    what makes the load the same client work everywhere. The statement is
+    prepared once per distinct batch length (the full batch and one tail),
+    and 2.0 caches it; 500 rows x 4 parameters is far under the protocol's
+    65,535-placeholder limit.
+    """
+    if not rows:
+        return
+    cur.execute(INSERT_HEAD + ", ".join([INSERT_ROW] * len(rows)),
+                [value for row in rows for value in row])
 
 
 #: The two scopes `SHOW ... STATUS` accepts, lowercase request -> the keyword
@@ -96,7 +170,7 @@ STATUS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def status_int(value: Any) -> Optional[int]:
     """A status value as an `int`, or `None` when it is not a number.
 
-    Connector/C hands a `SHOW STATUS` value back as `str` for most servers,
+    The connector hands a `SHOW STATUS` value back as `str` for most servers,
     as `bytes` when the column arrives binary, and occasionally already
     coerced. All three spellings are the same measurement, so all three are
     accepted here rather than at each call site.
@@ -251,7 +325,7 @@ class MySQLDialect:
     #: integer and never a quoted string.
     index_clause: str = "VECTOR INDEX {name} (v) M={m} DISTANCE={metric}"
 
-    #: The ORDER BY distance expression, with `%s` for the bound query vector.
+    #: The ORDER BY distance expression, with `?` for the bound query vector.
     #: `{metric}` is the dialect's lowercased metric name and `{metric_upper}`
     #: its uppercase form. MariaDB and AliSQL have one function per metric;
     #: Percona has one function with the metric as a mandatory third argument
@@ -262,7 +336,7 @@ class MySQLDialect:
     #: queries bind `(threshold, vector)` because the predicate precedes the
     #: ORDER BY -- and making it a parameter would add a third placeholder and
     #: reorder every call site for no gain.
-    distance_expr: str = "vec_distance_{metric}(v, %s)"
+    distance_expr: str = "vec_distance_{metric}(v, ?)"
 
     #: What an EXPLAIN must contain for the vector path to have been taken,
     #: beyond the index name. `""` means "the index name is the whole test",
@@ -308,14 +382,7 @@ class MySQLFamilyDriver(EngineDriver):
     def connect(self) -> None:
         if _connector is None:
             raise RuntimeError("the 'mariadb' Python connector is not installed")
-        self._conn = _connector.connect(
-            host=self.spec.host,
-            port=self.spec.port,
-            user=self.spec.user,
-            password=self.spec.password,
-            autocommit=True,
-            connect_timeout=30,
-        )
+        self._conn = _connector.connect(**connect_kwargs(self.spec))
         self._cur = self._conn.cursor()
         for stmt in self.dialect.global_setup:
             try:
@@ -365,7 +432,7 @@ class MySQLFamilyDriver(EngineDriver):
         thing a caller may vary. `PerconaDriver` needs the index left out in
         bulk-build mode and everything else identical; a second copy of this
         string in that subclass would be a second place a column has to be
-        added, which is the arrangement `INSERT_SQL` above was consolidated
+        added, which is the arrangement `INSERT_HEAD` above was consolidated
         out of for the same reason.
 
         `ctag` carries a plain KEY exactly as `tag` does, and that parity is
@@ -469,11 +536,7 @@ class MySQLFamilyDriver(EngineDriver):
 
             def worker(bound: Tuple[int, int]) -> None:
                 lo, hi = bound
-                conn = _connector.connect(
-                    host=self.spec.host, port=self.spec.port,
-                    user=self.spec.user, password=self.spec.password,
-                    autocommit=True, connect_timeout=30,
-                )
+                conn = _connector.connect(**connect_kwargs(self.spec))
                 try:
                     cur = conn.cursor()
                     cur.execute(f"USE {DATABASE}")
@@ -511,10 +574,7 @@ class MySQLFamilyDriver(EngineDriver):
         for i in range(lo, hi):
             rows.append((start_id + i, *attrs.row(i), to_binary_f32(vectors[i])))
             if len(rows) >= batch:
-                cur.executemany(INSERT_SQL, rows)
-                # Rebind rather than clear(): the connector receives the list
-                # itself, and mutating the object it was handed is a needless
-                # bet on executemany() having fully consumed it.
+                insert_batch(cur, rows)
                 rows = []
                 now = time.perf_counter()
                 if report and now >= next_report:
@@ -524,8 +584,7 @@ class MySQLFamilyDriver(EngineDriver):
                     print(f"[{self.name}]   {done:,}/{total:,} rows, "
                           f"{rate:,.0f} rows/s, ETA {eta / 60:.1f} min", flush=True)
                     next_report = now + PROGRESS_INTERVAL_S
-        if rows:
-            cur.executemany(INSERT_SQL, rows)
+        insert_batch(cur, rows)
         cur.execute("COMMIT")
 
     def delete_ids(self, ids: Sequence[int]) -> None:
@@ -533,7 +592,7 @@ class MySQLFamilyDriver(EngineDriver):
             return
         for chunk_start in range(0, len(ids), 1000):
             chunk = ids[chunk_start:chunk_start + 1000]
-            placeholders = ",".join(["%s"] * len(chunk))
+            placeholders = ",".join(["?"] * len(chunk))
             self._cur.execute(
                 f"DELETE FROM {TABLE} WHERE id IN ({placeholders})",
                 tuple(int(i) for i in chunk),
@@ -549,7 +608,7 @@ class MySQLFamilyDriver(EngineDriver):
             for i, row_id in enumerate(ids)
         ]
         for chunk_start in range(0, len(rows), 500):
-            self._cur.executemany(INSERT_SQL, rows[chunk_start:chunk_start + 500])
+            insert_batch(self._cur, rows[chunk_start:chunk_start + 500])
         self._cur.execute("COMMIT")
 
     def count_rows(self) -> int:
@@ -593,13 +652,13 @@ class MySQLFamilyDriver(EngineDriver):
         # The flag guard, argued in full beside `postgres._select`'s copy:
         # the `*` above stops a column arriving in `column`'s position, and
         # only this stops one arriving in the FLAG's -- `_select(k, "ctag")`
-        # is truthy and silently builds `WHERE tag < %s`. It also survives
+        # is truthy and silently builds `WHERE tag < ?`. It also survives
         # someone deleting the marker.
         if not isinstance(filtered, bool):
             raise TypeError(
                 f"_select's filtered argument is a flag, not a column; got "
                 f"{filtered!r}. Did you mean column={filtered!r}?")
-        where = f"WHERE {checked_filter_column(column)} < %s " if filtered else ""
+        where = f"WHERE {checked_filter_column(column)} < ? " if filtered else ""
         metric = self._metric_fn()
         distance = self.dialect.distance_expr.format(
             metric=metric, metric_upper=metric.upper())
@@ -784,7 +843,7 @@ class MySQLFamilyDriver(EngineDriver):
         try:
             self._cur.execute(
                 "SELECT DATA_LENGTH + INDEX_LENGTH FROM information_schema.TABLES "
-                "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s",
+                "WHERE TABLE_SCHEMA=? AND TABLE_NAME=?",
                 (DATABASE, TABLE),
             )
             row = self._cur.fetchone()
@@ -1003,7 +1062,7 @@ PERCONA_DIALECT = MySQLDialect(
     # out of the stored index option. Querying with the other one gets a
     # SILENT FULL SCAN rather than an error, which is why `metric_names` above
     # is the single source for both the DDL and this expression.
-    distance_expr="DISTANCE(v, %s, '{metric_upper}')",
+    distance_expr="DISTANCE(v, ?, '{metric_upper}')",
     # The access type, and the reason this field exists at all. See
     # `MySQLDialect.plan_marker`.
     plan_marker="vector_ann",

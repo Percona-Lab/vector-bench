@@ -45,7 +45,7 @@ expressible as a `Dialect` field today:
    (mysql-test/suite/percona_vector/t/index_syntax.test:363).
 
 3. THE DISTANCE EXPRESSION. `vb_mysql._query_sql` (vb_mysql.py:403) writes
-   `ORDER BY vec_distance_<metric>(v, %s)` — one function per metric, MariaDB's
+   `ORDER BY vec_distance_<metric>(v, ?)` — one function per metric, MariaDB's
    spelling. Percona has a single `DISTANCE()` taking the metric as a third
    argument, and the arity is fixed at three:
 
@@ -252,7 +252,7 @@ class PerconaServer(VBMySQLBase):
     def _query_sql(self, k: int, force_index: bool = False) -> str:
         """The nearest-neighbour SELECT, in Percona's spelling.
 
-        `DISTANCE(v, %s, '<metric>')`, with the metric as a mandatory third
+        `DISTANCE(v, ?, '<metric>')`, with the metric as a mandatory third
         argument (sql/item_create.cc:1403 registers it with arity 3). The metric
         string is matched case-insensitively — vector-common/vector_constants.h:73-82
         resolves it with `my_strnncoll` on `my_charset_latin1`, and the suite
@@ -266,7 +266,7 @@ class PerconaServer(VBMySQLBase):
         hint = f" {self.dialect.force_index_hint}" if force_index else ""
         return (
             f"SELECT id FROM {TABLE}{hint} "
-            f"ORDER BY DISTANCE(v, %s, '{self._metric_fn.upper()}') LIMIT {int(k)}"
+            f"ORDER BY DISTANCE(v, ?, '{self._metric_fn.upper()}') LIMIT {int(k)}"
         )
 
     def _verify_plan(self, k: int = 10) -> bool:

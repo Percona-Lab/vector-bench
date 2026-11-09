@@ -98,8 +98,8 @@ the serializing point reads 0.177 against a 0.80 threshold.
 server.* Whether a client library releases the interpreter lock around its
 socket wait is a property of that library's C extension, and the engines do
 not share one: `drivers/postgres.py` imports **psycopg** (psycopg3) while
-`drivers/mysql_family.py` imports **mariadb** (MariaDB Connector/Python over
-Connector/C), which `docker/_shared/requirements-mysql.txt` says is used for
+`drivers/mysql_family.py` imports **mariadb** (MariaDB Connector/Python;
+over Connector/C until 1.1.10, pure Python since 2.0), which `docker/_shared/requirements-mysql.txt` says is used for
 BOTH MariaDB and AliSQL on purpose. The question is per-library, not
 per-engine, and nothing in this repository settles it.
 

@@ -748,7 +748,7 @@ class TestEmittedQuery:
         args = [a.strip() for a in call.group(1).split(",")]
         assert len(args) == 3, args
         assert args[0] == "v"
-        assert args[1] == "%s"
+        assert args[1] == "?"
         assert args[2] == "'EUCLIDEAN'"
 
     def test_mariadbs_per_metric_function_is_gone(self, instance, overlay):
@@ -756,13 +756,15 @@ class TestEmittedQuery:
         is a difference and not an empty assertion."""
         vb, percona = overlay
         shared = vb.VBMySQLBase._query_sql(instance, 10)
-        assert "vec_distance_euclidean(v, %s)" in shared
+        assert "vec_distance_euclidean(v, ?)" in shared
         assert "vec_distance_" not in instance._query_sql(10)
 
     def test_exactly_one_bound_parameter(self, instance):
         """The caller passes `(vector,)`. A second placeholder would raise at
-        execute time, inside a measured loop."""
-        assert instance._query_sql(10).count("%s") == 1
+        execute time, inside a measured loop. `?` and never `%s`: the
+        binary-protocol client sends the SQL to the server unaltered."""
+        assert instance._query_sql(10).count("?") == 1
+        assert "%s" not in instance._query_sql(10)
 
     def test_ascending_order_and_a_limit(self, instance):
         """Both are required for the index to be used at all
@@ -2196,7 +2198,9 @@ CITED_SYMBOLS = {
      "MySQLFamilyDriver._create_table_ddl"):
         "id {self.dialect.pk_type} PRIMARY KEY",
     ("harness/drivers/mysql_family.py", "MySQLFamilyDriver.connect"):
-        "host=self.spec.host",
+        "connect_kwargs(self.spec)",
+    ("harness/drivers/mysql_family.py", "connect_kwargs"):
+        '"host": spec.host, "port": spec.port',
     # §4.1's two claims about the plan check: that the index-name test is a
     # substring test, and that the format is spelled out. Both are inside the
     # one method, and the second is the free hardening the section argues for.
@@ -2243,7 +2247,7 @@ CITED_SYMBOLS = {
         "id INT PRIMARY KEY",
     ("overlay/ann-benchmarks/ann_benchmarks/vb_mysql.py",
      "VBMySQLBase._conn_kwargs"):
-        "unix_socket",
+        '"host": "127.0.0.1",',
     ("overlay/ann-benchmarks/ann_benchmarks/vb_mysql.py", "VBMySQLBase.hint"):
         "force_index_hint",
     ("overlay/ann-benchmarks/ann_benchmarks/vb_mysql.py",
@@ -2335,6 +2339,10 @@ CITED_SYMBOLS = {
 #: which side of the line it is on, which is the decision that used to be made
 #: by not noticing.
 PATHS_WITHOUT_A_CLAIM = {
+    "docker/_shared/requirements-mysql.txt":
+        "§7 item 2 says `cryptography` is pinned there for the RSA exchange; "
+        "the pin itself is checked by tests/test_mysql_client_parity.py, "
+        "which reads the file.",
     "config/engines/percona.yml":
         "§4.3 proposes this file rather than quoting it, and the claims §3 "
         "and §4.6 do make about it -- the memory flag, the capability keys -- "

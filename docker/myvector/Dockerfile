@@ -160,14 +160,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gdb \
     && rm -rf /var/lib/apt/lists/*
 
-# Connector/Python over Connector/C, the same client every MySQL-family
+# Connector/Python 2.0, pure Python, the same client every MySQL-family
 # engine here is driven through (docker/_shared/requirements-mysql.txt).
 COPY requirements-bench.txt requirements-mysql.txt /tmp/
-RUN MARIADB_CONFIG=/usr/bin/mariadb_config \
-    pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir --break-system-packages \
         -r /tmp/requirements-bench.txt -r /tmp/requirements-mysql.txt \
     && rm -f /tmp/requirements-bench.txt /tmp/requirements-mysql.txt \
-    && python3 -c "import mariadb; print('Connector/Python', mariadb.__version__, 'OK')"
+    && python3 -c "import mariadb; v = mariadb.__version__; assert v.startswith('2.0.0rc2') and v.endswith('+native'), v; print('Connector/Python', v, 'OK')"
 
 WORKDIR /home/app
 ENTRYPOINT ["python3", "-u", "run_algorithm.py"]

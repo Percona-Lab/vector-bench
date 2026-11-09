@@ -658,7 +658,40 @@ SCHEMA_VERSION = 1
 # costs the other engines a re-run of a straddling directory, and buys that
 # no Percona figure is silently mixed. ANN_MEASUREMENT_VERSION is NOT bumped:
 # the ann path has its own warm-up (`vb_warmup.py`) and nothing in it moved.
-OPS_MEASUREMENT_VERSION = 11
+#
+# VERSION 12 -- THE MYSQL-FAMILY CLIENT BEHAVES THE SAME ON EVERY SERVER.
+# MariaDB Connector/Python 2.0.0rc2 (pure Python) with `binary=True` and `?`
+# placeholders replaces 1.1.10 with `%s`, and every load batch is one
+# multi-row INSERT instead of `executemany`. Measured 2026-11-09 against
+# Percona Server 9.7 and MariaDB 11.8 (Com_stmt_* counters, TCP send bursts):
+# under 1.1.10 every query was close+prepare+execute -- two round trips on
+# Percona, one on MariaDB, which alone got the three pipelined -- and a
+# 500-row `executemany` was 1 bulk execute on MariaDB against 500 executes
+# on Percona. Under 12 it is one execute per query and one statement per
+# batch on both. What moves:
+#
+#     ef_calibration,  the latency and QPS of every engine whose query binds
+#     concurrency,     a parameter -- MariaDB's and mariadb123's too, since
+#     filtered, churn  they also re-prepared, if without the extra trip; and
+#                      every MySQL-family engine's through the pure-Python
+#                      client's own cost (the ops clients are separate
+#                      processes, so it is client CPU, not server). MyVector's
+#                      and VillageSQL's unfiltered queries bind nothing and
+#                      were text protocol before and after. Recall does not
+#                      move: the same SQL reaches the same index.
+#     ingest,          every MySQL-family engine's rows/s, MariaDB's now
+#     churn re-insert  WITHOUT the bulk protocol it alone had. NOT only a
+#                      round-trip change: with autocommit on, a non-MariaDB
+#                      `executemany` was also 500 single-row TRANSACTIONS per
+#                      batch, and a multi-row INSERT is one, so commit and
+#                      undo work per row moves on the server too. Least where
+#                      the graph is built per row (2-20 ms a row swamps
+#                      both), most for Percona's `post` plain load.
+#     pgvector, Valkey, nothing. The version names the harness (version 10's
+#     MongoDB           argument), so their straddling records are refused too.
+#
+# ANN_MEASUREMENT_VERSION moves to 4 in the same change, for the query half.
+OPS_MEASUREMENT_VERSION = 12
 
 #: Key under `Record.extra` that `Recorder.write` stamps the version into.
 #: Lives in `extra` rather than as a column because SCHEMA_VERSION stays 1.
