@@ -154,6 +154,9 @@ class Dialect:
     # Whether this engine's optimizer may silently fall back to a full scan.
     verify_index_used: bool = False
     force_index_hint: str = ""
+    # Most threads the training-set load may use, whatever VB_INSERT_THREADS
+    # asks for. None leaves the request alone.
+    max_insert_threads: Optional[int] = None
 
     def create_table(self, dim: int, m: int, metric: str, storage_engine: str) -> str:
         return (
@@ -199,7 +202,8 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
 
         self._socket = os.environ.get("VB_SOCKET") or self._default_socket()
         self._data_dir = os.environ.get("VB_DATA_DIR", "/var/lib/vbench/data")
-        self._insert_threads = self._resolve_insert_threads()
+        self._insert_threads = self._resolve_insert_threads(
+            self.dialect.max_insert_threads)
 
         self._server = None
         self._start_server()
@@ -221,26 +225,29 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
         return f"/var/run/vbench/{self.dialect.name}.sock"
 
     @staticmethod
-    def _resolve_insert_threads() -> int:
+    def _resolve_insert_threads(cap: Optional[int] = None) -> int:
         """Threads used to load the training set.
 
         Ingest speed is not what this pass measures — the ops harness measures it
         properly and under controlled conditions. Here we only need the load to
         finish in reasonable time, so parallelism is allowed but always recorded
         in get_additional() so a reader can tell how a table was populated.
+
+        `cap` is the dialect's `max_insert_threads`: an engine whose index
+        cannot take concurrent writers is loaded with no more than that.
         """
         env = os.environ.get("VB_INSERT_THREADS", "0")
         try:
             requested = int(env)
         except ValueError:
             requested = 0
-        if requested > 0:
-            return requested
-        try:
-            available = len(os.sched_getaffinity(0))
-        except AttributeError:  # pragma: no cover - non-Linux
-            available = os.cpu_count() or 1
-        return max(1, min(8, available))
+        if requested <= 0:
+            try:
+                available = len(os.sched_getaffinity(0))
+            except AttributeError:  # pragma: no cover - non-Linux
+                available = os.cpu_count() or 1
+            requested = max(1, min(8, available))
+        return min(requested, cap) if cap else requested
 
     def _start_server(self) -> None:
         """Start the engine through the image entrypoint.

@@ -38,6 +38,20 @@ MARIADB = Dialect(
     # (silently benchmarking a full scan) is severe, so it stays on.
     verify_index_used=True,
     force_index_hint="FORCE INDEX (vi)",
+    # One writer. Concurrent INSERTs deadlock on MHNSW's graph table: each
+    # X-locks the neighbour rows it relinks in `t1#i#01`, in graph order, so
+    # two writers take them in opposite orders. Run percona-mariadb-20261110
+    # lost both MariaDB ann units to errno 1213 at 8 threads. And the threads
+    # bought nothing: measured 2026-11-11 on 11.8.9, 16,000 x 784-d rows,
+    # 500-row INSERTs, M=16 --
+    #     threads      1      2      4      8
+    #     rows/s     1141   1214   1196   1217
+    #     deadlocks     0      0      6     46
+    # The old COM_STMT_BULK_EXECUTE path deadlocked at 8 threads as well. The
+    # ops harness has always loaded with one thread. InnoDB measured; MyISAM
+    # shares the dialect and is capped with it. The same count also sizes
+    # `batch_query`'s pool, unused while every profile has `ann.batch: false`.
+    max_insert_threads=1,
 )
 
 
