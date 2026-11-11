@@ -291,3 +291,97 @@ class TestTheClientIsPinned:
         choose = src.index(
             'os.environ.setdefault("MARIADB_PYTHON_CONNECTOR", "python")')
         assert choose < src.index("import mariadb as _connector"), rel
+
+
+# ---------------------------------------------------------------------------
+# 5. What 2.0 changed that 1.1 did not do: the read timeout and deadlocks
+# ---------------------------------------------------------------------------
+
+class _Deadlock(Exception):
+    errno = 1213
+
+
+class _OtherError(Exception):
+    errno = 1062
+
+
+class DeadlockingCursor(FakeCursor):
+    """Fails the first `fails` executes with `error`, then succeeds."""
+
+    def __init__(self, fails, error=_Deadlock):
+        super().__init__()
+        self.fails = fails
+        self.error = error
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        if self.fails:
+            self.fails -= 1
+            raise self.error("Deadlock found when trying to get lock")
+
+
+def _both_paths():
+    from tests.test_e1_percona_design import _load_overlay
+    vb, _ = _load_overlay()
+    return (("ops", mysql_family, (1, 2, 3, b"x")),
+            ("ann", vb, (1, 2, b"x")))
+
+
+class TestTheReadTimeoutIsNotTwoPointOhsDefault:
+    """2.0 defaults socket_timeout to 30 s; run percona-mariadb-20261110 lost
+    every ops unit to it (Percona's index build at exactly 30.0 s, MariaDB's
+    1% filtered query). `0` does not disable it over TCP -- measured: a
+    `SELECT SLEEP(33)` fails with no option and with `read_timeout=0`, and
+    succeeds with 86400."""
+
+    def test_the_ops_connection(self):
+        kw = mysql_family.connect_kwargs(ConnectionSpec(host="h", port=1))
+        assert kw["read_timeout"] == mysql_family.READ_TIMEOUT_S >= 86400
+
+    def test_the_ann_connection(self):
+        from tests.test_e1_percona_design import _load_overlay
+        vb, _ = _load_overlay()
+        obj = object.__new__(vb.VBMySQLBase)
+        obj._socket = "/s"
+        kw = vb.VBMySQLBase._conn_kwargs(obj)
+        assert kw["read_timeout"] == vb.READ_TIMEOUT_S >= 86400
+
+
+class TestADeadlockedBatchIsReRun:
+    """8 parallel ann loaders deadlocked MariaDB (errno 1213) in the same
+    run. Every batch is one autocommit statement, rolled back whole, so a
+    retry writes exactly the failed rows."""
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+    @pytest.mark.parametrize("path", ("ops", "ann"))
+    def test_a_deadlock_is_retried_with_the_same_statement(self, path):
+        _, mod, row = dict((p[0], p) for p in _both_paths())[path]
+        cur = DeadlockingCursor(fails=2)
+        mod.insert_batch(cur, [row, row])
+        assert len(cur.calls) == 3
+        assert cur.calls[0] == cur.calls[1] == cur.calls[2]
+
+    @pytest.mark.parametrize("path", ("ops", "ann"))
+    def test_the_retries_are_bounded(self, path):
+        _, mod, row = dict((p[0], p) for p in _both_paths())[path]
+        cur = DeadlockingCursor(fails=100)
+        with pytest.raises(_Deadlock):
+            mod.insert_batch(cur, [row])
+        assert len(cur.calls) == mod.DEADLOCK_RETRIES + 1
+
+    @pytest.mark.parametrize("path", ("ops", "ann"))
+    def test_any_other_error_is_not_retried(self, path):
+        _, mod, row = dict((p[0], p) for p in _both_paths())[path]
+        cur = DeadlockingCursor(fails=1, error=_OtherError)
+        with pytest.raises(_OtherError):
+            mod.insert_batch(cur, [row])
+        assert len(cur.calls) == 1
+
+    def test_both_paths_agree(self):
+        (_, ops, _), (_, ann, _) = _both_paths()
+        assert ops.ER_LOCK_DEADLOCK == ann.ER_LOCK_DEADLOCK == 1213
+        assert ops.DEADLOCK_RETRIES == ann.DEADLOCK_RETRIES
+        assert ops.READ_TIMEOUT_S == ann.READ_TIMEOUT_S
