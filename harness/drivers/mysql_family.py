@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import glob
 import os
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,17 @@ try:
     import mariadb as _connector
 except ImportError:  # pragma: no cover - only the bench image has it
     _connector = None
+
+
+#: Seconds one statement may run before the client gives up on the socket.
+#: A day: longer than any index build or query this harness issues, and
+#: still finite so a server that hangs mid-statement ends the unit.
+READ_TIMEOUT_S = 86400
+
+#: InnoDB's deadlock error. Each `insert_batch` is one autocommit statement,
+#: which InnoDB rolls back whole on a deadlock, so re-running it is exact.
+ER_LOCK_DEADLOCK = 1213
+DEADLOCK_RETRIES = 5
 
 
 def connect_kwargs(spec: ConnectionSpec) -> Dict[str, Any]:
@@ -92,13 +104,25 @@ def connect_kwargs(spec: ConnectionSpec) -> Dict[str, Any]:
 
     Placeholders are therefore `?` throughout: 2.0's binary path hands the
     SQL to the server unaltered, and a `%s` is a syntax error there.
+
+    **`read_timeout` is the one 2.0 default this must undo.** 1.1 had no read
+    timeout; 2.0's pure-Python client defaults `socket_timeout` to 30 s and
+    fails any statement that takes longer. Run percona-mariadb-20261110 lost
+    every ops unit to it: Percona's `ADD VECTOR KEY` at exactly 30.0 s and
+    MariaDB's 1%-selectivity filtered query (p99 10 s, one over 30 s). `0`
+    does NOT disable it -- the client then skips its `settimeout` and a TCP
+    socket keeps `connect_timeout` from `create_connection` -- so the value
+    is large instead (READ_TIMEOUT_S). The harness's own budgets
+    (`filtered_budget_s`, churn's step cap) bound the run, not the socket.
     """
     return {
         "host": spec.host, "port": spec.port,
         "user": spec.user, "password": spec.password,
         "autocommit": True, "connect_timeout": 30,
+        "read_timeout": READ_TIMEOUT_S,
         "binary": True,
     }
+
 
 
 # One INSERT for both write paths. The bulk load and churn's re-insert each
@@ -127,8 +151,35 @@ def insert_batch(cur, rows: Sequence[Tuple[Any, ...]]) -> None:
     """
     if not rows:
         return
-    cur.execute(INSERT_HEAD + ", ".join([INSERT_ROW] * len(rows)),
-                [value for row in rows for value in row])
+    execute_retrying_deadlock(
+        cur, INSERT_HEAD + ", ".join([INSERT_ROW] * len(rows)),
+        [value for row in rows for value in row])
+
+
+def execute_retrying_deadlock(cur, sql: str, params: Sequence[Any],
+                              retries: int = DEADLOCK_RETRIES) -> None:
+    """`cur.execute`, re-run when InnoDB picks this statement as a deadlock victim.
+
+    Parallel loaders writing one graph deadlock: run
+    percona-mariadb-20261110 lost both MariaDB ann units to errno 1213 with 8
+    threads of 500-row INSERTs into an MHNSW table. The victim is rolled back
+    whole (autocommit), so the retry writes exactly the rows that failed.
+    Anything else, and the last deadlock, propagates. Exact only for a
+    statement that is its own transaction: never call it inside an explicit
+    BEGIN, where InnoDB rolls back the earlier statements too.
+    """
+    for attempt in range(retries + 1):
+        try:
+            cur.execute(sql, params)
+            return
+        except Exception as exc:  # the connector's DatabaseError carries errno
+            if (getattr(exc, "errno", None) != ER_LOCK_DEADLOCK
+                    or attempt == retries):
+                raise
+            print(f"[vb-harness] deadlock on a {len(params):,}-parameter "
+                  f"INSERT, retry {attempt + 1} of {retries}", flush=True)
+            # Jittered: threads that deadlocked together must not wake together.
+            time.sleep(0.05 * (2 ** attempt) * random.uniform(0.5, 1.5))
 
 
 #: The two scopes `SHOW ... STATUS` accepts, lowercase request -> the keyword

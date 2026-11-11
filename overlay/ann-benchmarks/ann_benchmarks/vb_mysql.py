@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import glob
 import os
+import random
 import re
 import subprocess
 import sys
@@ -56,6 +57,15 @@ DATABASE = "ann"
 
 INSERT_HEAD = f"INSERT INTO {TABLE} (id, tag, v) VALUES "
 
+# Seconds one statement may run before the client gives up on the socket.
+# Connector/Python 2.0 defaults it to 30 s (1.1 had none), and `0` does not
+# disable it over TCP; see `mysql_family.connect_kwargs` for the run it broke.
+READ_TIMEOUT_S = 86400
+
+# InnoDB's deadlock error, and how often a deadlocked batch is re-run.
+ER_LOCK_DEADLOCK = 1213
+DEADLOCK_RETRIES = 5
+
 
 def insert_batch(cur, rows) -> None:
     """Write `rows` as ONE multi-row INSERT -- never `executemany`.
@@ -68,8 +78,35 @@ def insert_batch(cur, rows) -> None:
     """
     if not rows:
         return
-    cur.execute(INSERT_HEAD + ", ".join(["(?, ?, ?)"] * len(rows)),
-                [value for row in rows for value in row])
+    execute_retrying_deadlock(
+        cur, INSERT_HEAD + ", ".join(["(?, ?, ?)"] * len(rows)),
+        [value for row in rows for value in row])
+
+
+def execute_retrying_deadlock(cur, sql: str, params: Sequence[Any],
+                              retries: int = DEADLOCK_RETRIES) -> None:
+    """`cur.execute`, re-run when InnoDB picks this statement as a deadlock victim.
+
+    The parallel loader's threads write one graph and deadlock: run
+    percona-mariadb-20261110 lost both MariaDB units to errno 1213 at 8
+    threads. The victim is rolled back whole (autocommit), so the retry
+    writes exactly the rows that failed. The ops harness's
+    `mysql_family.execute_retrying_deadlock` is the same function. Exact
+    only for a statement that is its own transaction: never call it inside
+    an explicit BEGIN.
+    """
+    for attempt in range(retries + 1):
+        try:
+            cur.execute(sql, params)
+            return
+        except Exception as exc:  # the connector's DatabaseError carries errno
+            if (getattr(exc, "errno", None) != ER_LOCK_DEADLOCK
+                    or attempt == retries):
+                raise
+            print(f"[vb] deadlock on a {len(params):,}-parameter INSERT, "
+                  f"retry {attempt + 1} of {retries}", file=sys.stderr)
+            # Jittered: threads that deadlocked together must not wake together.
+            time.sleep(0.05 * (2 ** attempt) * random.uniform(0.5, 1.5))
 
 
 def to_binary_f32(vector) -> bytes:
@@ -292,6 +329,7 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
             "user": os.environ.get("VB_DB_USER", "bench"),
             "password": os.environ.get("VB_DB_PASSWORD", "bench"),
             "autocommit": True,
+            "read_timeout": READ_TIMEOUT_S,
             "binary": True,
         }
 

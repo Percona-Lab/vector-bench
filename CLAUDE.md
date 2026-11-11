@@ -219,7 +219,11 @@ These are the reasons the code looks over-defensive. Do not relax them.
   batch (`insert_batch`, in both paths). Do not reintroduce `executemany` or
   `%s` in MySQL-family SQL. The ann pass connects over loopback TCP, because
   rc2 cannot log in to a caching_sha2_password server over the unix socket.
-  Ann measurement version 4 / ops version 12.
+  Every connection also sets `read_timeout` (`READ_TIMEOUT_S`, a day): 2.0
+  defaults it to 30 s, which failed every long statement, and `0` does not
+  disable it over TCP. Batches re-run on a deadlock (`execute_retrying_deadlock`,
+  errno 1213), which parallel loaders hit. Ann measurement version 4 / ops
+  version 12.
 - **Filtered ground truth is recomputed** (`harness/datasets.py`) — a `WHERE` predicate changes
   the correct answer set, and reusing unfiltered neighbours scores every engine against the
   wrong targets.
