@@ -484,6 +484,59 @@ def client_memory_bytes(datasets_dir: str, dataset: str) -> int:
     return int(size * _CLIENT_COPIES) + _CLIENT_BASE_BYTES
 
 
+#: Lines of the server's own error log kept per ann phase, as the ops pass
+#: keeps (`ops_pass.SERVER_LOG_TAIL`).
+SERVER_LOG_TAIL = 20000
+
+
+def save_server_error_log(paths: Dict[str, str], engine: str, dataset: str,
+                          resource_pass: str, state_dir: str,
+                          image: str) -> Optional[str]:
+    """Keep the in-container server's `--log-error` file beside the ann log.
+
+    The ops pass has archived this file all along; the ann pass did not, and
+    run percona-mariadb-20261110 is what that cost. Percona's ann load lost
+    its connection on two datasets ("connection reset by peer", memory
+    dropping from ~8 GB to 1.3 GB at the same moment), and whether the server
+    crashed was unanswerable: the console log carries only the client's side,
+    and the server's log was in `state_dir`, which the next phase cleared.
+
+    Saved for EVERY phase, not just a failed one: the server can die and the
+    client survive it, and a crash in a configuration that ann-benchmarks
+    then skipped would otherwise leave no trace. One server serves every
+    configuration in the container, so the file holds all of them in order.
+
+    Only for an engine that declares `runtime.error_log` under its
+    `data_mount`; the rest write to the console log already. Never raises.
+    """
+    try:
+        spec = engines_mod.get(engine)
+        error_log, mount = spec.error_log, spec.data_mount.rstrip("/")
+        if not error_log or not error_log.startswith(mount + "/"):
+            return None
+        host_path = os.path.join(state_dir, error_log[len(mount) + 1:])
+        if not os.path.exists(host_path):
+            return None      # no server started: a resume with nothing to run
+        text = docker_ctl.read_host_file_tail(host_path, image,
+                                              lines=SERVER_LOG_TAIL)
+        if not text:
+            print(f"[ann] note: {engine} declares runtime.error_log="
+                  f"{error_log} but nothing could be read from {host_path}",
+                  file=sys.stderr)
+            return None
+        saved = docker_ctl.save_phase_log(
+            paths["run_dir"], engine, dataset, "ann-server-error",
+            resource_pass, text.splitlines())
+        if saved:
+            print(f"[ann] server error log -> "
+                  f"{os.path.relpath(saved, paths['run_dir'])}")
+        return saved
+    except Exception as exc:                     # pragma: no cover - defensive
+        print(f"[ann] note: could not archive {engine}'s error log: {exc}",
+              file=sys.stderr)
+        return None
+
+
 def run_engine(engine: str, dataset: str, profile: Dict[str, Any],
                engine_cfg: Dict[str, Any], resolved: ResolvedResources,
                resource_pass: str, paths: Dict[str, str], run_id: str,
@@ -647,6 +700,8 @@ def run_engine(engine: str, dataset: str, profile: Dict[str, Any],
         paths["run_dir"], engine, dataset, "ann", resource_pass, output)
     if saved:
         print(f"[ann] log -> {os.path.relpath(saved, paths['run_dir'])}")
+    save_server_error_log(paths, engine, dataset, resource_pass, state_dir,
+                          image)
 
     # ann-benchmarks treats "every configuration already has results" as an
     # error: main() raises Exception("Nothing to run") and the process exits

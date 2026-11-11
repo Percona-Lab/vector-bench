@@ -12,6 +12,7 @@ the next one.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import shutil
@@ -808,6 +809,45 @@ def containers_publishing(port: int) -> List[str]:
         if f":{port}->" in ports:
             names.append(name)
     return names
+
+
+def read_host_file_tail(path: str, image: str,
+                        lines: int = 100) -> Optional[str]:
+    """Last `lines` of a HOST file that a container wrote as root, or None.
+
+    For a file on a bind mount whose container has already exited, which is
+    where the ann pass's server error log is: ann-benchmarks' container runs
+    the server in-process and is gone by the time the orchestrator looks, so
+    neither `read_file_tail` (needs `docker exec`) nor `copy_file_out` (needs
+    the container) reaches it, but the file is still on the host until the
+    next phase clears the directory. The engine wrote it root:root 0640, so a
+    non-root orchestrator reads it the way `remove_tree_as_root` deletes it:
+    through a throwaway container of the same image, mounted read-only.
+
+    RETURNS None FOR EVERY FAILURE and raises for none of them, for the
+    reason `read_file_tail` gives: the caller is on the path a failed phase
+    takes, and a missing log must not turn a lost measurement into a lost run.
+    """
+    try:
+        with open(path, errors="replace") as fh:
+            # Streamed: mongot's log grows all phase and only the end is kept.
+            tail = collections.deque(fh, maxlen=lines)
+        return "".join(tail).strip() or None
+    except FileNotFoundError:
+        return None
+    except OSError:
+        pass
+    parent, name = os.path.dirname(path), os.path.basename(path)
+    try:
+        proc = _run(["docker", "run", "--rm", "--network", "none",
+                     "-v", f"{parent}:/target:ro", "--entrypoint", "tail",
+                     image, "-n", str(lines), f"/target/{name}"],
+                    check=False, timeout=120)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip() or None
 
 
 def remove_tree_as_root(path: str, image: str) -> bool:
