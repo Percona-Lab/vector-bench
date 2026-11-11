@@ -58,6 +58,20 @@ inherits the storage engine's page cache behaviour.
 shared across sessions. Under concurrency all clients contend for the same
 structure, which is what the concurrency workload is designed to expose.
 
+**One writer.** Concurrent INSERTs into an MHNSW index deadlock (errno 1213):
+each X-locks the neighbour rows it relinks in `<table>#i#<nn>`, and two writers
+take them in opposite orders. Extra writers buy no throughput either. Measured
+on 11.8.9, InnoDB, with 16,000 784-d rows in 500-row INSERTs:
+
+| Threads | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| rows/s | 1,141 | 1,214 | 1,196 | 1,217 |
+| deadlocks | 0 | 0 | 6 | 46 |
+
+So both measurement paths load MariaDB with one thread
+(`MARIADB.max_insert_threads`; the ops harness always did), and the other
+engines keep their parallel ann load.
+
 **MyISAM.** MariaDB supports MyISAM for vector tables, and MariaDB's own
 published benchmark uses it. AliSQL cannot, so this framework's headline
 comparison is InnoDB for both, with MyISAM reported as a MariaDB-only extra
