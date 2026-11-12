@@ -205,7 +205,7 @@ def test_a_timed_out_measured_query_ends_the_point_as_budget_bound(ctx):
     assert row["queries_executed"] == 4
     assert row["extra"]["time_bounded"] is True
     assert row["extra"]["statement_timeouts"] == 1
-    assert row["extra"]["statement_timeout_enforced"] is True
+    assert row["extra"]["statement_timeout_armed"] is True
     assert driver.caps[-1] is None, "the cap must be lifted after the point"
 
 
@@ -254,7 +254,7 @@ def test_no_budget_leaves_the_session_alone(ctx):
     driver = _capped(dataset, ctx.cache_dir)
     row = _run(ctx, driver, dataset, warmup=2, budget_s=0)
     assert driver.caps == []
-    assert row["extra"]["statement_timeout_enforced"] is False
+    assert row["extra"]["statement_timeout_armed"] is False
     assert row["extra"]["statement_timeouts"] == 0
 
 
@@ -262,5 +262,75 @@ def test_an_engine_without_a_cap_records_that_it_had_none(ctx):
     dataset = tiny_dataset()
     driver = two_column_driver(dataset, ctx.cache_dir)
     row = _run(ctx, driver, dataset, warmup=0)
-    assert row["extra"]["statement_timeout_enforced"] is False
+    assert row["extra"]["statement_timeout_armed"] is False
     assert row["extra"]["statement_timeouts"] == 0
+
+
+def test_no_query_is_allowed_more_than_the_ceiling_whatever_is_left(ctx):
+    """The review's finding: "time left" alone gave a measured query most of
+    a 300 s budget, about the 240 s the incident's query needed to OOM the
+    server. Mutant (ceiling dropped): the first cap is 300."""
+    dataset = tiny_dataset()
+    driver = _capped(dataset, ctx.cache_dir)
+    _run(ctx, driver, dataset, warmup=0, budget_s=300.0, step=0.01,
+         max_queries=3)
+    armed = [c for c in driver.caps if c is not None]
+    assert armed and max(armed) == pytest.approx(fw.MAX_STATEMENT_TIMEOUT_S)
+
+
+def test_the_cap_is_lifted_after_a_warm_up_timeout_too(ctx):
+    dataset = tiny_dataset()
+    driver = _capped(dataset, ctx.cache_dir, stall_at=1)
+    _run(ctx, driver, dataset, warmup=5, max_queries=5)
+    assert driver.caps[-1] is None
+
+
+def test_the_cap_is_armed_outside_the_latency_span(ctx):
+    """Arming is one more statement; inside the span it would be charged to
+    the engine. Order of events: arm, then the span's clock, then the query.
+    Mutant (arm moved after `perf_counter`): the order below breaks."""
+    dataset = tiny_dataset()
+    driver = _capped(dataset, ctx.cache_dir)
+    events: List[str] = []
+    real_arm = driver.set_statement_timeout
+    real_query = driver.query_filtered
+
+    def arm(seconds):
+        events.append("arm" if seconds is not None else "lift")
+        return real_arm(seconds)
+
+    def query(*a, **kw):
+        events.append("query")
+        return real_query(*a, **kw)
+
+    real_pc = fw.time.perf_counter
+
+    def pc():
+        events.append("clock")
+        return real_pc()
+
+    driver.set_statement_timeout = arm
+    driver.query_filtered = query
+    with mock.patch.object(fw.time, "perf_counter", pc):
+        _run(ctx, driver, dataset, warmup=0, max_queries=3)
+    queries = [i for i, e in enumerate(events) if e == "query"]
+    assert len(queries) == 3
+    for i in queries:
+        # The span's start is the last thing before the query, so nothing --
+        # in particular not the arming SET -- sits inside the span.
+        assert events[i - 1] == "clock", events[max(0, i - 4):i + 1]
+        assert "arm" in events[:i]
+    assert events.count("arm") == 3
+
+
+@pytest.mark.parametrize("module, name", [
+    ("harness.drivers.myvector", "MYVECTOR_DIALECT"),
+    ("harness.drivers.villagesql", "VILLAGESQL_DIALECT"),
+])
+def test_dialects_without_a_verified_cap_declare_none(module, name):
+    """MyVector and VillageSQL decline the filtered workload; a cap nobody
+    checked against those servers must not be switched on by inheritance."""
+    import importlib
+    dialect = getattr(importlib.import_module(module), name)
+    assert dialect.statement_timeout == ""
+    assert dialect.statement_timeout_errno is None
