@@ -26,6 +26,7 @@ what makes it an architecture rather than a variant.
 from __future__ import annotations
 
 import glob
+import math
 import os
 import random
 import re
@@ -68,6 +69,15 @@ READ_TIMEOUT_S = 86400
 #: which InnoDB rolls back whole on a deadlock, so re-running it is exact.
 ER_LOCK_DEADLOCK = 1213
 DEADLOCK_RETRIES = 5
+
+#: The two spellings of "the server stopped this statement at its timeout".
+#: MariaDB's `max_statement_time` raises ER_STATEMENT_TIMEOUT, 1969
+#: (`sql/share/errmsg-utf8.txt` at mariadb-11.8.8); MySQL's
+#: `max_execution_time`, which AliSQL 8.0 and Percona 9.7 inherit, raises
+#: ER_QUERY_TIMEOUT, 3024 (`share/messages_to_clients.txt` at
+#: AliSQL-8.0.44-2). Numbered from the vendor trees, not from memory.
+ER_STATEMENT_TIMEOUT_MARIADB = 1969
+ER_QUERY_TIMEOUT_MYSQL = 3024
 
 
 def connect_kwargs(spec: ConnectionSpec) -> Dict[str, Any]:
@@ -413,6 +423,16 @@ class MySQLDialect:
     #: `IndexSpec.ef_construction` per build, not from this default.
     ef_construction: Optional[int] = None
 
+    #: Session statement that caps one statement's run time, or `""` for an
+    #: engine that has none. `{seconds}` and `{ms}` are interpolated; `0`
+    #: removes the cap in both spellings. MariaDB takes seconds as a double
+    #: (`max_statement_time`); MySQL takes integer milliseconds
+    #: (`max_execution_time`), and applies it to read-only SELECTs only --
+    #: which is every statement the filtered workload times.
+    statement_timeout: str = ""
+    #: The errno that cap raises. See `ER_STATEMENT_TIMEOUT_MARIADB`.
+    statement_timeout_errno: Optional[int] = None
+
 
 class MySQLFamilyDriver(EngineDriver):
     dialect: MySQLDialect
@@ -672,6 +692,21 @@ class MySQLFamilyDriver(EngineDriver):
 
     def set_ef_search(self, ef_search: int) -> None:
         self._cur.execute(self.dialect.set_ef_search.format(ef_search=int(ef_search)))
+
+    def set_statement_timeout(self, seconds: Optional[float]) -> bool:
+        if not self.dialect.statement_timeout:
+            return False
+        secs = float(seconds) if seconds is not None and seconds > 0 else 0.0
+        # MySQL's milliseconds are an integer, and 0 means "off": a positive
+        # cap under a millisecond is rounded UP so it cannot turn into none.
+        ms = max(1, math.ceil(secs * 1000)) if secs > 0 else 0
+        self._cur.execute(self.dialect.statement_timeout.format(
+            seconds=f"{secs:.3f}", ms=ms))
+        return True
+
+    def is_statement_timeout(self, exc: BaseException) -> bool:
+        errno = self.dialect.statement_timeout_errno
+        return errno is not None and getattr(exc, "errno", None) == errno
 
     def _metric_fn(self) -> str:
         assert self._index is not None, "create_schema must run before querying"
@@ -1028,6 +1063,8 @@ MARIADB_DIALECT = MySQLDialect(
         "t1@0023i@0023*.ibd", "t1@0023i@0023*.MYI", "t1@0023i@0023*.MYD",
     ),
     metric_names={"angular": "cosine", "euclidean": "euclidean"},
+    statement_timeout="SET SESSION max_statement_time = {seconds}",
+    statement_timeout_errno=ER_STATEMENT_TIMEOUT_MARIADB,
 )
 
 ALISQL_DIALECT = MySQLDialect(
@@ -1045,6 +1082,8 @@ ALISQL_DIALECT = MySQLDialect(
     # sql/vidx/vidx_index.cc. The table id is not knowable in advance.
     index_file_globs=("vidx_*.ibd",),
     metric_names={"angular": "COSINE", "euclidean": "EUCLIDEAN"},
+    statement_timeout="SET SESSION max_execution_time = {ms}",
+    statement_timeout_errno=ER_QUERY_TIMEOUT_MYSQL,
 )
 
 
@@ -1121,6 +1160,8 @@ PERCONA_DIALECT = MySQLDialect(
     # value per build and `_index_clause` prefers it. This is what a
     # by-hand reproduction gets, and it is the server's own default.
     ef_construction=200,
+    statement_timeout="SET SESSION max_execution_time = {ms}",
+    statement_timeout_errno=ER_QUERY_TIMEOUT_MYSQL,
 )
 
 

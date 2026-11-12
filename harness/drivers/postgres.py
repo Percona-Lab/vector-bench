@@ -15,6 +15,7 @@ through batched INSERT. Argued at length beside `INSERT_SQL`.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -604,6 +605,23 @@ class PostgresDriver(EngineDriver):
             binary=True, prepare=True,
         )
         return [row[0] for row in self._cur.fetchall()]
+
+    #: SQLSTATE `query_canceled`, which `statement_timeout` raises.
+    _QUERY_CANCELED = "57014"
+
+    def set_statement_timeout(self, seconds: Optional[float]) -> bool:
+        """`statement_timeout` in integer milliseconds; 0 removes it.
+
+        A positive cap under a millisecond is rounded UP, because 0 is "off"
+        and rounding down would turn the smallest cap into none at all.
+        """
+        secs = float(seconds) if seconds is not None and seconds > 0 else 0.0
+        ms = max(1, math.ceil(secs * 1000)) if secs > 0 else 0
+        self._cur.execute(f"SET statement_timeout = {int(ms)}")
+        return True
+
+    def is_statement_timeout(self, exc: BaseException) -> bool:
+        return getattr(exc, "sqlstate", None) == self._QUERY_CANCELED
 
     def set_iterative_scan(self, mode: str) -> None:
         """pgvector 0.8 iterative index scan mode: off | relaxed_order | strict_order.
