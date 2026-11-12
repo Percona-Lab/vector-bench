@@ -110,6 +110,18 @@ WARMUP_BUDGET_SHARE = 0.2
 #: budget a profile sets (300 s), large against a healthy filtered query.
 MIN_STATEMENT_TIMEOUT_S = 1.0
 
+#: The longest any ONE filtered query may run, whatever budget is left.
+#: Capping at "time left" alone still let a measured query run for most of a
+#: 300 s budget, and the query that OOM-killed MariaDB in
+#: percona-mariadb-20261111-r2 needed about 240 s to take server RSS from
+#: 2.3 GiB to the 16 GiB limit -- inside that window. Sixty seconds is the
+#: warm-up's own share of the default budget (`WARMUP_BUDGET_SHARE` x 300 s),
+#: and it costs no measurement: a point with one 60 s query can run at most
+#: five in 300 s, far under `MIN_SAMPLE_QUERIES`, so it is already the
+#: greyed, insufficient point the report draws. The cap only decides whether
+#: that point is RECORDED or takes the server down with it.
+MAX_STATEMENT_TIMEOUT_S = 60.0
+
 #: Below this many executed queries a point is still recorded, but flagged.
 #: PR 3 §3.4 item 3. Fifty because recall here is a mean over
 #: `queries * k` Bernoulli-ish draws and the report greys the point out rather
@@ -281,10 +293,11 @@ class _PointResult(NamedTuple):
     #: mutable default on a NamedTuple is shared by every instance that omits
     #: it, and nothing here needs it to be mutable.
     latencies: Sequence[float] = ()
-    #: Whether the engine enforced a server-side cap on each query, and how
-    #: many queries (warm-up and measured) it stopped. See
+    #: Whether a server-side cap was ARMED on each query (the engine accepted
+    #: the SET -- not proof it can interrupt every plan), and how many
+    #: queries (warm-up and measured) it stopped. See
     #: `EngineDriver.set_statement_timeout` for the incident behind both.
-    statement_timeout_enforced: bool = False
+    statement_timeout_armed: bool = False
     statement_timeouts: int = 0
 
 
@@ -301,7 +314,7 @@ def _arm_statement_timeout(driver: EngineDriver, deadline: float) -> bool:
     if remaining == float("inf"):
         return False
     return driver.set_statement_timeout(
-        max(remaining, MIN_STATEMENT_TIMEOUT_S))
+        min(max(remaining, MIN_STATEMENT_TIMEOUT_S), MAX_STATEMENT_TIMEOUT_S))
 
 
 def _capped_query(driver: EngineDriver, deadline: float, vector, k: int,
@@ -345,7 +358,8 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
 
     On an engine whose driver enforces `set_statement_timeout` (MariaDB,
     AliSQL, Percona, pgvector), every query is also capped server-side at the
-    time left -- never less than `MIN_STATEMENT_TIMEOUT_S` -- and a query the
+    time left -- never less than `MIN_STATEMENT_TIMEOUT_S`, never more than
+    `MAX_STATEMENT_TIMEOUT_S` -- and a query the
     cap stops ends its loop exactly as an elapsed deadline does, without
     contributing a latency or a result. The paragraph below is then the
     bound for the other engines only; for these the bound is one budget,
@@ -482,7 +496,7 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
         qps=collector.qps(clients=1) if returned else 0.0,
         warmup_executed=warmup_executed, warmup_planned=warmup_planned,
         latencies=latencies,
-        statement_timeout_enforced=enforced, statement_timeouts=timeouts,
+        statement_timeout_armed=enforced, statement_timeouts=timeouts,
     )
 
 
@@ -758,10 +772,11 @@ def _record_point(ctx: RunContext, common: Dict[str, object], filt,
             # harness that did not have budgets yet".
             "time_bounded": point.time_bounded,
             # Additive like the two warm-up fields above. Whether each query
-            # was capped server-side at the time left, and how many the cap
-            # stopped; False/0 on an engine whose driver has no cap, which is
-            # the budget as every record before this field measured it.
-            "statement_timeout_enforced": point.statement_timeout_enforced,
+            # had a server-side cap ARMED (the SET was accepted; whether the
+            # engine's plan polls for it is per engine, see the PR), and how
+            # many the cap stopped. False/0 on an engine whose driver has no
+            # cap, which is the budget as every record before this measured it.
+            "statement_timeout_armed": point.statement_timeout_armed,
             "statement_timeouts": point.statement_timeouts,
             "insufficient_sample": insufficient,
             "filtered_budget_s": budget_s,
