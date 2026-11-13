@@ -20,7 +20,7 @@ The repo root is `vector-bench/` (git repo, branch `master`). All commands below
 | `pgvector` | PostgreSQL + pgvector | tag `v0.8.6` |
 | `mongodb` | Percona Search for MongoDB (mongot) | Percona package |
 | `valkey` | Valkey + valkey-search | Percona repo `valkey-91` |
-| `percona` | Percona Server, InnoDB HNSW | `9.7` series, commit `56124b03` |
+| `percona` | Percona Server, InnoDB HNSW | `release-9.7.4-4` tip, commit `20c57915` |
 | `myvector` | MyVector plugin (hnswlib) on MySQL 9.7.2 | release v1.26.9, commit `384d9df7` |
 | `villagesql` | VillageSQL 0.0.7 + vsql_vector extension (HNSW custom index, built from vsql-vector-pk), MySQL 9.7.2 base | server `publish/mysql-9.7_0.0.7` (`533ab4b5`), vsql-vector-pk release `0.0.3` (`93ed0087`) |
 | `villagesql84` | The same extension commit on VillageSQL's MySQL 8.4 base (`alias_of: villagesql`) | server `publish/mysql-8.4_0.0.7` (`689c74a9`), vsql-vector-pk release `0.0.3` (`93ed0087`) |
@@ -277,7 +277,7 @@ These are the reasons the code looks over-defensive. Do not relax them.
   incrementally on every INSERT, and Percona Server does either, so its `build_mode` is a
   comparison within one engine (ops path only — the ann overlay module has no `build_mode`,
   and `render_config` refuses the key rather than emitting two identical curves). Its ops
-  default is `post` (`capabilities.bulk_vector_index_build: true` since the 9.7.2-2 re-test;
+  default is `post` (`capabilities.bulk_vector_index_build: true` since the 9.7.2-2 re-test, not re-run at 9.7.4-4;
   it killed the server at 9.7.1-1) while every ann curve is an incremental build, and the
   churn index replace stays withdrawn on its own key, `capabilities.vector_index_replace:
   false` — a different ALTER, a 1–4 ms no-op at the old pin, not re-tested; MyVector

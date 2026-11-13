@@ -86,10 +86,11 @@ adds is in both with the vendor's value, that the removed flags stay removed,
 and that the eleven packages are declared in the stage that compiles. They
 establish nothing about Percona Server, and they cannot. Every claim about
 what cmake does with these options is a file:line on commit
-56124b03fdc5954e2401ab4d2c7bf7cb3a767158 plus the operator's own configure
-output. Those readings were taken at the earlier pin and are carried forward
-unverified: the base moved about four months at the re-pin to the `9.7`
-series and no configure has been run against it. The comment above the builder's apt list in
+20c57915626b0214bbfe49718beccc0b6ebd51a6 plus the operator's own configure
+output. Those readings were taken at the 9.7.1 base and carried through two
+re-pins; at this one (9.7.2-2 to 9.7.4-4, a fast-forward) the cited lines
+were re-read against the new tree and two ranges renumbered, but no
+configure has been run against it. The comment above the builder's apt list in
 `docker/percona/Dockerfile`, and the one beside `build.cmake_flags` in
 `config/engines/percona.yml`, carry that reading at length.
 

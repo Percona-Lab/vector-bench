@@ -3,7 +3,7 @@ graph is cold when the build returns.
 
 WHY THIS EXISTS, AND FOR WHICH ENGINE. Percona Server loads its HNSW graph
 lazily. At the pin (`vec_runtime_load` in *storage/innobase/vec/vec0hnsw.cc*,
-commit 56124b03) "Only the entry point is read here. Every other node is
+commit 20c57915) "Only the entry point is read here. Every other node is
 faulted in on demand when traversal reaches it" -- there is no preload. And
 the server team stated on 2026-11-04 that `ALTER TABLE ... ADD VECTOR KEY`,
 which is what a `post` build issues, evicts the table as part of the ALTER.

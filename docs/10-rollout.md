@@ -455,8 +455,8 @@ stops for the duration).
 > `capabilities.vector_index_replace` in `config/engines/percona.yml` is
 > flipped. That is its own key: the withdrawal used to ride on
 > `capabilities.bulk_vector_index_build: false`, and when the bulk build (an
-> `ADD VECTOR KEY` on an unindexed table) was re-verified at the current pin
-> (9.7.2-2) and that key became `true`, the replace — not re-tested — had to
+> `ADD VECTOR KEY` on an unindexed table) was re-verified at the 9.7.2-2 pin
+> (not re-run at the current 9.7.4-4) and that key became `true`, the replace — not re-tested — had to
 > stay withdrawn on its own.
 
 What MongoDB has instead is the index-sync wait, a different hook:

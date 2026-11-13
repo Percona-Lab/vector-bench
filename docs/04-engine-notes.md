@@ -313,8 +313,8 @@ selectivities, carries over. Both reproduce the run: 5.2x slower at 1% than at
 ## MyVector — hnswlib as a MySQL plugin
 
 Source: `askdba/myvector` release v1.26.9, commit `384d9df7`, built in-tree
-into MySQL `mysql-9.7.2` (the server line Percona Server's `9.7` series is
-based on). Symbols below are in that tree's `src/myvector.cc`,
+into MySQL `mysql-9.7.2` (the server line Percona Server's `9.7` series was
+based on at its 9.7.2-2 pin; the current Percona pin is 9.7.4-4). Symbols below are in that tree's `src/myvector.cc`,
 `src/myvector_binlog.cc`, `src/myvector_plugin.cc`, `include/hnswdisk.h` and
 `sql/myvectorplugin.sql`. Driver: `harness/drivers/myvector.py`.
 

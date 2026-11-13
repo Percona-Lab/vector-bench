@@ -1,6 +1,6 @@
 #
-# Percona Server (MySQL 9.7.2 base + native InnoDB HNSW vector index),
-# built from a pinned SHA in the `9.7` series.
+# Percona Server 9.7.4-4 (MySQL 9.7.4 base + native InnoDB HNSW vector index),
+# built from a pinned SHA on the `release-9.7.4-4` branch of the `9.7` series.
 #
 # Targets:
 #   runtime  — server binaries only. Use this to run Percona Server by hand
@@ -389,11 +389,14 @@ RUN tar -xf /tmp/source.tar -C /src && rm -f /tmp/source.tar
 # CFLAGS CANNOT BE HANDED TO THIS TREE BY `export` ALONE ON A DEBIAN HOST, AND
 # THE cmake LINE BELOW CARRIES THREE FLAGS THAT EXIST ONLY FOR THAT. Every step
 # of the chain is READ from the Percona tree -- at the 9.7.1 base this file was
-# written against, and NOT re-derived at the current pin
-# (56124b03fdc5954e2401ab4d2c7bf7cb3a767158), whose base is about four months
-# newer; re-deriving it means a configure, and a configure is a build. A step
-# says MEASURED where it was measured on the build host rather than inside
-# this image:
+# written against. At the current pin
+# (20c57915626b0214bbfe49718beccc0b6ebd51a6) every READ line number below was
+# re-read against the tree and holds, except the two that moved: the
+# CMakeLists.txt comment block on the compile line is at :2963-2973 (it was
+# :2959-2969 before four lines were added above it), and compiler_options.cmake
+# moved down one line (a new INCLUDE at its top). That re-reading is not a
+# configure, and a configure is a build. A step says MEASURED where it was
+# measured on the build host rather than inside this image:
 #
 #   1. source CMakeLists.txt:747-764 -- for `LINUX_STANDALONE AND
 #      (LINUX_DEB_PLATFORM OR LINUX_RPM_PLATFORM)` (:750) the tree offers a
@@ -532,9 +535,9 @@ RUN tar -xf /tmp/source.tar -C /src && rm -f /tmp/source.tar
 #         -fno-omit-frame-pointer for two independent reasons: Ubuntu 24.04's
 #                                 dpkg emits it too, AND
 #                                 cmake/build_configurations/compiler_options
-#                                 .cmake:41 and :51 set COMMON_C_FLAGS and
+#                                 .cmake:42 and :52 set COMMON_C_FLAGS and
 #                                 COMMON_CXX_FLAGS to it under
-#                                 `IF(MY_COMPILER_IS_GNU)` (:40) and :78/:83
+#                                 `IF(MY_COMPILER_IS_GNU)` (:41) and :79/:84
 #                                 prepend them. READ at the pin.
 #
 #     `-fno-strict-aliasing` DESERVES ITS OWN SENTENCE. A MySQL-family C/C++
@@ -549,7 +552,7 @@ RUN tar -xf /tmp/source.tar -C /src && rm -f /tmp/source.tar
 #     was never read, so a sub-directory may well re-add either one. What
 #     those three files DO add, for contrast, is `-fno-omit-frame-pointer`
 #     above and `SECTIONS_FLAG` = `-ffunction-sections -fdata-sections` at
-#     compiler_options.cmake:34.
+#     compiler_options.cmake:35.
 #
 #     The LTO is real LTO and not just a compile flag, because
 #     compile_flags.cmake:132-134 sets all three of cmake's LINKER_FLAGS
@@ -573,7 +576,7 @@ RUN tar -xf /tmp/source.tar -C /src && rm -f /tmp/source.tar
 #     THE OPTIMISATION LEVEL IS NOT PART OF THIS, in either direction, and no
 #     sentence here should imply otherwise. `-O3` in the exported CFLAGS has
 #     NEVER reached the compiler for this engine, before this fix or after it.
-#     Both trees say why in their own words -- source CMakeLists.txt:2959-2969
+#     Both trees say why in their own words -- source CMakeLists.txt:2963-2973
 #     (AliSQL's copy at :2709-2719) records that the command line is
 #     `g++ DEFINITIONS CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_<configuration>` and
 #     that RELWITHDEBINFO's own value is `-O2 -g -DNDEBUG`, and names the only

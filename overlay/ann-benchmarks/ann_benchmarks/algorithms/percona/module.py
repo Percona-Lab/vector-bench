@@ -7,11 +7,15 @@ docs/09-adding-percona-server.md carries the evidence for every claim below and
 §7 lists what only a live server can settle.
 
 Designed against percona/percona-server at
-56124b03fdc5954e2401ab4d2c7bf7cb3a767158, in the `9.7` series the vector work
-was merged into. Every file:line citation in this module was derived on the
-earlier `vector-mvp` pin and has not been re-derived here: the series was
-rebased into `9.7`, so the paths hold and the line numbers are unverified at
-this pin. Paths beginning `mysql-test/` are MTR tests and their
+20c57915626b0214bbfe49718beccc0b6ebd51a6, the 2026-11-13 tip of
+`release-9.7.4-4` in the `9.7` series the vector work was merged into. Every
+file:line citation in this module was derived on the earlier `vector-mvp` pin
+and has not been re-derived since: the series was rebased into `9.7`, so the
+paths mostly hold and the line numbers are unverified. Two exceptions, both
+re-read at this pin: the DISTANCE (arity 3) and VECTOR_DIM entries in
+sql/item_create.cc's function registry hold, at unchanged lines; the
+mysql-test/suite/percona_vector/ index_syntax files do not exist at this pin
+(nor at the one before it). Paths beginning `mysql-test/` are MTR tests and their
 recorded output — a `.result` file is the server's own output, which is why they
 are cited in preference to Docs/percona-hnsw.md wherever both say the same thing.
 

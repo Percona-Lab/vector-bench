@@ -191,8 +191,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     # replaces an EXISTING index; `--build-mode post` adds one to a table
     # that has none. At Percona's old pin the first returned in 1-4 ms as a
     # no-op the report published as a repair, while the second killed the
-    # server; at the current pin the second builds and the first has not been
-    # re-tested. Riding on one flag would have restored the unverified one
+    # server; at the 9.7.2-2 pin the second built and the first has not been
+    # re-tested (neither has been re-run at 9.7.4-4). Riding on one flag would have restored the unverified one
     # the moment the verified one was enabled. See
     # `PerconaDriver.declare_vector_index_replace`.
     p.add_argument("--no-vector-index-replace", action="store_true",

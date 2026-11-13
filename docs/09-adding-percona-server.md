@@ -86,25 +86,28 @@ document permitted to make the citation it forbids.
 | | |
 |---|---|
 | Repository | `https://github.com/percona/percona-server` |
-| Base branch | `9.7` — the vector MVP was merged out of `vector-mvp` into this series by PR #6278 |
-| **Pinned SHA** | **`56124b03fdc5954e2401ab4d2c7bf7cb3a767158`** |
-| Pin **author** date | 2026-10-14T22:27:46Z |
-| Pin **committer** date | 2026-10-26T12:41:43Z |
-| Pin subject | `PS-11751 : [9.7] VIRTUAL generated column returns a stale, identical value for every row when read through an HNSW vector index (ANN query)` |
-| Server version | MySQL 9.7.2 LTS base (`MYSQL_VERSION`: `MAJOR=9 MINOR=7 PATCH=2 EXTRA=-2 MATURITY="LTS"`, i.e. `9.7.2-2`) |
-| MTR suite | `mysql-test/suite/percona_vector/` — **97** `.test` files and 97 `.result` files, plus two in `mysql-test/suite/sys_vars/` |
+| Base branch | `release-9.7.4-4`, cut from `9.7` — the vector MVP was merged out of `vector-mvp` into `9.7` by PR #6278 |
+| **Pinned SHA** | **`20c57915626b0214bbfe49718beccc0b6ebd51a6`** |
+| Pin **author** date | 2026-11-13T08:22:05Z |
+| Pin **committer** date | 2026-11-13T10:21:43Z |
+| Pin subject | `PS-12020 [9.7] HNSW graph object is over-aligned (alignas(64)) but allocated with 16-byte-aligned ut::new_withkey, causing SIGSEGV on ADD VECTOR KEY and on DML.` |
+| Server version | MySQL 9.7.4 LTS base (`MYSQL_VERSION`: `MAJOR=9 MINOR=7 PATCH=4 EXTRA=-4 MATURITY="LTS"`, i.e. `9.7.4-4`) |
+| MTR suite | `mysql-test/suite/percona_vector/` — **102** `.test` files and 102 `.result` files, plus two in `mysql-test/suite/sys_vars/` |
 
-That SHA is PR #6278's `merge_commit_sha` (`gh api 'repos/percona/percona-server/pulls/6278'`).
-The merge was a REBASE, so that field names the last of the 30 rebased commits and not a squash.
+That SHA is the tip of `release-9.7.4-4` on 2026-11-13; the branch has no
+release tag yet. The previous pin, `9.7.2-2` (the last of PR #6278's 30
+rebased commits on base `9.7`), is an ancestor of it: GitHub's compare reports
+589 commits ahead and 0 behind. The five suite files added in that range are
+*crash_neighbor_ref_uncommitted*, *duplicate_vectors*,
+*failed_insert_neighbor_ref*, *index_build_redo* and *memory_engine*; no
+existing *percona_vector* file changed.
 
 **Dates on this pin need their basis stated, and the table above gives both.**
-The series was rebased onto `9.7` at merge, so the pin's **author** date sits
-eleven days under its **committer** date and its parent carries the same
-committer second — which is the fingerprint of a rebase, not of a backdate. An
-earlier revision of this table printed one date without saying which, and then
-built the warning on it; the warning's conclusion survives either way, for a
-simpler reason than the one it gave: **a date never tells you whether you have
-the tip, so compare SHAs.** Every date in the table below is an author date,
+The pin's **author** date sits two hours under its **committer** date. The
+previous pin was the last of a rebased series and had the two eleven days
+apart, which an earlier revision of this table printed without saying which
+it was; the conclusion holds either way: **a date never tells you whether you
+have the tip, so compare SHAs.** Every date in the table below is an author date,
 because that is what `git log` shows by default.
 
 ### What the pre-merge `vector-mvp` commit log said about stability
@@ -820,10 +823,11 @@ and `repair_path`:
 > row is removed.
 >
 > The withdrawal first rode on `capabilities.bulk_vector_index_build: false`.
-> At the current pin (9.7.2-2) the bulk build was re-verified on 2026-11-03 (25
+> At the 9.7.2-2 pin, the one before the current 9.7.4-4, the bulk build was re-verified on 2026-11-03 (25
 > of 25 builds, and the same index quality as `incremental` at 60,000 rows), so
 > that key is now `true` — but the replace is a different statement on an
-> already-indexed table and has **not** been re-tested. It is therefore
+> already-indexed table and has **not** been re-tested. Neither statement
+> has been re-run at 9.7.4-4. It is therefore
 > withdrawn by its own key, `capabilities.vector_index_replace: false`, read by
 > `_vector_index_replace` in `orchestrator/cli.py` (which falls back to the
 > bulk-build key for an engine that declares no replace key) and carried to
@@ -1192,7 +1196,7 @@ source:
   # `orchestrator/ops_pass.py` reads the same key
   # into `VB_ENGINE_TAG`, which is what reaches the manifest. `git archive`
   # takes a SHA wherever it takes a tag, so the mechanism is unchanged.
-  tag: 56124b03fdc5954e2401ab4d2c7bf7cb3a767158   # tip of PR #6278 on base 9.7
+  tag: 20c57915626b0214bbfe49718beccc0b6ebd51a6   # tip of release-9.7.4-4, 2026-11-13
   upstream: https://github.com/percona/percona-server.git
   # No `submodules:` key, deliberately: all four of the pin's submodules are
   # switched off in the build instead, which takes four cmake flags, one of
@@ -1321,8 +1325,8 @@ build mode is a real axis — see §4.10.
   be delivered — see §4.10.
   **The build-mode comparison was unmeasurable at the old pin** (9.7.1-1),
   where `ALTER TABLE … ADD VECTOR KEY … ALGORITHM=INPLACE` killed the server,
-  and the profile asked for `[incremental]` alone. At the current pin it built
-  25 times out of 25, so the profile runs the pair again, and the ops loop —
+  and the profile asked for `[incremental]` alone. At the 9.7.2-2 pin it built
+  25 times out of 25 (not re-run at 9.7.4-4), so the profile runs the pair again, and the ops loop —
   which reads `capabilities.bulk_vector_index_build` in
   `config/engines/percona.yml` for its default — builds Percona `post` in
   every profile that names no mode. The ann phase still builds incrementally:

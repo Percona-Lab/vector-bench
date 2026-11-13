@@ -44,8 +44,8 @@ no repair path already use.
 
 TWO KEYS NOW, NOT ONE. The withdrawal first rode on
 `bulk_vector_index_build: false`, on the grounds that both ALTERs add a
-vector key. On 2026-11-03 the bulk build was re-verified at the current pin
-(9.7.2-2, 25 of 25 builds) and the replace was not re-tested, so Percona now
+vector key. On 2026-11-03 the bulk build was re-verified at the 9.7.2-2 pin
+(25 of 25 builds; not re-run at 9.7.4-4) and the replace was not re-tested, so Percona now
 declares `bulk_vector_index_build: true` and `vector_index_replace: false`,
 and this file pins the second: read by `cli._vector_index_replace` (which
 FALLS BACK to the bulk-build reading when an engine declares no replace key,

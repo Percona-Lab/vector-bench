@@ -177,7 +177,7 @@ _MEASURED_ROWS_PER_S = {
     # cannot say so -- `_ops_units` reads `ops.percona_build_modes` and this
     # table does not. No `post` rate is added, because there is no
     # load-plus-build rate measured on the grid this table prices: the one
-    # comparison at the current pin (`percona-build-modes`, fashion-mnist,
+    # comparison at the 9.7.2-2 pin (`percona-build-modes`, fashion-mnist,
     # 60,000 rows, M=16, one load thread) took 195 s for `post` against 288 s
     # for `incremental`, one dataset at one M, which is a direction and not a
     # rate. `print_load_estimate` says the ops share is charged at the
@@ -1522,7 +1522,7 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
     # `_INGEST_ROWS_PER_S`), which is right for its ann phase and for an
     # `incremental` ops unit. Its ops DEFAULT is `post` now that
     # `capabilities.bulk_vector_index_build` is true, and `post` loaded and
-    # built faster in the one comparison at this pin -- so the ops share is a
+    # built faster in the one comparison, at the 9.7.2-2 pin -- so the ops share is a
     # likely overestimate, which is said rather than corrected with a rate
     # nothing measured. A profile that names no modes gets the ENGINE's
     # default, read off the same capability `cli._ops_build_modes` reads, so
@@ -1541,7 +1541,7 @@ def print_load_estimate(profile: Dict[str, Any], engines: List[str],
                            .get("percona_build_modes", percona_default))):
         print("  percona's ops ingest is charged at its measured incremental "
               "rate; its post\n    units (the ops default) have no rate here "
-              "and loaded faster in the one\n    comparison at this pin "
+              "and loaded faster in the one\n    comparison, at the 9.7.2-2 pin "
               "(195 s vs 288 s, 60,000 rows), so that share is likely high.")
     bound = estimate.get("ops_build_bound")
     if bound:

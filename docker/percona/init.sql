@@ -13,7 +13,7 @@
 --       IDENTIFIED WITH mysql_native_password BY 'bench';
 --
 -- On this server that is a hard error, not a deprecation warning. The
--- `9.7` series is MySQL 9.7.2 based and the plugin has been removed from
+-- `9.7` series is MySQL 9.7.4 based at the pin and the plugin has been removed from
 -- the server — the pinned tree carries a test for its absence,
 -- mysql-test/r/mysql_native_password_removed.result, whose lines 4-5 are:
 --

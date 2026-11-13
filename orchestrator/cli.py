@@ -1224,7 +1224,7 @@ def _check_free_disk(paths: Dict[str, Any], engines: List[str],
 # complete: see `_ops_build_modes` below, which now takes it from the
 # engine's own `capabilities.bulk_vector_index_build`. The asymmetry the
 # rest of this paragraph describes is real and unchanged for every engine
-# whose bulk build works, which includes Percona again at the current pin.**
+# whose bulk build works, which includes Percona again since the 9.7.2-2 pin.**
 # For
 # MariaDB and AliSQL `post` is a no-op -- `create_index` does nothing
 # and `capabilities()["incremental_index"]` is True, so the measured
@@ -1236,8 +1236,8 @@ def _check_free_disk(paths: Dict[str, Any], engines: List[str],
 # is not like-for-like, and `build_mode` is on every record so the
 # report can say which. `config/profiles/percona.yml` ran both until the
 # bulk build was found to kill the server at the old pin (9.7.1-1); it
-# asked for `[incremental]` alone until the current pin (9.7.2-2) built it
-# 25 times out of 25, and now runs both again.
+# asked for `[incremental]` alone until the 9.7.2-2 pin built it 25 times
+# out of 25, and now runs both again (not re-run at 9.7.4-4).
 _OPS_BUILD_MODE_KEYS = {
     "pgvector": ("ann", "pgvector_build_modes"),
     "percona": ("ops", "percona_build_modes"),
@@ -1259,16 +1259,16 @@ def _bulk_vector_index_build(engine_cfg: Dict[str, Any]) -> bool:
 
     **Absence reads as True**, and that default is the whole compatibility
     story: the key is declared by two engine configs --
-    `config/engines/percona.yml` (true at its current pin, false at the old
-    one) and `config/engines/villagesql.yml` (false) -- which
+    `config/engines/percona.yml` (true since its 9.7.2-2 pin, false at
+    9.7.1-1) and `config/engines/villagesql.yml` (false) -- which
     `tests/test_e9_percona_bulk_build_crash.py` pins. Every other engine
     declares nothing and is unaffected in both consumers.
 
     **The second consumer no longer reads this directly.** It reads
     `_vector_index_replace` below, which falls back to this function when an
     engine does not declare the replace separately. The two statements were
-    one key while neither worked; at Percona's current pin the bulk build is
-    verified and the replace is not, so they had to come apart.
+    one key while neither worked; at Percona's 9.7.2-2 pin the bulk build was
+    verified and the replace was not, so they had to come apart.
     """
     caps = engine_cfg.get("capabilities", {}) or {}
     return bool(caps.get("bulk_vector_index_build", True))
@@ -1287,8 +1287,8 @@ def _vector_index_replace(engine_cfg: Dict[str, Any]) -> bool:
     failed at the old pin (9.7.1-1): the first killed the server, the second
     returned in 1-4 ms with `index_bytes` byte-identical and recall identical
     in all 20 before/after pairs of `full-20261015-215006` -- a no-op the
-    report published as a repair. The current pin (9.7.2-2) built the first
-    25 times out of 25 on 2026-11-03, and nobody has re-run the second. One
+    report published as a repair. The 9.7.2-2 pin built the first 25
+    times out of 25 on 2026-11-03 (not re-run at 9.7.4-4), and nobody has re-run the second. One
     key would have restored both on that evidence, and the second one fails
     SILENTLY, by publishing a plausible number.
 
@@ -1333,7 +1333,7 @@ def _ops_build_modes(engine: str, profile: Dict[str, Any],
     # server, so a literal `["post"]` default meant `main`, `smoke`, `dev` and
     # every other profile that sets no `percona_build_modes` ran Percona in
     # the one mode that could not complete -- after paying for the whole load
-    # first. At the current pin it builds, and Percona declares the
+    # first. At the 9.7.2-2 pin it built, and Percona declares the
     # capability true again, so those profiles get `post`; VillageSQL still
     # declares false and still gets `incremental`. The evidence for both is
     # at `capabilities.bulk_vector_index_build` in each engine config.

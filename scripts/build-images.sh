@@ -147,7 +147,7 @@ build_engine() {
     mariadb)  bargs+=(--build-arg "MARIADB_TAG=${tag}") ;;
     alisql)   bargs+=(--build-arg "ALISQL_TAG=${tag}") ;;
     # The value is a SHA rather than a tag name -- Percona is pinned to a
-    # commit (the tip of Percona PR #6278 on base `9.7`), not to a release --
+    # commit (the 2026-11-13 tip of Percona's `release-9.7.4-4`), not to a release --
     # but it travels by the same `source.tag` key and through the same build
     # arg, because `git archive` and `docker build --build-arg` neither know
     # nor care which it is. docker/percona/Dockerfile declares `ARG PERCONA_TAG` to receive it.
