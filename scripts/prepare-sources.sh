@@ -116,17 +116,17 @@ prepare_alisql() {
 # deliberate.
 #
 # 1. THE PIN IS A COMMIT, NOT A TAG. `source.tag` holds a SHA because the
-#    pin is commit 56124b03, the tip of Percona PR #6278 on base `9.7`, and
-#    has no release to name. `git archive` takes a commit-ish wherever it
+#    pin is commit 20c57915, the 2026-11-13 tip of Percona's
+#    `release-9.7.4-4` branch, and has no release tag to name. `git archive` takes a commit-ish wherever it
 #    takes a tag, so the mechanism is unchanged -- but `refs/tags/$tag` is not
 #    how this one is resolved, which is why the verify below is
 #    `rev-parse "$sha^{commit}"` against the bare object rather than against a
-#    tag ref. Compare SHAs and never dates: the series was rebased onto `9.7`,
-#    so its author and committer dates disagree.
+#    tag ref. Compare SHAs and never dates: a date never tells you
+#    whether you have the tip.
 #
 # 2. NO SUBMODULES, AND THAT IS NOT AN OMISSION. The pin has four of them --
-#    percona-xtradb-cluster-galera, storage/rocksdb/rocksdb, extra/coredumper
-#    and extra/jwt-cpp -- and MariaDB's branch above exists precisely because
+#    storage/rocksdb/rocksdb, extra/coredumper, extra/libkmip and
+#    extra/jwt-cpp -- and MariaDB's branch above exists precisely because
 #    `git archive` cannot carry a submodule. Percona does not need the clone
 #    treatment because all four are switched OFF in the build instead, which
 #    takes four cmake flags (docker/percona/Dockerfile note 2). Cloning to

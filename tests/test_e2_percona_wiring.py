@@ -10,7 +10,7 @@ WHAT THESE TESTS CAN AND CANNOT ESTABLISH
 -----------------------------------------
 Nothing here establishes anything about Percona Server. No image has been built
 and no server has been started; every claim about the engine's behaviour is
-sourced to a file:line on commit 56124b03fdc5954e2401ab4d2c7bf7cb3a767158 in
+sourced to a file:line on commit 20c57915626b0214bbfe49718beccc0b6ebd51a6 in
 docs/09 and is settled by reading that tree. What these establish is that the
 statements this repo would SEND are the ones the document says it sends, and
 that the seven-engine wiring agrees with itself across the files that have to.
@@ -47,7 +47,7 @@ from harness.drivers.mysql_family import (ALISQL_DIALECT,  # noqa: E402
 from harness.drivers.postgres import _driver_classes, _driver_table  # noqa: E402
 
 VB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PINNED_SHA = "56124b03fdc5954e2401ab4d2c7bf7cb3a767158"
+PINNED_SHA = "20c57915626b0214bbfe49718beccc0b6ebd51a6"
 
 
 # ---------------------------------------------------------------------------
@@ -1348,7 +1348,7 @@ class TestTheOpsPathDoesSupportBothBuildModes:
     def test_the_profile_declares_both_modes_and_the_capability_agrees(self):
         """It declared `[post, incremental]`, was cut to `[incremental]` when
         `post` was found to kill the server at the old pin (9.7.1-1), and is
-        back to both since the current pin built it 25 times out of 25 -- see
+        back to both since the 9.7.2-2 pin built it 25 times out of 25 -- see
         `capabilities.bulk_vector_index_build` in
         `config/engines/percona.yml`. The profile and the capability have to
         move together: `post` in the profile with the capability false would
@@ -2140,6 +2140,16 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
         "file belongs to another unit, so it is declared here and not "
         "edited -- and the check below means that if that sentence is ever "
         "removed, this allowance fails rather than lingering."),
+    "56124b03fdc5954e2401ab4d2c7bf7cb3a767158": (
+        (PLAN_DOC, SELF_REL),
+        "the superseded 9.7.2-2 pin: the tip of PR #6278 on base `9.7`, "
+        "re-pinned on 2026-11-13 to the tip of `release-9.7.4-4`, of which it "
+        "is an ancestor. docs/12 is the plan written while it was the pin "
+        "and names it as the commit it moved to; its figures describe the "
+        "tree as it was then and are deliberately not maintained. Every "
+        "other file that reports a measurement taken at it names it by "
+        "version (`9.7.2-2`), not by commit, so this allowance is the plan "
+        "and this guard alone."),
     "384d9df7ab8a2afee9c8f99704e5a7ea90d32730": (
         ("config/engines/myvector.yml", "tests/test_e23_myvector_engine.py",
          SELF_REL),
@@ -2193,7 +2203,8 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
 #:
 #: The files allowed to name each one come from the table above, so the two
 #: assertions cannot disagree about where a commit may live.
-SUPERSEDED_PINS = ("02a8b80c70b0ccf6c9035d8a2307e7fa988cc304",)
+SUPERSEDED_PINS = ("02a8b80c70b0ccf6c9035d8a2307e7fa988cc304",
+                   "56124b03fdc5954e2401ab4d2c7bf7cb3a767158")
 
 #: A commit as this repository writes one: seven to forty hex characters,
 #: token-bounded, holding BOTH a digit and a letter.
@@ -2423,6 +2434,72 @@ class TestThePinIsOneValueInEveryFileThatSpellsOne:
             "these look like the pin and are not it, so they are a typo in a "
             f"hand-copied abbreviation of {PINNED_SHA}:\n  "
             + "\n  ".join(wrong))
+
+
+# ---------------------------------------------------------------------------
+# The server version is one value in every file that states it as current
+# ---------------------------------------------------------------------------
+#
+# The guard above makes the SHA all-or-nothing; nothing did the same for the
+# version string, which is repeated in prose beside it. The 2026-11-13 re-pin
+# (9.7.2-2 to 9.7.4-4) moved it in seven places by hand. These are the sites
+# that state the CURRENT version -- the README's engine table, the pin table in
+# docs/09, the two files baked into the image, and the overlay's provenance
+# line -- and each is checked for the current value AND for the absence of the
+# previous one in the same statement. Historical measurements that name
+# 9.7.2-2 as where they were taken are deliberately out of scope: they are
+# supposed to keep naming it.
+#
+# The value is read from MYSQL_VERSION at the pin, not inferred:
+# MAJOR=9 MINOR=7 PATCH=4 EXTRA=-4 MATURITY="LTS".
+
+PINNED_VERSION = "9.7.4-4"
+PINNED_MYSQL_BASE = "9.7.4"
+PREVIOUS_VERSION = "9.7.2-2"
+
+
+def _read(rel):
+    with open(os.path.join(VB_ROOT, rel), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _line_with(text, needle):
+    hits = [ln for ln in text.splitlines() if needle in ln]
+    assert len(hits) == 1, (needle, hits)
+    return hits[0]
+
+
+class TestTheServerVersionIsOneValue:
+
+    def test_the_readme_engine_row_names_the_pinned_version(self):
+        row = _line_with(_read("README.md"), "| `percona` |")
+        assert PINNED_VERSION in row, row
+        assert f"MySQL {PINNED_MYSQL_BASE} LTS base" in row, row
+        assert PREVIOUS_VERSION not in row, row
+
+    def test_the_docs_09_pin_table_names_the_pinned_version(self):
+        row = _line_with(_read("docs/09-adding-percona-server.md"),
+                         "| Server version |")
+        assert f"i.e. `{PINNED_VERSION}`" in row, row
+        assert "PATCH=4 EXTRA=-4" in row, row
+        assert PREVIOUS_VERSION not in row, row
+
+    @pytest.mark.parametrize("rel", ["docker/percona/entrypoint-percona.sh",
+                                     "docker/percona/init.sql",
+                                     "docker/percona/Dockerfile"])
+    def test_the_image_files_name_the_pinned_mysql_base(self, rel):
+        text = _read(rel)
+        assert f"MySQL {PINNED_MYSQL_BASE}" in text, rel
+        assert "MySQL 9.7.2" not in text, rel
+
+    def test_the_entrypoint_quotes_the_pinned_mysql_version_file(self):
+        text = _read("docker/percona/entrypoint-percona.sh")
+        assert "MAJOR=9 MINOR=7 PATCH=4 EXTRA=-4" in text
+        assert "PATCH=2 EXTRA=-2" not in text
+
+    def test_the_engine_table_in_claude_md_names_the_pinned_commit(self):
+        row = _line_with(_read("CLAUDE.md"), "| `percona` |")
+        assert f"`{PINNED_SHA[:8]}`" in row, row
 
 
 # ---------------------------------------------------------------------------

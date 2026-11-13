@@ -65,7 +65,7 @@ def _doc_09() -> str:
 # module docstring and this file all name the same commit -- the value is the
 # whole point of pinning, and three copies that can drift is how a pin stops
 # meaning anything.
-PINNED_SHA = "56124b03fdc5954e2401ab4d2c7bf7cb3a767158"
+PINNED_SHA = "20c57915626b0214bbfe49718beccc0b6ebd51a6"
 
 
 # ---------------------------------------------------------------------------

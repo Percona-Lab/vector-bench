@@ -85,7 +85,7 @@ read as touching it. `-O3` in the exported CFLAGS has never reached the
 compiler for either engine: the compile line is `CMAKE_C_FLAGS
 CMAKE_C_FLAGS_<configuration>` and RelWithDebInfo's own value ends it with
 `-O2 -g -DNDEBUG`. Both trees say so themselves (Percona
-`CMakeLists.txt:2959-2969`, AliSQL `:2709-2719`) and name the remedy neither
+`CMakeLists.txt:2963-2973`, AliSQL `:2709-2719`) and name the remedy neither
 Dockerfile passes. MEASURED on cmake 3.28.3 and gcc 13: the emitted command is
 `cc -O3 -g -march=x86-64-v3 -O2 -g -DNDEBUG`, and `gcc -O3 -O2 -Q
 --help=optimizers` is identical to `gcc -O2`. That the study mixes -O2 and -O3

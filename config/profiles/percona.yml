@@ -37,7 +37,7 @@
 # rows -- it just was not produced from here. Also never run from here: the
 # second build mode (`post`, blocked by
 # `capabilities.bulk_vector_index_build` until the 2026-11-03 re-test at the
-# current pin restored it to `percona_build_modes` below -- the separate
+# 9.7.2-2 pin restored it to `percona_build_modes` below -- the separate
 # profile `percona-build-modes` measured it instead), and churn, which
 # `workloads` below excludes on purpose.
 #
@@ -245,7 +245,7 @@ ops:
   # THAT STATEMENT KILLED THE SERVER AT THE OLD PIN (9.7.1-1), and this list
   # was cut to `[incremental]` for it: the load completed, the ALTER lost the
   # connection, and the same corpus built and served correctly in
-  # `incremental`. At the current pin it built 25 times out of 25 and a
+  # `incremental`. At the 9.7.2-2 pin it built 25 times out of 25 and a
   # 60,000-row comparison of the two modes gave the same index quality (the
   # `percona-build-modes` profile), so both values are back. The evidence and
   # the history are recorded once, next to

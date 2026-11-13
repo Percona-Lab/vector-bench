@@ -6,7 +6,7 @@
 #
 # WHY THIS EXISTS. `capabilities.bulk_vector_index_build: false` in
 # config/engines/percona.yml took `post` out of every profile after the ALTER
-# killed the server on 2026-10-15 at the previous pin. At the current pin
+# killed the server on 2026-10-15 at the 9.7.1-1 pin. At the 9.7.2-2 pin
 # config/profiles/percona-bulk-repro.yml built it 25 times out of 25 on
 # fashion-mnist (20,000 rows, 3.4-5.8 s per ALTER) and nothing crashed. That
 # answered "does it survive", not "is the index it builds as good". This
@@ -14,7 +14,7 @@
 # recall at the calibrated operating point, single-client latency and filtered
 # search for each mode, on the same corpus, M and ef_construction.
 #
-# IT HAS BEEN ANSWERED. On 2026-11-03 at the current pin, post took 180.9 s
+# IT HAS BEEN ANSWERED, AT 9.7.2-2 AND NOT YET AT 9.7.4-4. On 2026-11-03 at the 9.7.2-2 pin, post took 180.9 s
 # load + 14.1 s ALTER (289 MB index) against incremental's 288 s (256 MB),
 # with recall@10 0.9714 vs 0.9709 at ef 10 and filtered recall within a
 # point -- the same index quality -- so the capability is now TRUE, the ops

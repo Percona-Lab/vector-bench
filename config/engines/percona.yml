@@ -1,9 +1,10 @@
 # Percona Server engine definition.
 #
 # Vector support: InnoDB HNSW (storage/innobase, `VECTOR KEY … TYPE hnsw`),
-# in Percona Server's `9.7` series over MySQL 9.7.2 LTS. The vector work used
-# to live on branch `vector-mvp`; it was merged into `9.7` on 2026-10-26 and
-# the pin below is a commit in that series, not on that branch. Everything
+# in Percona Server's `9.7` series over MySQL 9.7.4 LTS. The vector work used
+# to live on branch `vector-mvp`; it was merged into `9.7` on 2026-10-26, and
+# the pin below is the 2026-11-13 tip of `release-9.7.4-4`, the release branch
+# cut from that series -- a commit, not that branch. Everything
 # here is pinned to one commit and the whole design is written up in
 # docs/09-adding-percona-server.md, which cites the server's own sources and
 # recorded MTR output for every claim.
@@ -35,41 +36,57 @@ source:
   #
   # THE VALUE IS A COMMIT AND MUST NEVER BE A BRANCH NAME, which matters more
   # in this series than it did on `vector-mvp`. `git archive` would accept
-  # `9.7` and resolve it afresh on every build, so two runs carrying the same
-  # manifest would not be the same server. `9.7` moved while this re-pin was
-  # being written: it was at 56124b03 on 2026-10-26T12:41:43Z and at f52fe4b0
-  # by 2026-10-27T10:54:59Z, four commits later.
+  # `9.7` or `release-9.7.4-4` and resolve it afresh on every build, so two
+  # runs carrying the same manifest would not be the same server. Both move:
+  # `9.7` moved four commits in the day after the previous pin was taken
+  # (to f52fe4b0 by 2026-10-27T10:54:59Z), and `release-9.7.4-4` took its
+  # last two HNSW fixes on the morning this pin was taken. It has no release
+  # tag yet (no `Percona-Server-9.7.4*` tag exists on 2026-11-13), so a SHA is
+  # the only name that holds still.
   # `tests/test_e2_percona_wiring.py` asserts the SHAPE of this value
   # separately from its content, because asserting only that it equals the
   # test's own constant would pass with a branch name in both places.
   #
-  # Compare SHAs and never dates. The series was rebased onto `9.7` at merge,
-  # so this commit's author date (2026-10-14T22:27:46Z) sits eleven days under
-  # its committer date (2026-10-26T12:41:43Z) and its parent carries the same
-  # committer second -- which is the fingerprint of a rebase and the reason a
-  # date is not an identifier here.
+  # Compare SHAs and never dates. This commit's author date
+  # (2026-11-13T08:22:05Z) sits two hours under its committer date
+  # (2026-11-13T10:21:43Z); the pin before it, which was the last of a rebased
+  # series, had the two eleven days apart. A date is not an identifier here.
   #
-  # WHAT THIS PIN IS, read from the vendor's API rather than inferred from a
-  # commit subject. The vector search MVP was merged out of `vector-mvp` into
-  # the `9.7` series as PR #6278 (`vector-mvp-97-squashed` -> base `9.7`, 30
-  # commits, 331 files, +37,587/-322, merged 2026-10-26T12:41:44Z). The merge
-  # was a REBASE and not a squash: GitHub reports this SHA as that PR's
-  # `merge_commit_sha`, and for a rebase merge that field is the LAST of the
-  # rebased commits -- here PS-11751, a VIRTUAL-generated-column fix read
-  # through an HNSW vector index, 8 files and +586/-21 on its own. Pinning it
-  # therefore takes the whole series, and the PR's aggregate figures above
-  # describe the PR and not this commit's diff. Calling it "the squash commit"
-  # would invite the next reader to look for a 331-file diff here, not find
-  # one, and conclude the pin was wrong.
+  # WHAT THIS PIN IS, read from the vendor's tree and API rather than
+  # inferred from a commit subject. `MYSQL_VERSION` at this commit is
+  # `MAJOR=9 MINOR=7 PATCH=4 EXTRA=-4 MATURITY="LTS"`: Percona Server
+  # 9.7.4-4 on a MySQL 9.7.4 LTS base. The commit itself is PS-12020 (20c5791562):
+  # the HNSW graph object is over-aligned (`alignas(64)` lock stripes) but was
+  # allocated with the 16-byte-aligned `ut::new_withkey`, so an optimised
+  # build using 32- or 64-byte stores raised SIGSEGV in the Vec_build
+  # constructor on ADD VECTOR KEY and in `vec_runtime_load_once` on the first
+  # DML after a restart. That is the crash this engine hit on
+  # sift-128-euclidean at the previous pin (9.7.2-2), built -march=native on
+  # an AVX-512 host: the bulk ALTER crashed 3 of 3 and an 8-writer INSERT
+  # crashed once. A local build of that pin plus an equivalent unofficial
+  # patch ran the full sift ops phase cleanly on the same host (run
+  # `percona-euclid-patched-ops`, 2026-11-13, ALTER 479.4 s). The vendor's
+  # commit message names -march=x86-64-v3, this study's flag, among the
+  # builds that can fault.
   #
-  # The previous pin -- the `vector-mvp` tip of 2026-10-13, which
-  # docs/12-percona-feedback-plan.md names and this file deliberately no
-  # longer does -- is NOT an ancestor of this one: GitHub's compare of the two
-  # reports `diverged`: measured FROM the old pin, this one is 721 commits
-  # ahead of it and the old pin holds 43 that this one does not. Nothing
-  # from that branch tip is reachable from here, which is why this is a re-pin
-  # and not a fast-forward, and why the cmake flags below are unverified at
-  # this base until a configure has run.
+  # The other HNSW changes the re-pin takes, each read from its own commit:
+  # 6d0d389fb6 PS-11780 (ANN search returned fewer rows than LIMIT on a table
+  # holding clusters of identical vectors), 1b54a91014 PS-11907 (a failed
+  # INSERT could leave the saved graph naming a node with no row, so the index
+  # was declared corrupt after a restart), 32bc755059 PS-12024 (the vector
+  # index build wrote no MLOG_INDEX_LOAD for its aux table), ece814e501
+  # PS-11953 (HNSW telemetry) and 3c2d9ef99e PS-11969 (wrong VECTOR values
+  # from MEMORY tables). 26cbf58698 and 4ad9c20f94 are PS-11810, the code
+  # refresh to the 9.7.4 upstream base, which is the change that moves the
+  # build inputs -- see the note above `cmake_flags` below.
+  #
+  # The previous pin (9.7.2-2, the tip of Percona PR #6278 on base `9.7`,
+  # which docs/12-percona-feedback-plan.md names and this file deliberately
+  # no longer does) IS an ancestor of this one, unlike the re-pin before it:
+  # GitHub's compare reports `ahead`, 589 commits ahead and 0 behind. A
+  # local diff of the two trees finds 611 files that differ plus 164 added
+  # and 9 removed; the compare's own file list stops at 300, its cap, so do
+  # not read that figure as the size of the change.
   #
   # MOVING THIS KEY DOES NOT INVALIDATE THE RECALL RESULTS, AND IT SHOULD.
   # `orchestrator/ann_pass.py:ann_fingerprint` is deliberately
@@ -123,7 +140,7 @@ source:
   # into one `build_signature` under the new commit and the report attributes
   # all of them to the new one. A smoke result from a stale directory would
   # stand in for the run that validates this re-pin.
-  tag: 56124b03fdc5954e2401ab4d2c7bf7cb3a767158   # tip of PR #6278 on base 9.7
+  tag: 20c57915626b0214bbfe49718beccc0b6ebd51a6   # tip of release-9.7.4-4, 2026-11-13
   upstream: https://github.com/percona/percona-server.git
   # No `submodules:` key, deliberately: all four of the pin's submodules are
   # switched off in the build instead, which takes four cmake flags, one of
@@ -162,12 +179,22 @@ build:
   # the WITHOUT_ symbol is what closes it. Measured, not reasoned -- the
   # Dockerfile note records which spellings were tried.
   #
-  # EVERY MEASUREMENT BELOW WAS MADE AGAINST THE 9.7.1 BASE AT THE PREVIOUS
-  # PIN. This engine is pinned about four months further on and no configure
-  # has been run against the new base, so the list is carried forward
-  # unchanged and unverified. Re-verifying it needs a configure, a configure
-  # is a build, and that build is the gate this re-pin must not be merged
-  # ahead of.
+  # EVERY MEASUREMENT BELOW WAS MADE AGAINST THE 9.7.1 BASE, two pins ago.
+  # The 9.7.2-2 pin built with this list unchanged. At this pin (9.7.4-4) the
+  # files the list is reasoned from were diffed against 9.7.2-2, READ and not
+  # configured: top-level CMakeLists.txt changed in two places -- the
+  # WEBAUTHN server plugin now defaults ON on every non-Solaris build (it was
+  # ON only WITH_INTERNAL), and an `IF(WITH_ROUTER)` branch gained a warning
+  # (WITH_ROUTER is OFF below) -- with every line before the second edit at
+  # the same number; cmake/build_configurations/compiler_options.cmake gained
+  # one INCLUDE of a new cmake/compiler_bugs.cmake, whose only effect is
+  # `-Wno-restrict` for GCC 12.0-12.3 (this image is gcc 13); cmake/sasl.cmake
+  # changed only its custom-path branch; extra/tirpc moved to libtirpc 1.3.7.
+  # cmake/compile_flags.cmake, cmake/curl.cmake, cmake/rpc.cmake,
+  # cmake/fido2.cmake, build-ps/build-binary.sh, build-ps's builder script
+  # and .gitmodules are byte-identical. Nothing in that touches a flag in this
+  # list, but no configure has run at this pin, and that build is the gate
+  # this re-pin must not be merged ahead of.
   #
   # WITH_CURL=bundled was not chosen, it was measured -- by five failed
   # configures of this tree on 2026-10-14, the first time anyone built it.
@@ -207,7 +234,7 @@ build:
     # NOT affected is the optimisation the compiler actually applies: the
     # compile line ends with CMAKE_C_FLAGS_RELWITHDEBINFO's own
     # `-O2 -g -DNDEBUG` whether the overwrite happens or not, so the effective
-    # level is 2 either way. `CMakeLists.txt:2959-2969` is where the pin says
+    # level is 2 either way. `CMakeLists.txt:2963-2973` is where the pin says
     # so (READ). An earlier version of THIS comment said the overwrite takes
     # "`-march` and `-O3` with it" as though the second mattered to the
     # generated code; it does not, and that is the half that was wrong.
@@ -388,8 +415,8 @@ capabilities:
   # percona_vector suite sets an isolation level to make vector DML work.
   requires_read_committed: false
   filtered_search: true
-  # TRUE AT THIS PIN; IT WAS FALSE AT THE OLD ONE, AND ONLY HALF OF WHAT THE
-  # FALSE WITHDREW COMES BACK WITH IT.
+  # TRUE SINCE THE 9.7.2-2 PIN; IT WAS FALSE AT 9.7.1-1, AND ONLY HALF OF
+  # WHAT THE FALSE WITHDREW CAME BACK WITH IT. NOT RE-TESTED AT 9.7.4-4.
   #
   # WHAT THE KEY DRIVES. `ALTER TABLE t1 ADD VECTOR KEY vi (...)
   # ALGORITHM=INPLACE` on a table loaded with NO vector index -- the statement
@@ -414,7 +441,7 @@ capabilities:
   # This key was false from then until the re-test below, and every profile
   # that named no mode built Percona incrementally.
   #
-  # THE CURRENT PIN (9.7.2-2, `source.tag` above, x86-64-v3), 2026-11-03, on
+  # THE 9.7.2-2 PIN (the one before `source.tag` above, x86-64-v3), 2026-11-03, on
   # a laptop (i9-12900HK), profile `percona-bulk-repro` (the same corpus,
   # 20,000 rows, 1 load thread, M=16, ef_construction=200, normalized): 25 OF
   # 25 ATTEMPTS BUILT. The ALTER took 3.4-5.8 s (median 3.8 s); mysqld's error
@@ -429,8 +456,12 @@ capabilities:
   # (recall at ef_search 10), and filtered recall tag 10%/1% 0.988/0.996 vs
   # 0.989/0.997, ctag 11%/1.5% 0.987/0.924 vs 0.988/0.928 -- the same index
   # quality, built in two thirds of the time. 25 clean builds on one machine
-  # bound how rare the old crash can be at this pin without proving it gone,
-  # which is why the incident stays recorded here.
+  # bound how rare the old crash can be at that pin without proving it gone,
+  # which is why the incident stays recorded here. Sift did not bear it out:
+  # at the same 9.7.2-2 pin, built -march=native, the ALTER crashed 3 of 3 on
+  # sift-128-euclidean -- PS-12020, the misaligned allocation the current pin
+  # fixes (see `source`). Nothing here has been re-run at 9.7.4-4; the value
+  # stays `true` on the 9.7.2-2 evidence until it is.
   bulk_vector_index_build: true
   # FALSE, AND DELIBERATELY NOT FLIPPED WITH THE KEY ABOVE: it is a different
   # statement, and it is the one that failed silently.
@@ -443,8 +474,9 @@ capabilities:
   # replace returned in 1-4 ms with `index_bytes` identical to the byte and
   # recall identical in all 20 before/after pairs -- a no-op, which the
   # report published as `after ALTER TABLE (index replace) (0.0 s)`. NOTHING
-  # ABOUT IT HAS BEEN RE-TESTED AT THE CURRENT PIN: the 25 builds above are
-  # the add on an unindexed table, not the replace.
+  # ABOUT IT HAS BEEN RE-TESTED SINCE, at 9.7.2-2 or at the current pin
+  # (9.7.4-4): the 25 builds above are the add on an unindexed table, not
+  # the replace.
   #
   # Read by `orchestrator/cli.py:_vector_index_replace` (which falls back to
   # `bulk_vector_index_build` for an engine that declares no such key, so no

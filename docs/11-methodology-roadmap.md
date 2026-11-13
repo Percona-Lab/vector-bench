@@ -179,7 +179,7 @@ Three things this table is load-bearing for:
 compression or quantization option is unconfirmed, and cannot be confirmed from
 this checkout.** `sources/` holds the MariaDB 11.8.8 and 12.3.2 trees, the
 pgvector v0.8.6 tree and an AliSQL tarball; it holds no Percona Server tree
-(the pin is commit `56124b03`, the tip of Percona PR #6278 on base `9.7`) and
+(the pin is commit `20c57915`, the 2026-11-13 tip of Percona's `release-9.7.4-4` branch) and
 no valkey-search tree, because neither has been fetched here. §4.4 is written so that its claim does not depend on those two: it
 asserts something about Percona Search that is checked, and withholds the
 "nothing else here can" that would depend on all six others.

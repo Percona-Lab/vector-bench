@@ -7,8 +7,8 @@
 #   vb-entrypoint client [args...]                open a client on the unix socket
 #   vb-entrypoint <anything else>                 exec it verbatim
 #
-# Percona Server's `9.7` series is MySQL 9.7.2 based (MYSQL_VERSION on the
-# pinned tree: MAJOR=9 MINOR=7 PATCH=2 EXTRA=-2, MATURITY="LTS"), so initialisation is
+# Percona Server's `9.7` series is MySQL 9.7.4 based at the pin (MYSQL_VERSION on the
+# pinned tree: MAJOR=9 MINOR=7 PATCH=4 EXTRA=-4, MATURITY="LTS"), so initialisation is
 # `mysqld --initialize-insecure`, the same as AliSQL's and not MariaDB's
 # mariadb-install-db. This file is a close copy of entrypoint-alisql.sh for that
 # reason; read the two side by side.

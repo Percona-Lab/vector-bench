@@ -32,7 +32,7 @@ succeeded perfectly reported a bare `[FAIL] ... (exit 1)` naming neither. It
 cost a real diagnosis -- the crash was first read as a failure of the unit
 that had just succeeded.
 
-SINCE THEN, 2026-11-03: at the current pin (9.7.2-2, x86-64-v3) the same
+SINCE THEN, 2026-11-03: at the 9.7.2-2 pin (x86-64-v3; not re-run at 9.7.4-4) the same
 shape built 25 times out of 25 (ALTER 3.4-5.8 s, nothing in the error log, no
 core), and a 60,000-row post/incremental comparison gave the same index
 quality. So the capability is now TRUE for Percona: profiles that name no mode

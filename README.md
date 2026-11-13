@@ -11,7 +11,7 @@ all using an HNSW index:
 | `mariadb123` | MariaDB | 12.3.2 | MHNSW, a second version |
 | `mongodb` | Percona Search for MongoDB | mongot 1.70.3 | Lucene HNSW in a sidecar process |
 | `valkey` | Valkey + valkey-search | 9.1 | HNSW, entirely in memory |
-| `percona` | Percona Server | 9.7.2-2 (MySQL 9.7.2 LTS base) | InnoDB HNSW (`storage/innobase`) |
+| `percona` | Percona Server | 9.7.4-4 (MySQL 9.7.4 LTS base) | InnoDB HNSW (`storage/innobase`) |
 
 The first three are the original comparison and what `build` produces by
 default; the rest are opt-in, because each is another image to compile or

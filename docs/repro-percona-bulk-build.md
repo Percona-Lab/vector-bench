@@ -33,9 +33,10 @@ crash is intermittent. In the same runs, the same corpus built and served
 correctly in `incremental` mode. mysqld's error log and any core were lost
 with the container. Capturing both is what this procedure adds.
 
-## At the current pin
+## At the 9.7.2-2 pin
 
-Percona 9.7.2-2 (`source.tag` in `config/engines/percona.yml`), built
+Percona 9.7.2-2 (the `source.tag` before the current 9.7.4-4 pin in
+`config/engines/percona.yml`; not re-run at 9.7.4-4), built
 `-march=x86-64-v3`, on 2026-11-03, on a laptop (i9-12900HK), with this
 procedure and the same profile: **25 of 25 attempts built.** The ALTER took
 3.4-5.8 s (median 3.8 s). mysqld's error log held no error, signal or

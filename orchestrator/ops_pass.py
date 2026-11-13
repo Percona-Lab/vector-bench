@@ -1340,8 +1340,8 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
     `cli.py:_vector_index_replace`, which falls back to the bulk-build
     reading when an engine declares nothing separate. Its default is True for
     the same reason. It is a SEPARATE parameter, and a separate flag, because
-    the two statements stopped sharing a verdict: at Percona's current pin
-    the bulk build is verified and the index replace is not.
+    the two statements stopped sharing a verdict: at Percona's 9.7.2-2 pin
+    the bulk build was verified and the index replace was not.
 
     `iterative_scan` takes one mode or several. One is emitted verbatim and
     several are comma-joined for the workload to loop, which is the shape

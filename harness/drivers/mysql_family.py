@@ -1251,8 +1251,8 @@ class PerconaDriver(MySQLFamilyDriver):
           `after ALTER TABLE (index replace) (0.0 s)`: the degraded index,
           measured twice, presented as a repair result.
 
-        **At the current pin (9.7.2-2) the bulk build was re-verified and the
-        replace was not.** 25 of 25 bulk builds completed on 2026-11-03
+        **At the 9.7.2-2 pin the bulk build was re-verified and the replace
+        was not; neither has been re-run at the current 9.7.4-4.** 25 of 25 bulk builds completed on 2026-11-03
         (profile `percona-bulk-repro`), and a 60,000-row post/incremental
         comparison gave the same index quality, so
         `bulk_vector_index_build` is true again. Nobody has re-run the
