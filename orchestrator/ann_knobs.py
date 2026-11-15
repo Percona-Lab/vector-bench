@@ -69,9 +69,10 @@ are read-only):
   so hnswlib's own mechanics -- the 1/log(M) floor and the ef_construction
   raise -- are enforced and nothing else. A value valkey-search refuses fails
   FT.CREATE loudly and the phase reports the missing definitions.
-* VillageSQL + vsql_vector, built from vsql-vector-pk at `93ed0087` (the
-  extension, not the server, owns the index options; the constants and
-  `Options::validate` are the same as plain vsql-vector's at `bac885dd`):
+* VillageSQL + vsql_vector, built from vsql-vector-pk release 0.0.4 at
+  `3c798c74` (the extension, not the server, owns the index options; the
+  constants and `Options::validate` are the same as at 0.0.3, `93ed0087`,
+  and as plain vsql-vector's at `bac885dd`):
   `src/index/hnsw/storage.h`, `Options::MAX_M = 128` and
   `MAX_EF_CONSTRUCTION_FACTOR = 32`; `Options::validate` in
   `src/index/hnsw/storage.cc` refuses `M < 2`, `M > MAX_M`,

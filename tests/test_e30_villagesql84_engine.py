@@ -5,7 +5,7 @@ What this pins is that the two VillageSQL engines differ in the SERVER and in
 nothing else a run could mistake for an implementation difference -- and that
 the two collisions the web UI's validator refuses (a shared ann_constructor, a
 shared image) cannot happen even though both engines' images are tagged with
-the same vsql-vector commit. The behaviour of the extension itself (text
+the same vsql-vector commit. The behaviour of the extension itself (binary
 binding, the plan refusal, the ef_construction rule) is pinned once, in
 tests/test_e26_villagesql_engine.py; here it is only checked to reach the
 second engine unchanged.
@@ -22,9 +22,10 @@ import yaml
 VB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, VB_ROOT)
 
-EXTENSION_PIN = "93ed00873dd65f64c0788c80576d5cf3fba39831"
-SERVER_TAG_84 = "publish/mysql-8.4_0.0.7"
-SERVER_PIN_84 = "689c74a9f88c91ae035f57e0ae8915a168274112"
+#: vsql-vector-pk 0.0.4, on both server lines.
+EXTENSION_PIN = "3c798c74cd75608f6237aa142532845a30a04f01"
+SERVER_TAG_84 = "publish/mysql-8.4_0.0.8"
+SERVER_PIN_84 = "6c49b09829b50dfab7b0a32face5676585bfa482"
 
 
 def _read(rel: str) -> str:
@@ -196,7 +197,7 @@ class TestTheAnnModule:
         assert issubclass(cls, base.VillageSQL)
         assert cls.vb_engine == "villagesql84"
         # Nothing but the name and the label is overridden: the plan check,
-        # the DDL and the text binding are the 9.7 module's own.
+        # the DDL and the binary binding are the 9.7 module's own.
         assert set(vars(cls)) - {"__module__", "__doc__", "__qualname__",
                                  "__firstlineno__", "__static_attributes__"} \
             == {"vb_engine", "__str__"}

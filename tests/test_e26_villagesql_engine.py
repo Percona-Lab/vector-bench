@@ -37,8 +37,8 @@ sys.path.insert(0, VB_ROOT)
 from harness.drivers.base import ConnectionSpec, IndexSpec  # noqa: E402
 from harness.drivers import villagesql as vs  # noqa: E402
 
-EXTENSION_PIN = "93ed00873dd65f64c0788c80576d5cf3fba39831"
-SERVER_PIN = "533ab4b58d2744b79bb45e41f44fa928f190a655"
+EXTENSION_PIN = "3c798c74cd75608f6237aa142532845a30a04f01"
+SERVER_PIN = "9999524afadb8a8030dfdc153f9439628a7965b5"
 
 #: EXPLAIN FORMAT=TREE as the engine's first pin (plain vsql-vector) printed
 #: it for `SELECT id FROM t1 ORDER BY L2_DISTANCE(v, '[..]') LIMIT 10` (vector
@@ -137,7 +137,7 @@ class TestWiring:
         source = _config()["source"]
         assert source["tag"] == EXTENSION_PIN
         assert source["server_commit"] == SERVER_PIN
-        assert source["server_tag"] == "publish/mysql-9.7_0.0.7"
+        assert source["server_tag"] == "publish/mysql-9.7_0.0.8"
         assert source["upstream"].endswith("/vsql-vector-pk.git")
 
     def test_the_driver_is_registered_by_class_name(self):
@@ -248,38 +248,17 @@ class TestSchema:
 # §3 text binding
 # ---------------------------------------------------------------------------
 
-class TestTextBinding:
-    def test_the_literal_round_trips_every_float32_exactly(self):
-        rng = numpy.random.RandomState(7)
-        v = numpy.concatenate([
-            rng.normal(size=500).astype("<f4"),
-            numpy.array([0.0, -0.0, 1e-30, 3.4e38, 255.0, 1 / 3],
-                        dtype="<f4")])
-        text = vs.text_literal(v)
-        assert text.startswith("[") and text.endswith("]")
-        back = numpy.array([numpy.float32(t) for t in text[1:-1].split(",")],
-                           dtype="<f4")
-        assert back.tobytes() == v.tobytes()
-
-    def test_only_number_characters_reach_the_statement(self):
-        text = vs.text_literal(numpy.random.RandomState(1).normal(size=64))
-        assert set(text) <= set("0123456789.-+e[],")
-
-    @pytest.mark.parametrize("bad", [numpy.nan, numpy.inf, -numpy.inf])
-    def test_a_non_finite_element_is_refused(self, bad):
-        with pytest.raises(ValueError):
-            vs.text_literal([1.0, bad])
-
-    def test_load_and_reinsert_bind_text_not_bytes(self):
+class TestBinaryBinding:
+    def test_load_and_reinsert_bind_packed_float32(self):
         d = driver()
         x = numpy.arange(12, dtype="<f4").reshape(3, 4)
         d.load(x, numpy.array([1, 2, 3]))
         d.insert_rows([10], x[:1], numpy.array([4]))
         rows = d._cur.inserted_rows(4)
         assert len(rows) == 4
-        assert all(isinstance(r[-1], str) and r[-1].startswith("[")
-                   for r in rows)
-        assert rows[0] == (0, 1, 1, "[0.0,1.0,2.0,3.0]")
+        assert all(isinstance(r[-1], bytes) for r in rows)
+        assert rows[0] == (0, 1, 1, x[0].tobytes())
+        assert rows[3] == (10, 4, 4, x[0].tobytes())
 
 
 # ---------------------------------------------------------------------------
@@ -294,14 +273,15 @@ class TestBruteForceIsRefused:
         assert not any(s.startswith("SELECT id FROM t1")
                        for s in d._cur.statements)
         assert d._cur.statements[-1].startswith("EXPLAIN FORMAT=TREE ")
+        assert d._cur.params[-1] == (numpy.ones(4, dtype="<f4").tobytes(),)
 
-    def test_a_plan_on_the_index_is_measured_with_the_vector_inlined(self):
+    def test_a_plan_on_the_index_is_measured_with_the_vector_bound(self):
         d = driver(plan=INDEX_PLAN)
         assert d.query(numpy.ones(4), 10) == list(range(10))
         sql = d._cur.statements[-1]
         assert sql == ("SELECT id FROM t1 ORDER BY "
-                       "L2_DISTANCE(v, '[1.0,1.0,1.0,1.0]') LIMIT 10")
-        assert d._cur.params[-1] is None
+                       "L2_DISTANCE(v, ?) LIMIT 10")
+        assert d._cur.params[-1] == (numpy.ones(4, dtype="<f4").tobytes(),)
 
     def test_the_marker_must_name_this_index(self):
         d = driver(plan=INDEX_PLAN.replace("on vi", "on other_index"))
@@ -316,14 +296,14 @@ class TestBruteForceIsRefused:
     def test_cosine_orders_by_the_function_its_profile_binds(self):
         d = driver(metric="angular", plan=INDEX_PLAN)
         d.query(numpy.ones(4), 5)
-        assert "ORDER BY COSINE_DISTANCE(v, '[" in d._cur.statements[-1]
+        assert "ORDER BY COSINE_DISTANCE(v, ?)" in d._cur.statements[-1]
 
     def test_filtered_binds_the_threshold_and_whitelists_the_column(self):
         d = driver(plan=INDEX_PLAN)
         d.query_filtered(numpy.ones(4), 10, 7, column="ctag")
         assert d._cur.statements[-1].startswith(
             "SELECT id FROM t1 WHERE ctag < ? ORDER BY")
-        assert d._cur.params[-1] == (7,)
+        assert d._cur.params[-1] == (7, numpy.ones(4, dtype="<f4").tobytes())
         with pytest.raises(ValueError):
             d.query_filtered(numpy.ones(4), 10, 7, column="tag; DROP")
 
@@ -345,10 +325,12 @@ def _label(engine: str) -> str:
 
 
 class TestDisclosures:
-    def test_the_driver_declares_both_facts(self):
+    def test_the_driver_declares_the_preview_status_only(self):
         facts = vs.VillageSQLDriver(ConnectionSpec(host="h", port=1)) \
             .query_path_facts(IndexSpec(dim=4, m=16, metric="euclidean"))
-        assert facts["vector_binding"].startswith("text")
+        # The vectors are bound like every other MySQL-family engine's, so
+        # there is no binding of its own to disclose.
+        assert "vector_binding" not in facts
         assert facts["extension_status"].startswith("preview")
 
     def test_the_report_states_them_for_villagesql_alone(self):
@@ -360,7 +342,7 @@ class TestDisclosures:
             {"engine": "pgvector", "phase": "index_build", "extra": {}},
         ]
         text = disclosures.structural_lines(records, _label)
-        assert "**VillageSQL** receives every vector as a text literal" in text
+        assert "text literal" not in text
         assert "preview feature" in text
         assert "pgvector" not in text
 
@@ -429,7 +411,7 @@ def _algo(annmod, m=16, ef_construction=200, **cursor):
 
 
 class TestAnnModule:
-    def test_fit_declares_the_index_inline_and_loads_text(self, annmod):
+    def test_fit_declares_the_index_inline_and_loads_float32(self, annmod):
         algo = _algo(annmod, m=6, ef_construction=192)
         algo.fit(numpy.ones((3, 4), dtype="<f4"))
         create = next(s for s in algo._cur.statements
@@ -440,7 +422,7 @@ class TestAnnModule:
         assert not any(s.startswith("CREATE INDEX")
                        for s in algo._cur.statements)
         rows = algo._cur.inserted_rows(3)
-        assert rows[0] == (0, 0, "[1.0,1.0,1.0,1.0]")
+        assert rows[0] == (0, 0, numpy.ones(4, dtype="<f4").tobytes())
 
     def test_a_brute_force_plan_is_refused_not_measured(self, annmod):
         algo = _algo(annmod)
@@ -458,8 +440,8 @@ class TestAnnModule:
         assert algo._plan_verified is True
         assert algo.query(numpy.ones(4), 10) == list(range(10))
         assert algo._cur.statements[-1] == (
-            "SELECT id FROM t1 ORDER BY L2_DISTANCE(v, '[1.0,1.0,1.0,1.0]') "
-            "LIMIT 10")
+            "SELECT id FROM t1 ORDER BY L2_DISTANCE(v, ?) LIMIT 10")
+        assert algo._cur.params[-1] == (numpy.ones(4, dtype="<f4").tobytes(),)
 
     def test_the_records_carry_the_ef_construction_built(
             self, annmod, monkeypatch):
@@ -471,12 +453,12 @@ class TestAnnModule:
         # No second, "requested" value any more: nothing is clamped, so the
         # label and the build are one number.
         assert "ef_construction_requested" not in extra
-        assert extra["vector_binding"].startswith("text")
+        assert "vector_binding" not in extra
         assert extra["extension_status"].startswith("preview")
 
     def test_the_module_and_driver_encode_identically(self, annmod):
         v = numpy.random.RandomState(3).normal(size=32)
-        assert annmod.text_literal(v) == vs.text_literal(v)
+        assert annmod.to_binary_f32(v) == vs.to_binary_f32(v)
         for m, efc in ((4, 128), (8, 200), (16, 16), (16, 512)):
             assert annmod.checked_ef_construction(m, efc) == \
                 vs.checked_ef_construction(m, efc) == efc

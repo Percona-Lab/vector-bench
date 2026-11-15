@@ -22,8 +22,8 @@ The repo root is `vector-bench/` (git repo, branch `master`). All commands below
 | `valkey` | Valkey + valkey-search | Percona repo `valkey-91` |
 | `percona` | Percona Server, InnoDB HNSW | `release-9.7.4-4` tip, commit `20c57915` |
 | `myvector` | MyVector plugin (hnswlib) on MySQL 9.7.2 | release v1.26.9, commit `384d9df7` |
-| `villagesql` | VillageSQL 0.0.7 + vsql_vector extension (HNSW custom index, built from vsql-vector-pk), MySQL 9.7.2 base | server `publish/mysql-9.7_0.0.7` (`533ab4b5`), vsql-vector-pk release `0.0.3` (`93ed0087`) |
-| `villagesql84` | The same extension commit on VillageSQL's MySQL 8.4 base (`alias_of: villagesql`) | server `publish/mysql-8.4_0.0.7` (`689c74a9`), vsql-vector-pk release `0.0.3` (`93ed0087`) |
+| `villagesql` | VillageSQL 0.0.8 + vsql_vector extension (HNSW custom index, built from vsql-vector-pk), MySQL 9.7.2 base | server `publish/mysql-9.7_0.0.8` (`9999524a`), vsql-vector-pk release `0.0.4` (`3c798c74`) |
+| `villagesql84` | The same extension commit on VillageSQL's MySQL 8.4 base (`alias_of: villagesql`) | server `publish/mysql-8.4_0.0.8` (`6c49b098`), vsql-vector-pk release `0.0.4` (`3c798c74`) |
 
 `KNOWN_ENGINES` is whatever `config/engines/*.yml` holds — there is no list in Python to keep
 in step with it. `orchestrator/engines.py` is the registry everything derives from.
@@ -210,8 +210,9 @@ These are the reasons the code looks over-defensive. Do not relax them.
   into one round trip only against MariaDB, and `executemany` was a bulk
   execute on MariaDB and one execute per row everywhere else — so the other
   engines that bind a query parameter (Percona, AliSQL, VillageSQL's filtered
-  query) paid for the client; MyVector's and VillageSQL's KNN queries inline
-  the vector as text and were unaffected. The fix is Connector/Python
+  query) paid for the client; MyVector's KNN query inlines the vector as
+  text and was unaffected (VillageSQL's did through 0.0.7 and binds it from
+  0.0.8). The fix is Connector/Python
   2.0.0rc2, pure Python (`MARIADB_PYTHON_CONNECTOR=python`; the build asserts
   `+native`), `binary=True` on every connection (`mysql_family.connect_kwargs`,
   `VBMySQLBase._conn_kwargs`), `?` placeholders (2.0's binary path sends SQL

@@ -2159,29 +2159,32 @@ COMMITS_ALLOWED_BESIDE_THE_PIN = {
         "scans the whole tree for 40-hex commits, so a second engine pinned "
         "by SHA has to be declared here or it reads as a half-finished "
         "Percona re-pin."),
-    "93ed00873dd65f64c0788c80576d5cf3fba39831": (
+    "3c798c74cd75608f6237aa142532845a30a04f01": (
         ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
          "config/engines/villagesql84.yml",
-         "tests/test_e30_villagesql84_engine.py",
-         "docs/04-engine-notes.md", SELF_REL),
+         "tests/test_e30_villagesql84_engine.py", SELF_REL),
         "a different engine's pin, not a copy of Percona's: vsql-vector-pk "
-        "release 0.0.3 at 93ed008 (villagesql/vsql-vector-pk), which "
+        "release 0.0.4 at 3c798c7 (villagesql/vsql-vector-pk), which "
         "config/engines/villagesql.yml and config/engines/villagesql84.yml "
         "carry as their own `source.tag`."),
-    "533ab4b58d2744b79bb45e41f44fa928f190a655": (
+    "9999524afadb8a8030dfdc153f9439628a7965b5": (
         ("config/engines/villagesql.yml", "tests/test_e26_villagesql_engine.py",
-         "docs/04-engine-notes.md", SELF_REL),
-        "VillageSQL's publish/mysql-9.7_0.0.7 tag, the server tree "
+         SELF_REL),
+        "VillageSQL's publish/mysql-9.7_0.0.8 tag, the server tree "
         "vsql-vector-pk is compiled against. Pinned by commit as well as by "
         "tag so prepare_villagesql can refuse a moved tag."),
     "689c74a9f88c91ae035f57e0ae8915a168274112": (
-        ("config/engines/villagesql84.yml",
-         "tests/test_e30_villagesql84_engine.py",
-         "docs/04-engine-notes.md", SELF_REL),
+        ("docs/04-engine-notes.md", SELF_REL),
         "VillageSQL's publish/mysql-8.4_0.0.7 tag (the same commit as "
-        "release/0.0.7), the MySQL 8.4 server tree villagesql84 compiles the "
-        "same vsql-vector-pk commit against. Pinned by commit as well as by "
-        "tag so prepare_villagesql can refuse a moved tag."),
+        "release/0.0.7), villagesql84's server before the 0.0.8 re-pin. "
+        "docs/04 names it as the build its 8.4 measurements were taken on."),
+    "6c49b09829b50dfab7b0a32face5676585bfa482": (
+        ("config/engines/villagesql84.yml",
+         "tests/test_e30_villagesql84_engine.py", SELF_REL),
+        "VillageSQL's publish/mysql-8.4_0.0.8 tag (the same commit as "
+        "release/0.0.8), the MySQL 8.4 server tree villagesql84 compiles "
+        "vsql-vector-pk 0.0.4 against. Pinned by commit as well as by tag so "
+        "prepare_villagesql can refuse a moved tag."),
     "008e09c2834b98143a8c067d4d225c90953050cf": (
         ("config/engines/myvector.yml", "tests/test_e24_myvector_disclosures.py",
          SELF_REL),

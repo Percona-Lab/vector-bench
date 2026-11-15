@@ -17,9 +17,11 @@ extension:
   a loaded table, although the server accepts it: it can crash the server
   (`capabilities.bulk_vector_index_build` in config/engines/villagesql.yml
   has the evidence).
-* Vectors are text (`'[a,b,...]'`, shortest float32 repr per element). The
-  query vector is inlined, because the server's KNN recognition needs a
-  constant query operand.
+* Only the distance function's name: `L2_DISTANCE` / `COSINE_DISTANCE`, the
+  one the index profile binds. Vectors travel as every other MySQL-family
+  engine's do, packed float32 through `VBMySQLBase`'s load and a bound query
+  parameter (`harness/drivers/villagesql.py` has the server and extension
+  versions that accept them).
 * `vsql_vector.ef_search` is a per-session variable, set on every connection
   that queries.
 * **The plan is checked and a full scan is REFUSED, not measured.** The
@@ -36,16 +38,13 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
-import time
-from multiprocessing.pool import ThreadPool
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import numpy
 
-from ...vb_mysql import (DATABASE, INSERT_BATCH, PROGRESS_INTERVAL_S, TABLE,
-                         Dialect, VBMySQLBase, insert_batch)
+from ...vb_mysql import TABLE, Dialect, VBMySQLBase, to_binary_f32
 
-# vsql-vector-pk 93ed008, src/index/hnsw/storage.h (`Options::DEFAULT_M`,
+# vsql-vector-pk 0.0.4 (3c798c7), src/index/hnsw/storage.h (`Options::DEFAULT_M`,
 # `DEFAULT_EF_CONSTRUCTION`, `MAX_M`, `MAX_EF_CONSTRUCTION_FACTOR`) and
 # `Options::validate` in storage.cc (the M floor of 2). Repeated as
 # `KNOB_BOUNDS["villagesql"]` in orchestrator/ann_knobs.py, which cannot
@@ -58,14 +57,6 @@ PLAN_MARKER = "Custom index distance scan on vi"
 METRIC_NAMES = {"angular": "cosine", "euclidean": "l2"}
 PROFILES = {"l2": ("hnsw_l2", "L2_DISTANCE"),
             "cosine": ("hnsw_cosine", "COSINE_DISTANCE")}
-
-
-def text_literal(vector) -> str:
-    """Same encoding as `harness/drivers/villagesql.py:text_literal`."""
-    arr = numpy.asarray(vector, dtype="<f4")
-    if not numpy.all(numpy.isfinite(arr)):
-        raise ValueError("SVECTOR cannot carry a non-finite element")
-    return "[" + ",".join(str(x) for x in arr) + "]"
 
 
 def checked_ef_construction(m: int, ef_construction: int) -> int:
@@ -152,37 +143,19 @@ class VillageSQL(VBMySQLBase):
         page for `vi`; a guess here would chart as a measurement."""
         return 0
 
-    def _insert_serial(self, cur, X: numpy.ndarray, offset: int = 0,
-                       label: str = "") -> None:
-        """`VBMySQLBase._insert_serial` with the vector as text."""
-        total = len(X)
-        started = time.time()
-        next_report = started + PROGRESS_INTERVAL_S
-        rows: List[Any] = []
-        for i, embedding in enumerate(X):
-            idx = offset + i
-            rows.append((idx, idx % 100, text_literal(embedding)))
-            if len(rows) >= INSERT_BATCH:
-                insert_batch(cur, rows)
-                cur.execute("COMMIT")
-                rows = []
-                now = time.time()
-                if now >= next_report:
-                    rate = (i + 1) / max(now - started, 1e-9)
-                    print(f"[vb] {label}{i + 1:,}/{total:,} rows, "
-                          f"{rate:,.0f} rows/s", file=sys.stderr)
-                    next_report = now + PROGRESS_INTERVAL_S
-        insert_batch(cur, rows)
-        cur.execute("COMMIT")
-
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
 
-    def _ann_sql(self, v, k: int) -> str:
+    def _query_sql(self, k: int, force_index: bool = False) -> str:
+        """`VBMySQLBase._query_sql` with the profile's distance function.
+
+        `force_index` is ignored: the server picks the distance scan itself,
+        and `_verify_plan` refuses a plan that is not one.
+        """
         _profile, function = PROFILES[self._metric]
         return (f"SELECT id FROM {TABLE} "
-                f"ORDER BY {function}(v, '{text_literal(v)}') LIMIT {int(k)}")
+                f"ORDER BY {function}(v, ?) LIMIT {int(k)}")
 
     def set_query_arguments(self, ef_search: int) -> None:
         self._ef_search = int(ef_search)
@@ -207,16 +180,18 @@ class VillageSQL(VBMySQLBase):
             return
         rng = numpy.random.RandomState(0)
         for _ in range(WARMUP_QUERIES):
+            probe = to_binary_f32(rng.normal(size=self._dim).astype("<f4"))
             try:
-                self._cur.execute(self._ann_sql(rng.normal(size=self._dim), 10))
+                self._cur.execute(self._query_sql(10), (probe,))
                 self._cur.fetchall()
             except Exception:
                 return
 
     def _verify_plan(self, k: int = 10) -> bool:
-        probe = numpy.ones(max(self._dim, 1), dtype="<f4")
+        probe = to_binary_f32(numpy.ones(max(self._dim, 1), dtype="<f4"))
         try:
-            self._cur.execute("EXPLAIN FORMAT=TREE " + self._ann_sql(probe, k))
+            self._cur.execute("EXPLAIN FORMAT=TREE " + self._query_sql(k),
+                              (probe,))
             rows = self._cur.fetchall()
         except Exception as exc:
             print(f"[vb] WARNING: could not EXPLAIN the query plan: {exc}",
@@ -228,39 +203,6 @@ class VillageSQL(VBMySQLBase):
               file=sys.stderr)
         return used
 
-    def query(self, v, n: int) -> List[int]:
-        self._cur.execute(self._ann_sql(v, n))
-        return [row[0] for row in self._cur.fetchall()]
-
-    def batch_query(self, X, n: int) -> None:
-        threads = self._insert_threads
-
-        def worker(chunk):
-            conn = self._connect()
-            cur = conn.cursor()
-            cur.execute(f"USE {DATABASE}")
-            cur.execute(self.dialect.set_ef_search.format(ef_search=self._ef_search))
-            out = []
-            for v in chunk:
-                cur.execute(self._ann_sql(v, n))
-                out.append([row[0] for row in cur.fetchall()])
-            cur.close()
-            conn.close()
-            return out
-
-        chunks = [X[i::threads] for i in range(threads)]
-        pool = ThreadPool(threads)
-        try:
-            results = pool.map(worker, chunks)
-        finally:
-            pool.close()
-            pool.join()
-        merged: List[Optional[List[int]]] = [None] * len(X)
-        for c, chunk_results in enumerate(results):
-            for j, res in enumerate(chunk_results):
-                merged[c + j * threads] = res
-        self._batch_results = [r if r is not None else [] for r in merged]
-
     # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------
@@ -269,8 +211,6 @@ class VillageSQL(VBMySQLBase):
         extra = super().get_additional()
         extra["ef_construction"] = self._ef_construction
         extra["build_seconds"] = round(self._build_seconds, 3)
-        extra["vector_binding"] = ("text literal ('[a,b,...]', "
-                                   "parsed by strtof)")
         extra["extension_status"] = ("preview (vsql_allow_preview_extensions=ON; "
                                      "dev/unstable extension ABI)")
         return extra

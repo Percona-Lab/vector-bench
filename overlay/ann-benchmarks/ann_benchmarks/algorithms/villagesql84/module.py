@@ -1,4 +1,4 @@
-"""VillageSQL 0.0.7 on its MySQL 8.4 base + vsql_vector, driven by
+"""VillageSQL 0.0.8 on its MySQL 8.4 base + vsql_vector, driven by
 ann-benchmarks.
 
 Identical to the 9.7 module in every respect except the name, for the reason

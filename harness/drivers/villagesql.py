@@ -1,13 +1,13 @@
 """Ops-harness driver for VillageSQL + vsql_vector (SVECTOR, HNSW custom index).
 
 VillageSQL is a MySQL fork -- 9.7.2 for `villagesql`, 8.4 for `villagesql84`,
-which this driver serves unchanged (the extension commit is the same and so is
-every statement below) -- driven through the same MariaDB Connector/C as every
-other MySQL-family engine here, so connection handling, the threaded load and
-sizing come from `MySQLFamilyDriver`. Four things differ, and each is forced by
-the server or the extension at the pin in `config/engines/villagesql.yml`
-(server `publish/mysql-9.7_0.0.7` = `533ab4b5`; villagesql84's
-`publish/mysql-8.4_0.0.7` = `689c74a9`; vsql-vector-pk `93ed008` on both):
+which this driver serves unchanged (every statement below is the same) --
+driven through the same MariaDB Connector/Python as every other MySQL-family
+engine here, so connection handling, the threaded load and sizing come from
+`MySQLFamilyDriver`. Four things differ, and each is forced by the server or
+the extension at the pins: VillageSQL 0.0.8 (`publish/mysql-9.7_0.0.8` =
+`9999524a` for `villagesql`, `publish/mysql-8.4_0.0.8` = `6c49b098` for
+`villagesql84`) with vsql-vector-pk `0.0.4` (`3c798c74`) on both:
 
 1. **The column and the index are an extension's.** `v SVECTOR(n)` is a
    custom type; the index is a custom index, `INDEX vi (v hnsw_<metric>) USING
@@ -17,17 +17,16 @@ the server or the extension at the pin in `config/engines/villagesql.yml`
    function must be the one that profile binds (`L2_DISTANCE`,
    `COSINE_DISTANCE`).
 
-2. **Vectors travel as text.** Every vector is sent as the `'[a,b,...]'`
-   literal (`svector_from_string` in src/vector.cc, `strtof` per element).
-   Every other MySQL-family engine here binds packed float32. The text is the
-   shortest float32 repr per element, which `strtof` reads back to the same
-   bits, so no value changes -- but formatting and parsing it is a cost only
-   this engine pays, on the load and inside every timed query, and the record
-   says so (`extra.vector_binding`). The query vector is INLINED as a literal
-   rather than bound: the server's KNN recognition requires the query operand
-   to be a constant item (`BindFieldAndQuery` in villagesql/sql/
-   custom_index_knn_recognition.cc), which a prepared-statement parameter is
-   not at optimisation time.
+2. **Vectors travel as every other MySQL-family engine's do**: packed
+   little-endian float32, through `MySQLFamilyDriver`'s multi-row INSERT and
+   as the query's bound parameter. The server hands a binary value to the
+   type's `from_binary` (villagesql-server #1499), which for SVECTOR is the
+   raw float32 array, its length checked against the column's dimension
+   (`svector_from_binary` in src/vector.cc, vsql-vector-pk #39). The KNN
+   recognition accepts the bound query operand (villagesql-server #1298), and
+   the statement is prepared once rather than on every execute (#1530). None
+   of the four is in 0.0.7, so this path needs VillageSQL 0.0.8 and
+   vsql-vector-pk 0.0.4 or later.
 
 3. **The plan is checked, and a query that does not use the index is
    refused.** The server drives a distance scan only from an index whose
@@ -51,15 +50,11 @@ the server or the extension at the pin in `config/engines/villagesql.yml`
 
 from __future__ import annotations
 
-import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
-
-import numpy
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .base import (DATABASE, FILTER_TAG, TABLE, ConnectionSpec, IndexSpec,
-                   LoadResult, RowAttrs, checked_filter_column)
-from .mysql_family import (PROGRESS_INTERVAL_S, insert_batch, MySQLDialect,
-                           MySQLFamilyDriver)
+                   checked_filter_column)
+from .mysql_family import MySQLDialect, MySQLFamilyDriver, to_binary_f32
 
 #: The EXPLAIN FORMAT=TREE text the server prints for a distance scan
 #: (`sql/join_optimizer/explain_access_path.cc`: "Custom index distance scan
@@ -122,28 +117,15 @@ VILLAGESQL_DIALECT = MySQLDialect(
     index_clause=("INDEX {name} (v {profile}) USING EXTENDED(hnsw) "
                   "WITH (M = {m}, ef_construction = {ef_construction})"),
     plan_marker=PLAN_MARKER,
+    # `{metric_upper}` is "L2" or "COSINE", so this is the function the
+    # index profile binds (PROFILES), with the query vector bound.
+    distance_expr="{metric_upper}_DISTANCE(v, ?)",
     ef_construction=DEFAULT_EF_CONSTRUCTION,
 )
 
 
 class BruteForceRefused(RuntimeError):
     """A query whose plan does not use the vector index, refused unmeasured."""
-
-
-def text_literal(vector) -> str:
-    """`'[a,b,...]'`, each element the shortest repr of its float32 value.
-
-    `str(numpy.float32(x))` is the shortest decimal that round-trips to the
-    same float32, and the server parses each element with `strtof`, so the
-    stored vector is bit-identical to the dataset's. Only digits, signs,
-    `.`, `e`, `,` and brackets can appear, which is what makes inlining it
-    into a statement safe; a non-finite value would not round-trip and is
-    refused here rather than sent.
-    """
-    arr = numpy.asarray(vector, dtype="<f4")
-    if not numpy.all(numpy.isfinite(arr)):
-        raise ValueError("SVECTOR cannot carry a non-finite element")
-    return "[" + ",".join(str(x) for x in arr) + "]"
 
 
 def checked_ef_construction(m: int, ef_construction: Optional[int]) -> int:
@@ -205,7 +187,6 @@ class VillageSQLDriver(MySQLFamilyDriver):
 
     def query_path_facts(self, index: IndexSpec) -> Dict[str, Any]:
         return {
-            "vector_binding": "text literal ('[a,b,...]', parsed by strtof)",
             "extension_status": ("preview (vsql_allow_preview_extensions=ON; "
                                  "dev/unstable extension ABI)"),
         }
@@ -298,46 +279,6 @@ class VillageSQLDriver(MySQLFamilyDriver):
     # Data
     # ------------------------------------------------------------------
 
-    def _load_range(self, cur, vectors, attrs: RowAttrs, start_id: int,
-                    lo: int, hi: int,
-                    batch: int = 500, report: bool = False) -> None:
-        """`MySQLFamilyDriver._load_range` with the vector as text.
-
-        Same batch size, same `insert_batch`, same progress reporting, so the
-        only difference from the other MySQL-family engines is the value
-        encoding the server forces.
-        """
-        rows: List[Tuple[Any, ...]] = []
-        total = hi - lo
-        started = time.perf_counter()
-        next_report = started + PROGRESS_INTERVAL_S
-        for i in range(lo, hi):
-            rows.append((start_id + i, *attrs.row(i), text_literal(vectors[i])))
-            if len(rows) >= batch:
-                insert_batch(cur, rows)
-                rows = []
-                now = time.perf_counter()
-                if report and now >= next_report:
-                    done = i - lo + 1
-                    rate = done / max(now - started, 1e-9)
-                    eta = (total - done) / max(rate, 1e-9)
-                    print(f"[{self.name}]   {done:,}/{total:,} rows, "
-                          f"{rate:,.0f} rows/s, ETA {eta / 60:.1f} min",
-                          flush=True)
-                    next_report = now + PROGRESS_INTERVAL_S
-        insert_batch(cur, rows)
-        cur.execute("COMMIT")
-
-    def insert_rows(self, ids: Sequence[int], vectors: numpy.ndarray,
-                    attrs: Union[RowAttrs, Sequence[int], numpy.ndarray]
-                    ) -> None:
-        attrs = RowAttrs.coerce(attrs)
-        rows = [(int(row_id), *attrs.row(i), text_literal(vectors[i]))
-                for i, row_id in enumerate(ids)]
-        for start in range(0, len(rows), 500):
-            insert_batch(self._cur, rows[start:start + 500])
-        self._cur.execute("COMMIT")
-
     def delete_ids(self, ids: Sequence[int]) -> None:
         """Refused before the server refuses it, with the server's reason.
 
@@ -353,33 +294,13 @@ class VillageSQLDriver(MySQLFamilyDriver):
     # Query
     # ------------------------------------------------------------------
 
-    def _select(self, k: int, filtered: bool, *,
-                column: str = FILTER_TAG, vector=None) -> str:
-        """The one SELECT, with the query vector inlined (module docstring 2).
-
-        `filtered` keeps the base class's flag guard; the threshold is still
-        a bound parameter, and only the vector literal -- which `text_literal`
-        restricts to number characters -- is formatted in.
-        """
-        if not isinstance(filtered, bool):
-            raise TypeError(
-                f"_select's filtered argument is a flag, not a column; got "
-                f"{filtered!r}. Did you mean column={filtered!r}?")
-        assert self._index is not None, "create_schema must run before querying"
-        where = (f"WHERE {checked_filter_column(column)} < ? "
-                 if filtered else "")
-        _profile, function = self._profile(self._index)
-        literal = "'" + text_literal(vector) + "'"
-        return (f"SELECT id FROM {TABLE} {where}"
-                f"ORDER BY {function}(v, {literal}) LIMIT {int(k)}")
-
     def _plan(self, vector, k: int, tag_threshold: Optional[int],
               column: str) -> str:
         filtered = tag_threshold is not None
         self._cur.execute(
-            "EXPLAIN FORMAT=TREE "
-            + self._select(k, filtered, column=column, vector=vector),
-            (int(tag_threshold),) if filtered else None)
+            "EXPLAIN FORMAT=TREE " + self._select(k, filtered, column=column),
+            (int(tag_threshold), to_binary_f32(vector)) if filtered
+            else (to_binary_f32(vector),))
         return " | ".join(str(c) for row in self._cur.fetchall() for c in row)
 
     def explain_uses_vector_index(self, vector, k: int,
@@ -431,16 +352,13 @@ class VillageSQLDriver(MySQLFamilyDriver):
 
     def query(self, vector, k: int) -> List[int]:
         self._require_index(vector, k)
-        self._cur.execute(self._select(k, False, vector=vector))
-        return [row[0] for row in self._cur.fetchall()]
+        return super().query(vector, k)
 
     def query_filtered(self, vector, k: int, threshold: int,
                        column: str = FILTER_TAG) -> List[int]:
         # Declined (`declined_workloads`); kept correct for a lab script.
         self._require_index(vector, k, threshold, column)
-        self._cur.execute(self._select(k, True, column=column, vector=vector),
-                          (int(threshold),))
-        return [row[0] for row in self._cur.fetchall()]
+        return super().query_filtered(vector, k, threshold, column)
 
     # ------------------------------------------------------------------
     # Sizing

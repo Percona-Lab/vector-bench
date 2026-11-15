@@ -105,12 +105,12 @@ def connect_kwargs(spec: ConnectionSpec) -> Dict[str, Any]:
     -- paid an extra round trip and a server-side prepare per query that
     MariaDB did not. Reported by VillageSQL (Tomas), reproduced here.
 
-    The exception, which this does not change: MyVector's and VillageSQL's
-    KNN queries inline the query vector as a literal, because their servers
-    need a constant there (`VillageSQLDriver._select`, MyVector's `@vb_q`),
-    bind nothing, and so go over the text protocol under 1.1 and 2.0 alike,
-    re-parsing a several-KB literal per query. Same client, different work,
-    forced by the servers and stated in docs/04.
+    The exception, which this does not change: MyVector's KNN query inlines
+    the query vector as a literal, because its server needs a constant there
+    (MyVector's `@vb_q`), binds nothing, and so goes over the text protocol
+    under 1.1 and 2.0 alike, re-parsing a several-KB literal per query. Same
+    client, different work, forced by the server and stated in docs/04.
+    VillageSQL did the same through 0.0.7 and binds the vector from 0.0.8.
 
     Placeholders are therefore `?` throughout: 2.0's binary path hands the
     SQL to the server unaltered, and a `%s` is a syntax error there.
