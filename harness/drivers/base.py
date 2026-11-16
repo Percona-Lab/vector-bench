@@ -638,6 +638,36 @@ class EngineDriver(abc.ABC):
     @abc.abstractmethod
     def set_ef_search(self, ef_search: int) -> None: ...
 
+    def set_statement_timeout(self, seconds: Optional[float]) -> bool:
+        """Cap how long the server may run ONE statement on this session.
+
+        `None` (or anything not positive) removes the cap. Returns whether
+        the engine enforces it, so a caller can say in its record that a
+        budget was or was not able to stop a query in flight.
+
+        Exists for the filtered workload's per-point budget, which is checked
+        between queries and so could never stop a single query that does not
+        come back. percona-mariadb-20261111-r2 is the incident: one MariaDB
+        warm-up query on sift's `ctag` at 1% ran for over 240 s against a 60 s
+        warm-up share, server RSS went from 2.3 GiB to the 16 GiB container
+        limit, and the kernel killed the server -- losing the rest of that
+        unit rather than recording one budget-stopped point.
+
+        The default enforces nothing and says so. That is the honest answer
+        for an engine without a server-side statement timeout, and it leaves
+        the budget exactly as it was before: checked between queries.
+        """
+        return False
+
+    def is_statement_timeout(self, exc: BaseException) -> bool:
+        """Is `exc` the error `set_statement_timeout`'s cap raises?
+
+        Only that error is treated as "the budget stopped this query"; every
+        other failure still propagates, so a crashed server is not recorded
+        as a slow point.
+        """
+        return False
+
     def effective_ef(self, ef: int, k: int) -> int:
         """How many candidates this engine will really search for `ef`.
 

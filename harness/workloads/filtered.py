@@ -103,6 +103,25 @@ DEFAULT_BUDGET_S = 300.0
 #: query spends 315 s.
 WARMUP_BUDGET_SHARE = 0.2
 
+#: The smallest statement timeout armed before a query, in seconds. A query
+#: started with 3 ms of budget left gets this much rather than 3 ms, so a cap
+#: does not cut a query that would have finished in ordinary time -- the
+#: between-query check stops the NEXT one either way. Small against every
+#: budget a profile sets (300 s), large against a healthy filtered query.
+MIN_STATEMENT_TIMEOUT_S = 1.0
+
+#: The longest any ONE filtered query may run, whatever budget is left.
+#: Capping at "time left" alone still let a measured query run for most of a
+#: 300 s budget, and the query that OOM-killed MariaDB in
+#: percona-mariadb-20261111-r2 needed about 240 s to take server RSS from
+#: 2.3 GiB to the 16 GiB limit -- inside that window. Sixty seconds is the
+#: warm-up's own share of the default budget (`WARMUP_BUDGET_SHARE` x 300 s),
+#: and it costs no measurement: a point with one 60 s query can run at most
+#: five in 300 s, far under `MIN_SAMPLE_QUERIES`, so it is already the
+#: greyed, insufficient point the report draws. The cap only decides whether
+#: that point is RECORDED or takes the server down with it.
+MAX_STATEMENT_TIMEOUT_S = 60.0
+
 #: Below this many executed queries a point is still recorded, but flagged.
 #: PR 3 §3.4 item 3. Fifty because recall here is a mean over
 #: `queries * k` Bernoulli-ish draws and the report greys the point out rather
@@ -274,6 +293,49 @@ class _PointResult(NamedTuple):
     #: mutable default on a NamedTuple is shared by every instance that omits
     #: it, and nothing here needs it to be mutable.
     latencies: Sequence[float] = ()
+    #: Whether a server-side cap was ARMED on each query (the engine accepted
+    #: the SET -- not proof it can interrupt every plan), and how many
+    #: queries (warm-up and measured) it stopped. See
+    #: `EngineDriver.set_statement_timeout` for the incident behind both.
+    statement_timeout_armed: bool = False
+    statement_timeouts: int = 0
+
+
+def _arm_statement_timeout(driver: EngineDriver, deadline: float) -> bool:
+    """Cap the next query at the time left before `deadline`.
+
+    The budget is otherwise checked only BETWEEN queries, so one query that
+    never returns is never stopped: percona-mariadb-20261111-r2 lost a whole
+    MariaDB unit to a single warm-up query that ran for minutes and drove the
+    server into the kernel's OOM killer. With no deadline (`inf`, a profile's
+    "no cap") the session is left untouched.
+    """
+    remaining = deadline - time.time()
+    if remaining == float("inf"):
+        return False
+    return driver.set_statement_timeout(
+        min(max(remaining, MIN_STATEMENT_TIMEOUT_S), MAX_STATEMENT_TIMEOUT_S))
+
+
+def _capped_query(driver: EngineDriver, deadline: float, vector, k: int,
+                  threshold: int, column: str) -> Tuple[Optional[List[int]],
+                                                        bool]:
+    """`(ids, enforced)`, or `(None, enforced)` when the cap stopped it.
+
+    The cap is armed OUTSIDE the caller's `perf_counter` span: it is one more
+    statement, and charging it to the engine's latency would make capping a
+    cost the engine pays. Only the engine's own timeout error is caught --
+    a reset connection or a crashed server still propagates and fails the
+    unit, rather than being recorded as a slow point.
+    """
+    enforced = _arm_statement_timeout(driver, deadline)
+    try:
+        return driver.query_filtered(vector, k, threshold,
+                                     column=column), enforced
+    except Exception as exc:
+        if enforced and driver.is_statement_timeout(exc):
+            return None, enforced
+        raise
 
 
 def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
@@ -293,6 +355,15 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
     measured queries, which turns a slow point from "measured badly" into "not
     measured at all" — and the point of recording a truncated point rather
     than dropping it is that the slowness IS the finding.
+
+    On an engine whose driver enforces `set_statement_timeout` (MariaDB,
+    AliSQL, Percona, pgvector), every query is also capped server-side at the
+    time left -- never less than `MIN_STATEMENT_TIMEOUT_S`, never more than
+    `MAX_STATEMENT_TIMEOUT_S` -- and a query the
+    cap stops ends its loop exactly as an elapsed deadline does, without
+    contributing a latency or a result. The paragraph below is then the
+    bound for the other engines only; for these the bound is one budget,
+    give or take that minimum.
 
     Neither arrangement changes the ceiling, and the ceiling is not exactly
     the budget: a deadline tested before each query stops the point from
@@ -325,11 +396,14 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
     planned = len(queries)
     warmup_planned = min(warmup, planned)
     warmup_executed = 0
+    enforced = False
+    timeouts = 0
 
     started = time.time()
     with Heartbeat(f"warm-up ({min(warmup, planned)} queries)",
                    prefix=driver.name):
         warmup_budget_s = budget_s * WARMUP_BUDGET_SHARE
+        warmup_deadline = started + warmup_budget_s
         for i in range(warmup_planned):
             if time.time() - started > warmup_budget_s:
                 # Not `time_bounded`: the warm-up being cut short says
@@ -361,7 +435,15 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
                 # that nobody "fixes" it later and nobody counts it as a
                 # guard.
                 break
-            driver.query_filtered(queries[i], k, threshold, column=column)
+            ids, armed = _capped_query(driver, warmup_deadline, queries[i],
+                                       k, threshold, column)
+            enforced = enforced or armed
+            if ids is None:
+                # The warm-up's own share ran out mid-query. Like the
+                # between-query check above, this is not `time_bounded`:
+                # `warmup_executed` is where it shows.
+                timeouts += 1
+                break
             warmup_executed += 1
 
     # Filtered queries can be far slower than unfiltered ones — a selective
@@ -370,12 +452,24 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
     progress = Progress(planned, label, prefix=driver.name)
     latencies: List[float] = []
     collector.start()
+    deadline = started + budget_s
     for q in queries:
         if time.time() - started > budget_s:
             time_bounded = True
             break
+        armed = _arm_statement_timeout(driver, deadline)
+        enforced = enforced or armed
         query_started = time.perf_counter()
-        ids = driver.query_filtered(q, k, threshold, column=column)
+        try:
+            ids = driver.query_filtered(q, k, threshold, column=column)
+        except Exception as exc:
+            if not (armed and driver.is_statement_timeout(exc)):
+                raise
+            # The server stopped it at the budget: the point is budget-bound,
+            # and the query that did not finish has no latency to record.
+            timeouts += 1
+            time_bounded = True
+            break
         elapsed = time.perf_counter() - query_started
         collector.add(elapsed)
         latencies.append(elapsed)
@@ -385,6 +479,12 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
         progress.step()
     collector.stop()
     progress.finish()
+    if enforced:
+        # Lifted before the plan check and the next point's ground truth.
+        # Only on the normal path: after any other error the unit is already
+        # failing, and a second statement on that session would only bury the
+        # first error under its own.
+        driver.set_statement_timeout(None)
 
     # No executed query means no latency distribution. `summarize([])` returns
     # NaN for every percentile, and a NaN in a record is both invalid strict
@@ -396,6 +496,7 @@ def _measure_point(driver: EngineDriver, queries: numpy.ndarray, k: int,
         qps=collector.qps(clients=1) if returned else 0.0,
         warmup_executed=warmup_executed, warmup_planned=warmup_planned,
         latencies=latencies,
+        statement_timeout_armed=enforced, statement_timeouts=timeouts,
     )
 
 
@@ -670,6 +771,13 @@ def _record_point(ctx: RunContext, common: Dict[str, object], filt,
             # cannot distinguish "ran to completion" from "written by a
             # harness that did not have budgets yet".
             "time_bounded": point.time_bounded,
+            # Additive like the two warm-up fields above. Whether each query
+            # had a server-side cap ARMED (the SET was accepted; whether the
+            # engine's plan polls for it is per engine, see the PR), and how
+            # many the cap stopped. False/0 on an engine whose driver has no
+            # cap, which is the budget as every record before this measured it.
+            "statement_timeout_armed": point.statement_timeout_armed,
+            "statement_timeouts": point.statement_timeouts,
             "insufficient_sample": insufficient,
             "filtered_budget_s": budget_s,
             # PR 5 §5.1 item 4. Over the queries that actually RAN, which on a
