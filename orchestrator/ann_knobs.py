@@ -44,10 +44,18 @@ WHERE EACH BOUND COMES FROM. Pinned source, read in the trees this repo builds
 from (`sources/` holds the exported tags; the vendor checkouts beside the repo
 are read-only):
 
-* MariaDB 11.8.8 and 12.3.2: `sql/vector_mhnsw.cc`, the `default_m` sysvar,
+* MariaDB 11.8.8: `sql/vector_mhnsw.cc`, the `default_m` sysvar,
   `MYSQL_THDVAR_UINT(default_m, ..., 6, 3, 200, 1)` -- default 6, range
   3..200. The table option `M=` is `HA_IOPTION_SYSVAR("m", M, default_m)`, so
   it inherits that range.
+* MariaDB 12.3.4: the same sysvar, `MYSQL_THDVAR_UINT(default_m, ..., 6, 3,
+  127, 1)` -- range 3..127. 12.3.2 had 3..200; MDEV-39822 ("MHNSW index
+  returns wrong results for M >= 128", ebde32c352) lowered it because a
+  node's neighbour count is stored in one byte and layer 0 holds 2 * M
+  neighbours (`MHNSW_Share::max_neighbors`), and `FVectorNode::load_from_record`
+  now refuses a stored count above that. 11.8.8 predates the fix and still
+  accepts 128..200, where MDEV-39822 says the results are wrong; no grid here
+  goes above 48.
 * AliSQL 8.0.44-2: `include/vidx/vidx_common.h`, `M_MIN = 3`, `M_MAX = 200`
   (`M_DEF = 6`), read by the `hnsw_default_m` sysvar in
   `sql/vidx/vidx_index.cc`.
@@ -100,7 +108,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 #: table is not checked -- see the module docstring for which and why.
 KNOB_BOUNDS: Dict[str, Dict[str, Tuple[Optional[int], Optional[int]]]] = {
     "mariadb": {"M": (3, 200)},
-    "mariadb123": {"M": (3, 200)},
+    "mariadb123": {"M": (3, 127)},
     "alisql": {"M": (3, 200)},
     "pgvector": {"M": (2, 100), "efConstruction": (4, 1000)},
     "percona": {"M": (2, 200), "efConstruction": (1, 4096)},

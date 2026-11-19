@@ -1091,7 +1091,8 @@ class MariaDBDriver(MySQLFamilyDriver):
     dialect = MARIADB_DIALECT
     name = "mariadb"
     # `FVector { float abs2, scale; int16_t dims[]; }` in sql/vector_mhnsw.cc
-    # at both pins (11.8.8, 12.3.2): the graph table stores 16-bit vectors.
+    # at both pins (11.8.8, 12.3.4; 12.3 adds a `subabs2` float to the
+    # header): the graph table stores 16-bit vectors.
     index_vector_format = "int16"
     index_includes_vectors = True
 

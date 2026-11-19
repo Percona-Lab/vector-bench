@@ -15,7 +15,7 @@ The repo root is `vector-bench/` (git repo, branch `master`). All commands below
 | Engine key | What it is | Source pin |
 | --- | --- | --- |
 | `mariadb` | MariaDB MHNSW | tag `mariadb-11.8.8` |
-| `mariadb123` | MariaDB MHNSW, second version | tag `mariadb-12.3.2` |
+| `mariadb123` | MariaDB MHNSW, second version | tag `mariadb-12.3.4` |
 | `alisql` | AliSQL VIDX | tag `AliSQL-8.0.44-2` |
 | `pgvector` | PostgreSQL + pgvector | tag `v0.8.6` |
 | `mongodb` | Percona Search for MongoDB (mongot) | Percona package |

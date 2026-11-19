@@ -1131,7 +1131,8 @@ Then:
   one** — every configuration reported as not using its index, the whole
   Validity section full, and the one engine the change was for the only one
   working. Established by reading the three parsers rather than by assuming
-  MySQL-family compatibility: MariaDB 11.8.8's *sql_yacc.yy*, MariaDB 12.3.2's
+  MySQL-family compatibility: MariaDB 11.8.8's *sql_yacc.yy*, MariaDB 12.3.4's (read
+  at 12.3.2 first; the *opt_format_json* rule is unchanged at 12.3.4)
   and AliSQL 8.0.44's all accept `FORMAT = TRADITIONAL` in their *describe*
   rule. Recorded here because "it is
   the default, so the keyword must be accepted" is the kind of inference this

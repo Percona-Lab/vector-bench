@@ -24,7 +24,18 @@ display_name: MariaDB 12.3
 family: mysql
 
 source:
-  tag: mariadb-12.3.2
+  # mariadb-12.3.4 (commit e4549ea6, tagged 2026-11-13), re-pinned from
+  # mariadb-12.3.2 because 12.3.2 lacks MDEV-39858 (da0beac410): a COSINE
+  # index reloaded from disk -- restart, FLUSH TABLES, ALTER, or a node
+  # evicted from the mhnsw_max_cache_size cache and read back -- recomputed
+  # each node's abs2 from its int16 coordinates and lost recall to the
+  # rounding, more so at high dimension and large M. The fix pins abs2 at 0.5
+  # in `FVectorNode::load_from_record`. 12.3.4 also carries MDEV-39822
+  # (ebde32c352), which lowers `default_m`'s ceiling from 200 to 127
+  # (orchestrator/ann_knobs.py). A fast-forward: GitHub's compare reports
+  # 1163 ahead, 0 behind. The `mariadb` engine stays at 11.8.8, which lacks
+  # both fixes; 11.8.10 carries MDEV-39858.
+  tag: mariadb-12.3.4
   upstream: https://github.com/MariaDB/server.git
   # `git archive` cannot carry submodules and the local checkout has none
   # populated, so prepare-sources.sh clones and initialises only these.

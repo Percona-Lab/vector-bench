@@ -631,7 +631,7 @@ RUN tar -xf /tmp/source.tar -C /src && rm -f /tmp/source.tar
 # MEASURED: `gcc -O2 -D_FORTIFY_SOURCE=3 -D_FORTIFY_SOURCE=2 -dM -E -` prints
 # `#define _FORTIFY_SOURCE 2`, and the reverse order prints 3. So the image was
 # compiling at 2 -- AGREEING with both MariaDB pins, which ask for 2 plainly
-# (mariadb-11.8.8:CMakeLists.txt:290 and mariadb-12.3.2:CMakeLists.txt:303,
+# (mariadb-11.8.8:CMakeLists.txt:290 and mariadb-12.3.4:CMakeLists.txt:303,
 # both `MY_CHECK_AND_SET_COMPILER_FLAG("-D_FORTIFY_SOURCE=2" RELEASE
 # RELWITHDEBINFO)`, READ at both pins) -- while printing a redefinition warning
 # in every translation unit and dying in libfido2. There was no engine-to-engine

@@ -46,7 +46,7 @@
 #   axis; not folded into this profile.
 #
 #   Version. Resolved: MariaDB 12.3 is now a first-class engine
-#   (config/engines/mariadb123.yml, tag mariadb-12.3.2), so a run can carry
+#   (config/engines/mariadb123.yml, tag mariadb-12.3.4), so a run can carry
 #   11.8.8 and 12.3 side by side and quantify the gap the article leaves as
 #   "slower". It is opt-in rather than default because it is another hour of
 #   compiling:
