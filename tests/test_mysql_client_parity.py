@@ -175,12 +175,9 @@ class TestNoFormatPlaceholders:
         driver = cls(ConnectionSpec(host="h", port=3306))
         driver._index = IndexSpec(dim=8, m=16, metric="euclidean",
                                   build_mode="incremental")
-        # VillageSQL inlines the query vector as a text literal (its KNN
-        # recognition needs a constant), so its `_select` takes one.
-        kw = {"vector": numpy.ones(8)} if cls is VillageSQLDriver else {}
-        sql = driver._select(10, False, **kw)
-        assert "%s" not in sql, (cls, sql)
-        filtered = driver._select(10, True, **kw)
+        sql = driver._select(10, False)
+        assert "%s" not in sql and "?" in sql, (cls, sql)
+        filtered = driver._select(10, True)
         assert "%s" not in filtered and "?" in filtered, (cls, filtered)
 
     def test_the_insert_statement(self):

@@ -48,18 +48,23 @@ family: mysql
 source:
   # The vsql-vector-pk commit, under the key every other engine uses
   # (`orchestrator/engines.py:_source_tag`, `ops_pass` -> VB_ENGINE_TAG).
-  # Release 0.0.3 (tag `0.0.3`), `main` at "Bump version to 0.0.3 (#33)".
-  tag: 93ed00873dd65f64c0788c80576d5cf3fba39831
+  # Release 0.0.4 (tag `0.0.4`), `main` at "Bump version to 0.0.4 (#43)". It
+  # reads a binary SVECTOR through from_binary (#39) and carries the column
+  # store's root-page deadlock fix (#42); it does not have the vector cache.
+  tag: 3c798c74cd75608f6237aa142532845a30a04f01
   upstream: https://github.com/villagesql/vsql-vector-pk.git
   # The server the extension is compiled against, from source -- VillageSQL
-  # 0.0.7 on its MySQL 9.7.2 base, the same upstream server line and point
+  # 0.0.8 on its MySQL 9.7.2 base, the same upstream server line and point
   # as Percona Server and MyVector here. config/engines/villagesql84.yml
   # compiles the same extension commit against the 8.4 line. The extension
-  # links the server's build tree, so both come out of one build.
-  server_tag: publish/mysql-9.7_0.0.7
+  # links the server's build tree, so both come out of one build. 0.0.8 is
+  # the first release whose server hands a binary value to the type's
+  # from_binary (#1499) and recognises a KNN query whose vector is a bound
+  # parameter (#1298), which the driver's binary vectors need.
+  server_tag: publish/mysql-9.7_0.0.8
   # Asserted by `prepare_villagesql`: a moved tag is a different server under
   # the same label.
-  server_commit: 533ab4b58d2744b79bb45e41f44fa928f190a655
+  server_commit: 9999524afadb8a8030dfdc153f9439628a7965b5
   server_upstream: https://github.com/villagesql/villagesql-server.git
 
 image:
@@ -85,6 +90,11 @@ build:
     - -DWITH_SSL=system
     - -DWITH_ZLIB=bundled
     - -DWITH_ZSTD=bundled
+    # Empty, as a release build sets it: VSQL_VERSION carries the pre-release
+    # suffix "dev" even at a release tag, and cmake/vsql_version.cmake
+    # reads it only when this is not defined. Without it engine_version
+    # says 0.0.8-dev for the 0.0.8 release.
+    - -DVSQL_PRE_RELEASE_VERSION=
   extra_cxxflags: ""
 
 # There is deliberately no `sql:` block -- see config/engines/mariadb.yml and
@@ -176,8 +186,8 @@ runtime:
     color: "#8c564b"
     marker: "h"
     linestyle: "--"
-    label: "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector-pk HNSW)"
-  label: "VillageSQL 0.0.7 on MySQL 9.7 (vsql_vector-pk HNSW)"
+    label: "VillageSQL 0.0.8 on MySQL 9.7 (vsql_vector-pk HNSW)"
+  label: "VillageSQL 0.0.8 on MySQL 9.7 (vsql_vector-pk HNSW)"
   # The index the ops pass builds, and the fallback under
   # `ops.build_selection: frontier` when the ann phase gives no usable point.
   # `ef_construction: ops` resolves through `ops_pass.ops_ef_construction` to

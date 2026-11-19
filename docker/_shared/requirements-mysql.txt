@@ -11,9 +11,9 @@
 # with `%s` placeholders it re-prepared every query, and only against MariaDB
 # was the re-prepare pipelined into the execute's round trip. Percona and
 # AliSQL -- and VillageSQL's filtered queries -- paid two round trips and a
-# server-side prepare per query that MariaDB did not. (MyVector's and
-# VillageSQL's KNN queries inline the vector and bind nothing, so they went
-# over the text protocol and were unaffected.) The counts, and why
+# server-side prepare per query that MariaDB did not. (MyVector's KNN query
+# inlines the vector and binds nothing, so it went over the text protocol and
+# was unaffected, as VillageSQL's did through 0.0.7.) The counts, and why
 # `binary=True` fixes it, are in harness/drivers/mysql_family.py
 # `connect_kwargs`.
 #

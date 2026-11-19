@@ -19,8 +19,8 @@
 #   * image names `vector-bench/villagesql84-*`. Both engines' images are
 #     tagged with `source.tag`, the vsql-vector-pk commit, and that commit is
 #     the same in both -- so under the 9.7 image names an 8.4 build would
-#     overwrite `villagesql-runtime:93ed0087...` and every manifest that
-#     recorded that tag would name the other server.
+#     overwrite the 9.7 image under that tag, and every manifest that
+#     recorded it would name the other server.
 #
 # `alias_of` points prepare-sources.sh (`prepare_villagesql`, called with this
 # engine's name), build-images.sh (the VILLAGESQL_* build args) and the
@@ -29,7 +29,7 @@ alias_of: villagesql
 
 # WHAT THIS PIN CAN AND CANNOT DO: see the long header of
 # config/engines/villagesql.yml, measured on this 8.4 build. The 8.4 tree
-# carries the same extension framework and the same KNN recognition at 0.0.7 --
+# carries the same extension framework and the same KNN recognition as 9.7 --
 # `FindCustomKnnIndexOnField` requires HAS_ROW_REF on the 8.4 branch exactly as
 # on the 9.7 one -- and vsql-vector-pk declares it, so the KNN query plans as
 # `Custom index distance scan on vi`. (The hypergraph optimizer cannot be
@@ -41,17 +41,19 @@ display_name: VillageSQL on MySQL 8.4 (vsql_vector)
 family: mysql
 
 source:
-  # The vsql-vector-pk commit, the SAME one config/engines/villagesql.yml pins:
-  # only the server differs between the two engines.
-  tag: 93ed00873dd65f64c0788c80576d5cf3fba39831
+  # The vsql-vector-pk commit, the SAME one config/engines/villagesql.yml pins
+  # (release 0.0.4): only the server differs between the two engines.
+  tag: 3c798c74cd75608f6237aa142532845a30a04f01
   upstream: https://github.com/villagesql/vsql-vector-pk.git
-  # VillageSQL 0.0.7 on its MySQL 8.4 base (8.4.x upstream LTS line). The
-  # same commit as `release/0.0.7`; there is also a Percona Server 8.4 based
-  # line, deliberately not this one.
-  server_tag: publish/mysql-8.4_0.0.7
+  # VillageSQL 0.0.8 on its MySQL 8.4 base (8.4.x upstream LTS line). The
+  # same commit as `release/0.0.8`; there is also a Percona Server 8.4 based
+  # line, deliberately not this one. 0.0.8 is the first release whose server
+  # hands a binary value to the type's from_binary (#1499) and recognises a
+  # KNN query whose vector is a bound parameter (#1298).
+  server_tag: publish/mysql-8.4_0.0.8
   # Asserted by `prepare_villagesql`: a moved tag is a different server under
   # the same label.
-  server_commit: 689c74a9f88c91ae035f57e0ae8915a168274112
+  server_commit: 6c49b09829b50dfab7b0a32face5676585bfa482
   server_upstream: https://github.com/villagesql/villagesql-server.git
 
 image:
@@ -80,6 +82,11 @@ build:
     - -DWITH_SSL=system
     - -DWITH_ZLIB=bundled
     - -DWITH_ZSTD=bundled
+    # Empty, as a release build sets it: VSQL_VERSION carries the pre-release
+    # suffix "dev" even at a release tag, and cmake/vsql_version.cmake
+    # reads it only when this is not defined. Without it engine_version
+    # says 0.0.8-dev for the 0.0.8 release.
+    - -DVSQL_PRE_RELEASE_VERSION=
   extra_cxxflags: ""
 
 # There is deliberately no `sql:` block -- see config/engines/mariadb.yml and
@@ -155,8 +162,8 @@ runtime:
     color: "#c49c94"
     marker: "H"
     linestyle: "-."
-    label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector-pk HNSW)"
-  label: "VillageSQL 0.0.7 on MySQL 8.4 (vsql_vector-pk HNSW)"
+    label: "VillageSQL 0.0.8 on MySQL 8.4 (vsql_vector-pk HNSW)"
+  label: "VillageSQL 0.0.8 on MySQL 8.4 (vsql_vector-pk HNSW)"
   # As config/engines/villagesql.yml.
   reference_build:
     m: 16

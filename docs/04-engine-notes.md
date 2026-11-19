@@ -525,15 +525,25 @@ its graph has the same headroom.
 
 ## VillageSQL — vsql_vector built from vsql-vector-pk (SVECTOR + HNSW custom index)
 
-Server `villagesql/villagesql-server` tag `publish/mysql-9.7_0.0.7` (`533ab4b5`,
-VillageSQL 0.0.7 on MySQL 9.7.2) with the `villagesql/vsql-vector-pk` extension
-at release `0.0.3` (`93ed0087`). vsql-vector-pk is the build of vsql-vector
+Server `villagesql/villagesql-server` tag `publish/mysql-9.7_0.0.8` (`9999524a`,
+VillageSQL 0.0.8 on MySQL 9.7.2) with the `villagesql/vsql-vector-pk` extension
+at release `0.0.4` (`3c798c74`). vsql-vector-pk is the build of vsql-vector
 whose HNSW index stores each row's primary key; it installs as `vsql_vector`,
 and a server runs one or the other. It builds against the server's build tree
-(`VillageSQL_BUILD_DIR`), -O3, at `x86-64-v3`. `villagesql84` (below) builds the
-same extension commit against the MySQL 8.4 line.
+(`VillageSQL_BUILD_DIR`), -O3, at `x86-64-v3`, with `-DVSQL_PRE_RELEASE_VERSION=`
+so the server reports `0.0.8` rather than the `0.0.8-dev` its `VSQL_VERSION` file
+still carries at the tag. `villagesql84` (below) builds the same extension commit
+against the MySQL 8.4 line.
 
-"This pin" in the rows below is vsql-vector-pk `0.0.3`. Its measurements were
+0.0.8 / 0.0.4 is the first pin at which the driver binds vectors as float32
+("Value input" below). vsql-vector-pk 0.0.4 is 0.0.3 plus the binary SVECTOR
+form (#39), the column store's root-page deadlock fix (#42) and its version bump;
+its HNSW options and their bounds are 0.0.3's, and it does not have the vector
+cache.
+
+Unless a row says otherwise, "this pin" in the rows below is the previous one,
+vsql-vector-pk `0.0.3` with VillageSQL 0.0.7 (`publish/mysql-9.7_0.0.7`,
+`533ab4b5`). Its measurements were
 taken on the 8.4 build (`villagesql84`'s server, `689c74a9`), whose KNN
 recognition, custom-index DML layer and storage ABI are the same files as 9.7's
 (see the 8.4 section). On 9.7 this framework built vsql-vector-pk `d23b87c4`
@@ -549,7 +559,7 @@ plain vsql-vector `bac885dd`, measured on 2026-10-30. Where a row below says
 | --- | --- |
 | Enable | `INSTALL EXTENSION vsql_vector` once (the entrypoint's bootstrap), and `--vsql-allow-preview-extensions=ON` on every start: on the first pin, once the extension was installed a server started without it **refused to start** (`Failed to load VEF extension 'vsql_vector': extension requires preview capabilities but vsql_allow_preview_extensions is OFF`, then `Aborting`), and `SET GLOBAL` of it was refused (`must be set with SET PERSIST`) |
 | Column type | `SVECTOR(N)`, stored by the extension in its own InnoDB pages |
-| Value input | the text literal `'[a,b,…]'`, parsed with `strtof` per element; that is what the driver and the ann module send, the query vector inlined. vsql-vector-pk also accepts a binary form (a tagged big-endian dimension, then little-endian float32; `svector_from_binary`, src/vector.cc), which this engine does not use |
+| Value input | packed little-endian float32, bound as a parameter on the load and in every query, as for every MySQL-family engine here. The server hands a binary value to the type's `from_binary` (villagesql-server #1499); SVECTOR's takes the raw float32 array and refuses a length that is not 4 × the column's dimension (`svector_from_binary`, src/vector.cc, vsql-vector-pk #39). Needs VillageSQL 0.0.8 and vsql-vector-pk 0.0.4 or later. The text literal `'[a,b,…]'` (`strtof` per element) is still accepted, and was this engine's input through 0.0.7 |
 | Index DDL | `INDEX vi (v hnsw_l2) USING EXTENDED(hnsw) WITH (M = 16, ef_construction = 200)` inline, or `CREATE INDEX vi ON t1 (…)` |
 | Metric | chosen by the key part's profile: `hnsw_l2`, `hnsw_cosine`, `hnsw_l1`, `hnsw_inner_product` |
 | **ef_construction** | `WITH (ef_construction = …)`, default 200, rejected above 32 × M and below M (`Options::validate`, src/index/hnsw/storage.cc; M itself is 2..128; the same constants as plain vsql-vector's). On the first pin a refusal said only `InnoDB: Custom type operation failed. See server error log for details.` (M=4: 128 accepted, 129 refused). So 200 is not buildable at M=6 or below. The engine's first version clamped to 192 and recorded both values, but the result file and every label downstream still said 200; the combination is now dropped from the render by name (`orchestrator/ann_knobs.py`), and the driver and module refuse it if anything bypasses that. m-sweep gives VillageSQL M 8..32 for this reason |
@@ -577,8 +587,9 @@ plain vsql-vector `bac885dd`, measured on 2026-10-30. Where a row below says
    the ann module still check the plan and **raise instead of timing the
    query** without it, so a pin that loses the scan fails loudly into the
    report's failed phases rather than publishing brute force as ANN search.
-   The query vector must be a constant (`BindFieldAndQuery`): a bound
-   parameter is not one at optimisation time, so it is inlined.
+   Through 0.0.7 the query vector had to be a constant
+   (`BindFieldAndQuery`), so it was inlined; since villagesql-server #1298
+   the recognition accepts a bound parameter, and the query vector is bound.
 2. **DELETE is rejected.** `DELETE FROM t WHERE id = 1` → `DELETE on a table
    with a custom index (USING EXTENDED) is not supported yet.` Churn is
    declined (`declined_workloads`, `capabilities.churn: false`). An UPDATE of
@@ -604,10 +615,11 @@ plain vsql-vector `bac885dd`, measured on 2026-10-30. Where a row below says
    predicate returns fewer than k rows even when enough matching rows exist.
    Filtered search is declined: measuring it would publish post-filtered
    recall as filtered search.
-5. **Text binding is a cost only this engine pays**, on the load and inside
-   every timed query; `extra.vector_binding` carries it and the report states
-   it. The shortest float32 repr per element round-trips exactly through
-   `strtof`, so the stored vectors are bit-identical to the dataset's.
+5. **Through 0.0.7 the vectors were text**, a cost only this engine paid on
+   the load and inside every timed query (`extra.vector_binding` carried it
+   and the report stated it). From VillageSQL 0.0.8 and vsql-vector-pk 0.0.4
+   they are bound packed float32 like every other MySQL-family engine's, so
+   the records no longer carry a binding of their own.
 6. **Ingest slowed within one server lifetime on the first pin.** Repeated
    drop-and-reload cycles of a 3,000 × 16 incremental build on one server ran
    at ~290, ~330, ~330, ~150, ~120, ~125 rows/s; a restarted server started
@@ -618,16 +630,19 @@ plain vsql-vector `bac885dd`, measured on 2026-10-30. Where a row below says
 ### The MySQL 8.4 line — `villagesql84`
 
 VillageSQL's team asked for their 8.4 build to be benchmarked rather than 9.7, so
-`villagesql84` compiles the **same** vsql-vector-pk commit (`93ed0087`) against server tag
-`publish/mysql-8.4_0.0.7` (`689c74a9f88c91ae035f57e0ae8915a168274112`, the same commit as
-`release/0.0.7`; MySQL 8.4.11 base — not the Percona Server 8.4 based line). Its config is
-`alias_of: villagesql`: the same Dockerfile, entrypoint, init.sql, driver, cmake flags,
-server flags and capabilities, so the server line is the only difference between the two
-curves. It has its own `ann_constructor` (`VillageSQL84`) and its own image names
-(`vector-bench/villagesql84-*`), because both engines' images are tagged with the extension
-commit and would otherwise overwrite each other.
+`villagesql84` compiles vsql-vector-pk against VillageSQL's MySQL 8.4 line (MySQL 8.4.11
+base — not the Percona Server 8.4 based line). Its config is `alias_of: villagesql`: the
+same Dockerfile, entrypoint, init.sql, driver, cmake flags, server flags and capabilities,
+so the server line is the only difference between the two curves. It has its own
+`ann_constructor` (`VillageSQL84`) and its own image names (`vector-bench/villagesql84-*`),
+because both engines' images are tagged with the extension commit and would otherwise
+overwrite each other.
 
-What was checked in the 8.4 tree, and found the same as 9.7:
+It pins server tag `publish/mysql-8.4_0.0.8` (`6c49b098`, the same commit as
+`release/0.0.8`) with the same vsql-vector-pk release as `villagesql`, `0.0.4`
+(`3c798c74`).
+
+What was checked in the 8.4 tree at the 0.0.7 pin (`publish/mysql-8.4_0.0.7`, `689c74a9f88c91ae035f57e0ae8915a168274112`, with vsql-vector-pk `93ed0087`), and found the same as 9.7:
 
 - **The build.** Every cmake flag in the 9.7 config exists in 8.4, Boost is bundled in
   `extra/boost` (1.84) as it is in 9.7, and `villagesql/sdk` — the headers the extension
