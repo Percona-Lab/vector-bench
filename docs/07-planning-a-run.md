@@ -110,6 +110,39 @@ dimensions it is ~19 h of loading per phase.
 **`main` is the profile to run.** It was sized from these measurements to
 answer the questions the smoke run raised without spending a fortnight.
 
+### `percona-efc-matched`: Percona at MHNSW's build effort
+
+`main` builds Percona at `ef_construction` 200, the server default. MariaDB
+MHNSW has no such knob: its build search is `max(10, 2·M)` wide on layer 0,
+fixed in the source (`orchestrator/mhnsw_matched.py` cites the three symbols
+in `sql/vector_mhnsw.cc`, identical at mariadb-11.8.8 and mariadb-12.3.2). At
+M=16 that is 32 against Percona's 200, so the glove gap between the two
+mixes implementation with a ~6× build-effort difference. This profile builds
+Percona at the MHNSW width for every M (`ann.percona_ef_construction_by_m`:
+8→16, 16→32, 32→64, pinned to the formula by
+`tests/test_e31_percona_efc_matched.py`) beside `mariadb123`, on glove-100 at
+`main`'s M and ef_search grids, in both the ann and the ops phase.
+
+```bash
+./run-benchmark.sh run --profile percona-efc-matched --resource-pass normalized
+```
+
+The estimator prints **~18.2 h** for the normalized pass (ingest ~4.8 h
+Percona, ~13.1 h mariadb123; ~0.3 h of concurrency windows). Both ingest
+figures are high for this run, by amounts the estimator cannot see:
+
+- **mariadb123's ann cells are `main`'s.** Same arguments, same file names, so
+  if `main` ran at the same resource fingerprint its ann phase skips every
+  configuration (`[ann] N existing result file(s) … will be skipped`) and only
+  its ops load (~3.3 h of the 13.1) is paid.
+- **Percona's rate is the efC=200 rate.** `_MEASURED_ROWS_PER_S` has no
+  figure at a lower `ef_construction`, and a build that searches a sixth as
+  wide on every insert should load faster.
+
+Percona's matched curves are new files beside the efC=200 ones —
+`efConstruction` is in the result file name — so a later `main` report at
+the same fingerprint draws them as extra Percona series (`ef_c=16/32/64`).
+
 ### Ingest is not the run
 
 The table above is loading only, and so was the only estimate this framework

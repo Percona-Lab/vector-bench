@@ -17,6 +17,7 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import docker_ctl
+from . import mhnsw_matched
 from . import engines as engines_mod
 from .ann_knobs import (VILLAGESQL_ENGINES, efc_run_groups, excluded_builds,
                         knob_problems, restrict_to_builds)
@@ -312,12 +313,17 @@ def render_config(engine: str, profile: Dict[str, Any],
         # storage engine to curve against. `engine` is still passed rather
         # than omitted, so a profile asking for something else gets a server
         # error naming the engine instead of silently getting InnoDB.
-        _refuse_efc(engine, m_values, ef_constructions)
-        run_groups.update(efc_run_groups("innodb", {
-            "M": m_values,
-            "efConstruction": ef_constructions,
-            "engine": "InnoDB",
-        }, engine, query_args))
+        by_m = mhnsw_matched.efc_by_m(profile)
+        if by_m is None:
+            _refuse_efc(engine, m_values, ef_constructions)
+            run_groups.update(efc_run_groups("innodb", {
+                "M": m_values,
+                "efConstruction": ef_constructions,
+                "engine": "InnoDB",
+            }, engine, query_args))
+        else:
+            run_groups.update(_percona_efc_by_m_groups(
+                profile, m_values, extras, query_args))
 
     elif engine == "myvector":
         # Percona's shape for the same reason: MyVector exposes a build-time
@@ -407,6 +413,49 @@ def render_config(engine: str, profile: Dict[str, Any],
             }]
         }
     }
+
+
+def _percona_efc_by_m_groups(profile: Dict[str, Any], m_values: List[int],
+                             extras: Dict[str, Any],
+                             query_args: List[List[int]]
+                             ) -> Dict[str, Any]:
+    """One run group per M, each at its own ef_construction
+    (`ann.percona_ef_construction_by_m`, see `orchestrator/mhnsw_matched.py`).
+
+    A group per M rather than one `{"M": [...], "efConstruction": [...]}`
+    entry, because upstream takes the cartesian product of a group's lists:
+    `M: [16, 32], efConstruction: [32, 64]` would build all four, two of them
+    at an ef_construction the map never paired with that M. The result file
+    name is `definition.arguments + query_arguments` only
+    (`ann_config.result_stem`), so `efConstruction` is in it and these curves
+    can never overwrite or be skipped in favour of the efC=200 ones that share
+    the ann tree.
+
+    Refused when the tuned pass's `resources.extras.percona_ef_construction`
+    is also set: that list would otherwise be silently ignored in the pass
+    that names it.
+    """
+    if extras.get("percona_ef_construction"):
+        raise ValueError(
+            f"percona: ann.{mhnsw_matched.BY_M_KEY} and "
+            f"resources.extras.percona_ef_construction are both set; the "
+            f"per-M map would ignore the tuned sweep. Clear one (write "
+            f"`percona_ef_construction: null` under resources.extras).")
+    missing = mhnsw_matched.missing_ms(profile, m_values)
+    if missing:
+        raise ValueError(
+            f"percona: ann.{mhnsw_matched.BY_M_KEY} has no entry for M "
+            f"{missing}, which the ann grid builds")
+    groups: Dict[str, Any] = {}
+    for m in m_values:
+        efc = mhnsw_matched.efc_for_m(profile, m)
+        _refuse_efc("percona", [m], [efc])
+        groups.update(efc_run_groups(f"innodb_m{int(m)}", {
+            "M": [m],
+            "efConstruction": [efc],
+            "engine": "InnoDB",
+        }, "percona", query_args))
+    return groups
 
 
 def excluded_ann_builds(engine: str, profile: Dict[str, Any],
