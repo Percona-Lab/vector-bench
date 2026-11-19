@@ -1,0 +1,83 @@
+# Percona Server built at MariaDB MHNSW's build effort, beside MariaDB 12.3.
+#
+# THE QUESTION. Every other profile builds Percona's InnoDB HNSW at
+# ef_construction 200, the server default. MHNSW has no ef_construction knob:
+# its build search is max(10, 2*M) wide on layer 0 (32 at M=16), fixed in the
+# source -- `orchestrator/mhnsw_matched.py` cites the three symbols in
+# `sql/vector_mhnsw.cc` at mariadb-11.8.8 and mariadb-12.3.2. So the
+# Percona-vs-MariaDB glove gap in `main` mixes two things: how well each
+# implementation searches, and the ~6x more build effort Percona was given.
+# This profile removes the second, so what remains is the first.
+#
+# WHAT IT RUNS. Percona at ef_construction = mhnsw_build_width(M) for every M
+# in the grid, and `mariadb123` (MHNSW at 12.3.2, the newer pin) at the same
+# grid. The M grid and ef_search grid are `main`'s, so:
+#
+#   * mariadb123's cells are the ones `main` already measured, if `main` ran
+#     at the same resource fingerprint -- ann-benchmarks keys result files on
+#     the algorithm's arguments only, and these are identical. Nothing new is
+#     loaded for it in the ann phase then.
+#   * Percona's cells are NEW files, never `main`'s efC=200 ones:
+#     `efConstruction` is one of the arguments the result file is named from
+#     (`ann_config.result_stem`), so `..._efConstruction_32_...` and
+#     `..._efConstruction_200_...` sit side by side in the shared tree.
+#     The flip side of the shared tree: a later `main` report at the same
+#     fingerprint finds these files too and draws them as extra Percona
+#     series (`ef_c=16/32/64`), the way the `percona` profile's 50/800 sweep
+#     cells already appear there.
+#
+# WHY A MAP AND NOT A LIST. Upstream multiplies the lists in one arg group,
+# so `M: [8, 16, 32]` x `efConstruction: [16, 32, 64]` would build nine
+# graphs, six of them unmatched. `ann.percona_ef_construction_by_m` renders one
+# run group per M instead (`ann_pass._percona_efc_by_m_groups`), and the ops
+# pass reads the same map at its own M (`ops_pass.ops_ef_construction`), so
+# both measurement paths build the same matched graph and the reference build
+# (`runtime.reference_build: {m: 16, ef_construction: ops}`) resolves to 32.
+# `tests/test_config.py` pins every entry to `mhnsw_build_width`; edit the map
+# and the formula disagree, and the suite fails.
+#
+# WHAT IT DOES NOT MATCH, stated so the result is not over-read:
+#   * Upper layers. MHNSW searches them max(10, M) wide; Percona's one knob is
+#     2*M on every layer, so Percona is slightly more generous above layer 0.
+#   * Everything else that differs between the implementations: neighbour
+#     selection heuristic, MHNSW's `generosity` widening of the stopping
+#     distance, graph storage, the query path. Those are what this measures.
+#   * Build mode: both build incrementally in the ann phase (the ann overlay
+#     module has no `build_mode`), so that axis is already level here.
+name: percona-efc-matched
+description: Percona at MHNSW's build effort (efC = max(10, 2M)) beside mariadb123 — isolates implementation from build budget
+
+engines: [percona, mariadb123]
+
+datasets:
+  - glove-100-angular
+
+k: 10
+runs: 2
+
+ann:
+  enabled: true
+  m_values: [8, 16, 32]
+  ef_search: [10, 20, 40, 80, 160, 320]
+  # mhnsw_build_width(M) = max(10, 2*M). Pinned by a test, not by comment.
+  percona_ef_construction_by_m:
+    8: 16
+    16: 32
+    32: 64
+  batch: false
+  mariadb_storage_engines: [InnoDB]
+
+ops:
+  enabled: true
+  # The build cost and the query path at the matched build. Filtered search
+  # and churn are `main`'s questions and do not depend on how the build
+  # effort was matched.
+  workloads: [build, concurrency]
+  m_values: [16]
+  ef_search: 100
+  subset_rows: null
+  load_threads: 1
+  max_queries: 500
+  client_counts: [1, 4, 8, 16, 32]
+  concurrency_duration_s: 30
+  concurrency_repeats: 3

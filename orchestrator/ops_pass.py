@@ -22,6 +22,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import docker_ctl
+from . import mhnsw_matched
 from . import engines as engines_mod
 from .ann_knobs import VILLAGESQL_ENGINES
 from .config import (ResolvedResources, engine_wait_instruments,
@@ -1444,7 +1445,7 @@ def harness_args(profile: Dict[str, Any], m: int, engine: str,
         args += ["--subset-rows", str(ops["subset_rows"])]
     ef_construction = build.get("ef_construction")
     if ef_construction is None:
-        ef_construction = ops_ef_construction(engine, profile)
+        ef_construction = ops_ef_construction(engine, profile, m)
     if ef_construction is not None:
         args += ["--ef-construction", str(int(ef_construction))]
     if build_selection:
@@ -1480,7 +1481,8 @@ def _engine_cfg_or_empty(engine: str) -> Dict[str, Any]:
         return {}
 
 
-def ops_ef_construction(engine: str, profile: Dict[str, Any]) -> Optional[int]:
+def ops_ef_construction(engine: str, profile: Dict[str, Any],
+                        m: Optional[int] = None) -> Optional[int]:
     """The `--ef-construction` the ops pass hands the harness, or None.
 
     One function because two readers need the same answer: `harness_args`,
@@ -1489,11 +1491,34 @@ def ops_ef_construction(engine: str, profile: Dict[str, Any]) -> Optional[int]:
     the rule are how the 25 Aug report came to print pgvector's floor figures
     from an efC=400 build beside ops numbers measured at 200.
 
-    None for every engine the ops pass leaves to its driver -- Valkey (the
-    server default) and Percona (`PERCONA_DIALECT.ef_construction`) -- whose
-    config declares the literal those defaults resolve to instead.
+    `m` is the graph degree of the build being asked about. Only Percona's
+    answer can depend on it (`ann.percona_ef_construction_by_m`, the
+    MHNSW-matched profile), and a per-M map with no `m` to look up is refused
+    rather than guessed.
+
+    None for Valkey, which the ops pass leaves to the server default and
+    whose config declares the literal that default resolves to instead.
     """
     ann = profile.get("ann", {}) or {}
+    if engine == "percona":
+        # Explicit since the MHNSW-matched profile, and the same keys and
+        # default `ann_pass.render_config`'s percona branch reads, so both
+        # paths build one graph. It used to return None here and leave the
+        # value to `PERCONA_DIALECT.ef_construction` (200): right while every
+        # Percona ann curve was 200, and wrong the moment a profile built the
+        # ann curves at anything else -- the ops index would have stayed at
+        # 200 under a reference build claiming the profile's value. 200 is
+        # still the default, so a profile that names neither key builds the
+        # same index it always did; the harness argv now says so.
+        by_m = mhnsw_matched.efc_by_m(profile)
+        if by_m is not None:
+            if m is None:
+                raise ValueError(
+                    f"percona: ann.{mhnsw_matched.BY_M_KEY} sets "
+                    f"ef_construction per M, so the ops ef_construction "
+                    f"needs the M of the build")
+            return mhnsw_matched.efc_for_m(profile, m)
+        return int(ann.get("percona_ef_construction", 200))
     if engine == "pgvector":
         return int(ann.get("pgvector_ef_construction", 200))
     if engine == "myvector":

@@ -624,9 +624,13 @@ runtime:
   # pass from what `orchestrator/ops_pass.py` passes the harness
   # (`orchestrator/reference_build.py`), and `cmd_run` refuses a build the ann grid
   # does not contain rather than reporting "—" for a whole engine afterwards.
-  # A literal: the ops pass passes no `--ef-construction` for this engine, so
-  # `PERCONA_DIALECT.ef_construction` (200, the server's own default) builds
-  # every ops index, while the tuned `percona` profile sweeps 50/200/800.
+  # `ops`, resolved by `ops_pass.ops_ef_construction` at M=16: 200 (the
+  # server's own default) unless the profile sets `ann.percona_ef_construction`
+  # or the per-M `ann.percona_ef_construction_by_m`. It was the literal 200
+  # while the ops pass sent no `--ef-construction` for this engine; the
+  # MHNSW-matched profile (`config/profiles/percona-efc-matched.yml`) builds
+  # M=16 at 32, and a literal would have named a build its grid does not hold.
+  # The tuned `percona` profile still sweeps 50/200/800 and resolves to 200.
   reference_build:
     m: 16
-    ef_construction: 200
+    ef_construction: ops

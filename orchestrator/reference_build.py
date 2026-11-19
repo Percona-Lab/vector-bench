@@ -56,7 +56,10 @@ def resolve_reference_build(engine: str, profile: Dict[str, Any],
             if axis == "quantization":
                 value = _quantization(profile, resources, resource_pass)
             elif axis == "ef_construction":
-                value = ops_ef_construction(engine, profile)
+                # At the declared M: under a per-M map (Percona's
+                # MHNSW-matched profile) the value is a function of it.
+                value = ops_ef_construction(engine, profile,
+                                            m=declared.get("m"))
                 if value is None:
                     raise ValueError(
                         f"{engine}: runtime.reference_build declares "
@@ -181,14 +184,23 @@ def ops_build_problems(engine: str, profile: Dict[str, Any]) -> List[str]:
     except ValueError:
         return []   # reported by `reference_build_problem`
     m_values = [int(m) for m in (ops.get("m_values") or [16])]
-    efc = ops_ef_construction(engine, profile)
-    problems = [f"ops.m_values: {p}" for p in knob_problems(
-        engine, m_values, [efc] if efc is not None else [])]
-    if efc is not None:
-        problems += [f"{engine}: the ops pass would build M={m} at "
+    problems = [f"ops.m_values: {p}" for p in knob_problems(engine, m_values)]
+    # Per M, because Percona's can depend on it (`mhnsw_matched`); for every
+    # other engine each M gets the same value and this is the old product.
+    for m in m_values:
+        try:
+            efc = ops_ef_construction(engine, profile, m)
+        except ValueError as exc:
+            problems.append(f"ops.m_values: {exc}")
+            continue
+        if efc is None:
+            continue
+        problems += [f"ops.m_values: {p}"
+                     for p in knob_problems(engine, (), [efc])
+                     if f"ops.m_values: {p}" not in problems]
+        problems += [f"{engine}: the ops pass would build M={bm} at "
                      f"ef_construction={e} (ops.m_values x the ops "
                      f"ef_construction), which the engine cannot build: "
                      f"{reason}"
-                     for m, e, reason in excluded_builds(engine, m_values,
-                                                         [efc])]
+                     for bm, e, reason in excluded_builds(engine, [m], [efc])]
     return problems
