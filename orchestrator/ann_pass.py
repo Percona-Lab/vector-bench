@@ -537,6 +537,48 @@ def save_server_error_log(paths: Dict[str, str], engine: str, dataset: str,
         return None
 
 
+def ann_insert_threads(profile: Dict[str, Any], resolved: Any
+                       ) -> Tuple[int, Optional[str]]:
+    """The training-set load's thread count for the ann pass, and a note when
+    the profile asked for more than the pass allows.
+
+    THE ASYMMETRY THIS CLOSES. The ann overlay resolves `VB_INSERT_THREADS`,
+    and this used to pass `ann.insert_threads` through with a default of 0,
+    which `vb_mysql._resolve_insert_threads` turns into min(8, cpuset). No
+    normalized profile sets the key, so under the pass whose
+    `build.threads: 1` exists so that "parallelism here would compare thread
+    counts rather than implementations" (`config/resources/normalized.yml`),
+    Percona, AliSQL, MyVector and VillageSQL loaded with up to eight writers
+    while MariaDB loaded with one (`MARIADB.max_insert_threads`, PR #13: its
+    graph deadlocks on concurrent INSERTs) and pgvector, Valkey and Percona
+    Search load over a single connection whatever this says (COPY, one
+    pipeline, `insert_many`). Every ann `build_time` on the normalized chart
+    was therefore a 1-writer figure for four engines and an 8-writer one for
+    four others, and for the incremental builders the graph itself was built
+    by concurrent writers on one side only.
+
+    THE RULE. The pass's resolved `build_threads` is the default and the
+    ceiling: 1 under normalized, the server cpuset capped at
+    `build.max_threads` (8) under tuned, which is what min(8, cpuset) gave
+    before, so tuned loads are unchanged. A profile's `ann.insert_threads`
+    may lower it; one that exceeds it (`tuned-complete`'s 8, run with
+    `--resource-pass normalized`) is lowered to the pass's value and the note
+    says so, rather than letting a profile key override the one resource
+    knob the normalized pass pins for every engine. The dialect cap still
+    applies after this, so MariaDB stays at one writer in the tuned pass, as
+    PR #13 measured it should.
+    """
+    ceiling = max(1, int(getattr(resolved, "build_threads", 1) or 1))
+    declared = int(((profile.get("ann") or {}).get("insert_threads")) or 0)
+    if declared <= 0:
+        return ceiling, None
+    if declared > ceiling:
+        return ceiling, (f"ann.insert_threads={declared} exceeds the pass's "
+                         f"build_threads={ceiling}; the ann load uses "
+                         f"{ceiling}, as every engine's does in this pass")
+    return declared, None
+
+
 def run_engine(engine: str, dataset: str, profile: Dict[str, Any],
                engine_cfg: Dict[str, Any], resolved: ResolvedResources,
                resource_pass: str, paths: Dict[str, str], run_id: str,
@@ -589,6 +631,15 @@ def run_engine(engine: str, dataset: str, profile: Dict[str, Any],
               file=sys.stderr)
     os.makedirs(state_dir, exist_ok=True)
 
+    insert_threads, lowered = ann_insert_threads(profile, resolved)
+    if lowered:
+        print(f"[ann] {lowered}", file=sys.stderr)
+    print(f"[ann] {engine} / {dataset}: training-set load with up to "
+          f"{insert_threads} thread(s) (the {resource_pass} pass declares "
+          f"build_threads={resolved.build_threads}; an engine's own cap, "
+          f"MHNSW's 1, still applies and the count used is in each result "
+          f"file's `insert_threads`)")
+
     command = [
         "run.py", "--local",
         "--algorithm", engine,
@@ -614,7 +665,7 @@ def run_engine(engine: str, dataset: str, profile: Dict[str, Any],
         workdir="/home/app",
         env={
             "VB_SERVER_ARGS": " ".join(flags),
-            "VB_INSERT_THREADS": str(profile.get("ann", {}).get("insert_threads", 0)),
+            "VB_INSERT_THREADS": str(insert_threads),
             "VB_RUN_ID": run_id,
             "VB_RESOURCE_PASS": resource_pass,
             # Sized centrally so both measurement paths give mongot the same

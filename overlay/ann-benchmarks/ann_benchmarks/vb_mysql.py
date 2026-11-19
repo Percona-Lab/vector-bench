@@ -235,6 +235,12 @@ class VBMySQLBase(IndexWarmupMixin, BaseANN):
 
         `cap` is the dialect's `max_insert_threads`: an engine whose index
         cannot take concurrent writers is loaded with no more than that.
+
+        The orchestrator always sets `VB_INSERT_THREADS` to a positive count,
+        the resource pass's `build_threads` (`ann_pass.ann_insert_threads`),
+        so every engine loads with the same count in one pass. The min(8,
+        affinity) fallback below is reached only by a by-hand run
+        (docs/03-running-manually.md) that leaves the variable unset.
         """
         env = os.environ.get("VB_INSERT_THREADS", "0")
         try:

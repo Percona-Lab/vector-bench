@@ -360,7 +360,13 @@ figures again, labelled `quantization=none` and marked ◇.
 point the report prints its time to a queryable index and its index size, each
 labelled with where it came from. The time is ann-benchmarks' `build_time`
 ("ann fit"), the wall clock of `fit()`, which loads the corpus and builds the
-index (for MHNSW and VIDX those are one operation). Where the ann file has none
+index (for MHNSW and VIDX those are one operation). The load's writer count is
+the resource pass's `build_threads` for every engine (`ann_pass.ann_insert_threads`),
+so in the normalized pass every ann build is a one-writer build; before that,
+Percona Server, AliSQL, MyVector and VillageSQL loaded with up to eight
+writers there while MariaDB, pgvector, Valkey and Percona Search loaded with
+one, and an archived normalized cell's `insert_threads` attribute says which
+it was. Where the ann file has none
 — true of every build on 2026-08-25 — it is the ops pass's time to a queryable
 index for the same build, marked "(ops)": ingest plus `CREATE INDEX` for a bulk
 build, the load alone for a graph built on insert, never the bare

@@ -69,8 +69,11 @@ on 11.8.9, InnoDB, with 16,000 784-d rows in 500-row INSERTs:
 | deadlocks | 0 | 0 | 6 | 46 |
 
 So both measurement paths load MariaDB with one thread
-(`MARIADB.max_insert_threads`; the ops harness always did), and the other
-engines keep their parallel ann load.
+(`MARIADB.max_insert_threads`; the ops harness always did). Every other
+MySQL-family engine's ann load follows the resource pass's `build_threads`
+(`ann_pass.ann_insert_threads`): one writer under normalized, like MariaDB's,
+and up to the tuned pass's cpuset-capped figure there, where MariaDB alone
+stays at one.
 
 **MyISAM.** MariaDB supports MyISAM for vector tables, and MariaDB's own
 published benchmark uses it. AliSQL cannot, so this framework's headline

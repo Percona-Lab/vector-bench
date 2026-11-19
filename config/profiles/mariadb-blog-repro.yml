@@ -92,10 +92,13 @@ ann:
   m_values: [16]
   ef_search: [10, 20, 40, 80, 120, 200, 400, 800]
   batch: false
-  # Stated rather than left to the default. Unset it resolves to
-  # min(8, cores), so the recall phase was already loading in parallel even in
-  # the normalized run -- only the ops build was pinned to one thread. Writing
-  # it down keeps the two phases honest about using the same figure.
+  # Stated rather than left to the default, to match `ops.load_threads`
+  # below. Unset it now resolves to the pass's `build_threads`
+  # (`ann_pass.ann_insert_threads`): the cpuset capped at 8 under tuned; under
+  # `--resource-pass normalized` it is lowered to that pass's 1, as every
+  # engine's ann load is there. (It used to resolve to min(8, cores) in BOTH
+  # passes, so the normalized run of this profile loaded in parallel while
+  # its ops build was pinned to one thread.)
   insert_threads: 8
   # Under the tuned pass these are taken from resources.extras instead: MariaDB
   # sweeps InnoDB and MyISAM, pgvector sweeps ef_construction [64, 200, 400].
