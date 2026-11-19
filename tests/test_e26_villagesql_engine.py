@@ -293,6 +293,15 @@ class TestBruteForceIsRefused:
         d.query(numpy.ones(4), 10)
         assert sum(s.startswith("EXPLAIN") for s in d._cur.statements) == 1
 
+    @pytest.mark.parametrize("metric", sorted(vs.PROFILES))
+    def test_distance_expr_names_the_function_the_profile_binds(self, metric):
+        """The ORDER BY function is spelled twice, in `PROFILES` and in the
+        dialect's `distance_expr`; the server recognises the KNN request only
+        when it is the one the index profile binds, so the two must agree."""
+        expr = vs.VILLAGESQL_DIALECT.distance_expr.format(
+            metric=metric, metric_upper=metric.upper())
+        assert expr == f"{vs.PROFILES[metric][1]}(v, ?)"
+
     def test_cosine_orders_by_the_function_its_profile_binds(self):
         d = driver(metric="angular", plan=INDEX_PLAN)
         d.query(numpy.ones(4), 5)

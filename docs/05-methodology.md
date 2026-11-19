@@ -1247,7 +1247,7 @@ Every engine gets identical constraints:
   server-side prepare per query that MariaDB did not; and every non-MariaDB
   engine loaded one row per round trip, and one autocommitted transaction per
   row, where MariaDB sent a batch. Reported by VillageSQL, who measured 10–15%
-  more QPS on fashion-mnist from the switch. MyVector's and VillageSQL's KNN queries were never affected: they inline the vector (their servers need a constant), bind nothing, and go over the text protocol under both versions.
+  more QPS on fashion-mnist from the switch. MyVector's KNN query, and VillageSQL's through 0.0.7, were never affected: they inline the vector (their servers need a constant), bind nothing, and go over the text protocol under both versions. VillageSQL binds it from 0.0.8.
 
   Two costs come with the switch and are stated rather than removed. **The
   client is pure Python**, so it spends more CPU per query than the 1.1 C

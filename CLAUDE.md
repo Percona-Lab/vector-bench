@@ -296,8 +296,10 @@ These are the reasons the code looks over-defensive. Do not relax them.
   distance scan on vi". `VillageSQLDriver` and the ann module check EXPLAIN FORMAT=TREE for
   that and raise rather than time a query without it. DELETE is rejected on a table with a
   custom index (churn declined), a WHERE beside the KNN ORDER BY is a post-filter (filtered
-  declined), vectors are text literals (the query vector inlined, a constant the KNN
-  recognition needs), and the bulk `CREATE INDEX` can crash the server, so
+  declined), vectors are bound packed float32 like every MySQL-family engine's (from
+  VillageSQL 0.0.8 and vsql-vector-pk 0.0.4; through 0.0.7 they were text literals with the
+  query vector inlined, a constant the KNN recognition then needed), and the bulk
+  `CREATE INDEX` can crash the server, so
   `capabilities.bulk_vector_index_build: false` makes `incremental` its build mode. vsql_vector
   refuses `ef_construction` outside `[M, 32 x M]`, so 200 is unbuildable at M=6: the
   combination is dropped from the render by name (`ann_knobs.excluded_builds`), never clamped
