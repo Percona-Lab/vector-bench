@@ -128,12 +128,15 @@ WHAT IS PINNED HERE
   ingest under control. `vb_mysql._resolve_insert_threads`' own docstring says
   so -- "Ingest speed is not what this pass measures -- the ops harness
   measures it properly and under controlled conditions. Here we only need the
-  load to finish in reasonable time, so parallelism is allowed". All four
-  load paths resolve it with the identical `max(1, min(8, affinity))` rule
-  (`vb_mysql._resolve_insert_threads` and the three modules' own), so the
-  field is at least not engine-BIASED -- but only the MySQL family records
-  `insert_threads`, so for pgvector, valkey and mongodb the thread count is
-  not on the record at all. So this field is the build cost's
+  load to finish in reasonable time, so parallelism is allowed". This
+  paragraph used to say all four load paths resolved the thread count with
+  one `max(1, min(8, affinity))` rule; the three non-MySQL modules' copies of
+  that rule are in `batch_query`, not `fit` -- their loads are one COPY, one
+  pipeline and one `insert_many` stream -- so the field WAS engine-biased in
+  the normalized pass until `ann_pass.ann_insert_threads` made the MySQL
+  family follow the pass's `build_threads`. Only the MySQL family records
+  `insert_threads`; for pgvector, valkey and mongodb it is not on the record
+  at all. So this field is the build cost's
   companion, not an ingest-rate measurement, and a rate derived from it would
   invite exactly the comparison against the ops path's `ingest_rows_per_s`
   that it cannot support. The guard is the record
