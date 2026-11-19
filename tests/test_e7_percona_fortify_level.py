@@ -56,7 +56,7 @@ tree's `-D_FORTIFY_SOURCE=2` from `CMAKE_C_FLAGS_RELWITHDEBINFO`, AFTER dpkg's
 `gcc -O2 -D_FORTIFY_SOURCE=3 -D_FORTIFY_SOURCE=2 -dM -E -` prints
 `#define _FORTIFY_SOURCE 2`, and the reverse order prints 3. The effective
 level was 2, which AGREES with both MariaDB pins
-(`mariadb-11.8.8:CMakeLists.txt:290`, `mariadb-12.3.2:CMakeLists.txt:303`,
+(`mariadb-11.8.8:CMakeLists.txt:290`, `mariadb-12.3.4:CMakeLists.txt:303`,
 read at both pins), while a redefinition warning was printed in every
 translation unit and the build died in libfido2. The real engine-to-engine
 divergence was `-march`, and

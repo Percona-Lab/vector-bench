@@ -148,7 +148,7 @@ VB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: filename is not the test -- it is a different file with none of these
 #: symbols in it.) Both pins do ask for `-D_FORTIFY_SOURCE=2`, at
 #: `mariadb-11.8.8:CMakeLists.txt:290` and
-#: `mariadb-12.3.2:CMakeLists.txt:303`, READ at both pins -- which is the
+#: `mariadb-12.3.4:CMakeLists.txt:303`, READ at both pins -- which is the
 #: level the two engines here agree with.
 #:
 #: pgvector is a Makefile build; mongodb and valkey are installed from

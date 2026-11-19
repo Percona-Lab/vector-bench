@@ -177,7 +177,7 @@ Three things this table is load-bearing for:
 
 **Whether Percona Server's InnoDB HNSW or valkey-search exposes any
 compression or quantization option is unconfirmed, and cannot be confirmed from
-this checkout.** `sources/` holds the MariaDB 11.8.8 and 12.3.2 trees, the
+this checkout.** `sources/` holds the MariaDB 11.8.8 and 12.3.4 trees, the
 pgvector v0.8.6 tree and an AliSQL tarball; it holds no Percona Server tree
 (the pin is commit `20c57915`, the 2026-11-13 tip of Percona's `release-9.7.4-4` branch) and
 no valkey-search tree, because neither has been fetched here. §4.4 is written so that its claim does not depend on those two: it
@@ -565,7 +565,7 @@ own section in its *README*, and ships the corresponding types and HNSW
 operator classes. So pgvector plainly can compress an indexed vector.
 
 **The two MariaDB trees are the other end of the same check and they support
-the claim**: in both 11.8.8 and 12.3.2 the MHNSW plugin registers four system
+the claim**: in both 11.8.8 and 12.3.4 the MHNSW plugin registers four system
 variables — a cache size, a default graph degree, a default distance and an
 `ef_search` — and nothing resembling a stored-representation option.
 

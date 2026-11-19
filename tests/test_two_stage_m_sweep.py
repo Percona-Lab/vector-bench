@@ -174,6 +174,10 @@ class TestEngineLimitsAreRefusedNotClamped:
          r"THDVAR_UINT\(default_m,[^;]*?nullptr, nullptr, \d+, (\d+), \d+", 3),
         ("sources/mariadb-mariadb-11.8.8/sql/vector_mhnsw.cc",
          r"THDVAR_UINT\(default_m,[^;]*?nullptr, nullptr, \d+, \d+, (\d+)", 200),
+        ("sources/mariadb-mariadb-12.3.4/sql/vector_mhnsw.cc",
+         r"THDVAR_UINT\(default_m,[^;]*?nullptr, nullptr, \d+, (\d+), \d+", 3),
+        ("sources/mariadb-mariadb-12.3.4/sql/vector_mhnsw.cc",
+         r"THDVAR_UINT\(default_m,[^;]*?nullptr, nullptr, \d+, \d+, (\d+)", 127),
     ])
     def test_the_bounds_match_the_pinned_source_when_it_is_exported(
             self, relpath, pattern, expected):

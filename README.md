@@ -8,7 +8,7 @@ all using an HNSW index:
 | `mariadb` | MariaDB | 11.8.8 LTS | MHNSW (`sql/vector_mhnsw.cc`) |
 | `alisql` | AliSQL | 8.0.44-2 | VIDX (`sql/vidx/vidx_hnsw.cc`) |
 | `pgvector` | PostgreSQL | 17 + pgvector 0.8.6 | pgvector HNSW |
-| `mariadb123` | MariaDB | 12.3.2 | MHNSW, a second version |
+| `mariadb123` | MariaDB | 12.3.4 | MHNSW, a second version |
 | `mongodb` | Percona Search for MongoDB | mongot 1.70.3 | Lucene HNSW in a sidecar process |
 | `valkey` | Valkey + valkey-search | 9.1 | HNSW, entirely in memory |
 | `percona` | Percona Server | 9.7.4-4 (MySQL 9.7.4 LTS base) | InnoDB HNSW (`storage/innobase`) |
