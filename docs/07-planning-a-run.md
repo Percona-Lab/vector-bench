@@ -143,6 +143,66 @@ Percona's matched curves are new files beside the efC=200 ones —
 `efConstruction` is in the result file name — so a later `main` report at
 the same fingerprint draws them as extra Percona series (`ef_c=16/32/64`).
 
+**What it actually cost.** `efc-matched-20261119` took about 32 h on
+beast-node2, not 18.2. MariaDB 12.3.4 loaded at 62 rows/s at M=16 with one
+writer (19,086 s), against the 147 rows/s mid-grid rate the estimator
+charges, and its M=32 ann build took 51,404 s.
+
+### `best-of-both`: each engine at its own best
+
+The question `percona-efc-matched` cannot answer: what each engine delivers
+configured the way its vendor would configure it, on the whole machine,
+compared at equal recall. The profile runs the **tuned** pass only
+(`default_resource_pass: tuned`), sweeps MariaDB 12.3 at M ∈ {16, 32} and
+Percona at M ∈ {16, 32} × `ef_construction` ∈ {200, 400, 800}, takes ann
+`ef_search` up to 640, and sets `ops.build_selection: frontier`, so the
+concurrency and filtered sections measure each engine's fastest build at
+recall 0.95 rather than its M=16 reference build. The tuned pass turns
+performance_schema off on every MySQL-family engine
+(`tests/test_e33_best_of_both.py`).
+
+Do not run it with `--resource-pass normalized`: that pass ignores
+`resources.extras`, so Percona falls back to `ef_construction` 200 alone.
+
+Before the first run, on the measuring host:
+
+```bash
+# 1. Both engines at the same -march; native is the best each can do here.
+./run-benchmark.sh build --engines mariadb123,percona --march native
+
+# 2. Does Percona's binary carry AVX-512 code at that flag? (MHNSW chooses
+#    AVX-512 at runtime whatever -march is.) Record the count with the run.
+docker run --rm --entrypoint sh vector-bench/percona-runtime -c \
+  'objdump -d $(command -v mysqld) | grep -c zmm'
+
+# 3. Move both engines' tuned glove recall cells aside. The tree is keyed by
+#    the pass's resources, not by -march or by server flags, so cells from an
+#    earlier tuned run would be reused under this run's manifest.
+for e in mariadb123 percona; do
+  for d in results/annb/tuned/*/glove-100-angular/*/$e/; do
+    [ -d "$d" ] || continue
+    dest="results/annb-aside-pre-best-of-both/${d#results/annb/}"
+    mkdir -p "$(dirname "$dest")" && mv "$d" "$dest"
+  done
+done
+
+# 4. The run.
+./run-benchmark.sh run --profile best-of-both --engines percona,mariadb123 \
+  --resource-pass tuned --run-id best-of-both-<date>
+```
+
+The images that step 1 builds replace the `x86-64-v3` ones under the same
+tag. Rebuild at `x86-64-v3` before any normalized run, or the next run mixes
+`-march` with every other engine.
+
+The estimator prints **~18.5 h** of ingest (~4.95 h Percona, ~13.6 h
+mariadb123) and ~0.8 h of concurrency windows. Plan for about **2–2.5 days**:
+at the rates `efc-matched-20261119` measured, mariadb123's two ann builds are
+~20 h and the ops rebuild of its frontier build ~14 h if that is M=32.
+MHNSW takes an exclusive `ctx->commit_lock` for every InnoDB write
+(`sql/vector_mhnsw.cc`), so its eight writers are expected to load at about
+the speed of one. The run records what they actually did.
+
 ### Ingest is not the run
 
 The table above is loading only, and so was the only estimate this framework

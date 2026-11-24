@@ -96,6 +96,9 @@ server:
     - --innodb-doublewrite=0
     - --innodb-flush-method=O_DIRECT
     - --skip-log-bin
+    # OFF in the tuned pass for every MySQL-family engine -- the rationale
+    # is beside the same flag in config/engines/percona.yml.
+    - --performance-schema=OFF
     # The plugin's ceiling is 100 (`index_bg_threads` max).
     - --myvector-index-bg-threads={build_threads}
   # Opt-in, ops path only: rendered after the pass's flags when a profile
