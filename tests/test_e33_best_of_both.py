@@ -2,8 +2,9 @@
 
 The failures that matter here are silent ones: a "best" Percona curve that
 quietly fell back to ef_construction 200 because the pass ignored the sweep, an
-ops pass measuring the declared M=16 reference build instead of the frontier
-build, a grid that does not reach the ef_search Percona needs, or one engine
+ops pass configured to measure the declared M=16 reference build instead
+of the frontier build, or a frontier choice that cannot carry Percona's
+ef_construction, a grid that does not reach the ef_search Percona needs, or one engine
 paying for performance_schema in a pass meant to show each at its best.
 Each test pins one of those.
 """
@@ -72,6 +73,58 @@ class TestTheProfile:
         assert ops_pass.ops_target_recall(load_profile(PROFILE)) == 0.95
 
 
+def _point(engine, m, efc, recall, qps, ef_search):
+    """A recall/QPS record in the shape `loaders.load_annb_results` emits."""
+    parts = ["angular", "M", str(m)]
+    if efc is not None:
+        parts += ["efConstruction", str(efc)]
+    stem = "_".join(parts + ["engine", "InnoDB", str(ef_search)])
+    return {"phase": "recall_qps", "engine": engine,
+            "dataset": "glove-100-angular", "resource_pass": "tuned",
+            "recall_at_k": recall, "qps": qps, "m": m, "ef_search": ef_search,
+            "ef_construction": efc, "quantization": None,
+            "build_mode": None, "storage_engine": "InnoDB",
+            "vector_index_used": True,
+            "extra": {"source_file": f"glove-100-angular/10/{engine}/{stem}.hdf5"}}
+
+
+class TestTheFrontierChoiceOverThisGrid:
+    """`ops.build_selection: frontier` over the shapes this grid produces:
+    an ef_construction sweep for Percona, no ef_construction for MHNSW."""
+
+    @pytest.fixture(autouse=True)
+    def _numpy(self):
+        pytest.importorskip("numpy")
+
+    def _choose(self, points):
+        from report.ops_build_choice import choose_ops_build
+        return choose_ops_build(points, 0.95, storage_engine="InnoDB")
+
+    def test_percona_gets_the_m_and_ef_construction_fastest_at_095(self):
+        # Shapes from the two Percona runs: efC 200 at M=16 reaches 0.95 only
+        # late; efC 400 at M=32 reaches it fastest; efC 800 is slower still.
+        points = [
+            _point("percona", 16, 200, 0.93, 600.0, 320),
+            _point("percona", 16, 200, 0.955, 320.0, 640),
+            _point("percona", 32, 400, 0.952, 450.0, 160),
+            _point("percona", 32, 400, 0.975, 250.0, 320),
+            _point("percona", 32, 800, 0.96, 380.0, 160),
+        ]
+        choice = self._choose(points)
+        assert (choice["build"]["m"], choice["build"]["ef_construction"]) \
+            == (32, 400)
+
+    def test_mariadb_is_chosen_on_m_alone(self):
+        # efc-matched-20261119's shape: M=32 is faster at 0.95 than M=16.
+        points = [
+            _point("mariadb123", 16, None, 0.9586, 288.0, 80),
+            _point("mariadb123", 32, None, 0.9651, 473.0, 10),
+        ]
+        choice = self._choose(points)
+        assert choice["build"]["m"] == 32
+        assert choice["build"]["ef_construction"] is None
+
+
 class TestTheGrid:
     def test_percona_sweeps_its_build_effort_from_the_server_default_up(self):
         assert _builds("percona") == {(m, efc) for m in (16, 32)
@@ -115,7 +168,8 @@ class TestPerformanceSchemaInTheTunedPass:
     def test_the_opt_in_wait_instruments_still_switch_it_on(self, engine,
                                                              resolved):
         """The server keeps the last value of a repeated option, so ON must
-        come after the pass's OFF."""
+        come after the pass's OFF. This pins the flag order only; that the
+        entrypoints pass VB_SERVER_ARGS through in order is theirs to keep."""
         args = config_mod.server_args(config_mod.load_engine(engine), "tuned",
                                       resolved[engine], wait_instruments=True)
         assert (args.index("--performance-schema=ON")

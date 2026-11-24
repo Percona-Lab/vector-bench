@@ -164,36 +164,64 @@ performance_schema off on every MySQL-family engine
 Do not run it with `--resource-pass normalized`: that pass ignores
 `resources.extras`, so Percona falls back to `ef_construction` 200 alone.
 
-Before the first run, on the measuring host:
+Before the first run, on the measuring host. **No `-march=native` rebuild**:
+both engines choose their AVX-512 distance kernels at runtime, so the
+repo-standard `x86-64-v3` images already use them on an AVX-512 host. MHNSW
+marks its kernels `target("avx512f,avx512bw")`; Percona's
+`init_vector_distance_functions()` picks a tier through
+`vector_distance_tier_available()`, which reads the CPU's features, and the
+`20c57915` image built at `x86-64-v3` carries `cosine_avx512`,
+`euclidean_avx512`, `dot_product_avx512` and `manhattan_avx512` (checked
+2026-11-24). Keeping `x86-64-v3` also keeps every other engine's next run
+free of mixed `-march`.
 
 ```bash
-# 1. Both engines at the same -march; native is the best each can do here.
-./run-benchmark.sh build --engines mariadb123,percona --march native
+# 1. Optional: re-check the kernels in the images you are about to measure.
+#    objdump is not in the runtime images, so copy the binary out; the host
+#    needs binutils. Prints the AVX-512 functions, or fails loudly. Run in a
+#    subshell, so an `exit` does not close your terminal.
+(
+command -v objdump >/dev/null || { echo "install binutils first" >&2; exit 1; }
+for spec in percona:/opt/percona/bin/mysqld mariadb123:/opt/mariadb/bin/mariadbd; do
+  e=${spec%%:*}; bin=${spec#*:}
+  id=$(docker create "vector-bench/$e-runtime") || exit 1
+  docker cp -q "$id:$bin" "/tmp/$e-server" || { docker rm "$id" >/dev/null; exit 1; }
+  docker rm "$id" >/dev/null
+  echo "== $e"
+  objdump -d --no-show-raw-insn -C "/tmp/$e-server" \
+    | awk '/^[0-9a-f]+ <.*>:$/{fn=$0; sub(/^[0-9a-f]+ /,"",fn)} /zmm/{n[fn]++} END{for(f in n) print n[f], f}' \
+    | sort -rn | head
+done
+)
 
-# 2. Does Percona's binary carry AVX-512 code at that flag? (MHNSW chooses
-#    AVX-512 at runtime whatever -march is.) Record the count with the run.
-docker run --rm --entrypoint sh vector-bench/percona-runtime -c \
-  'objdump -d $(command -v mysqld) | grep -c zmm'
-
-# 3. Move both engines' tuned glove recall cells aside. The tree is keyed by
-#    the pass's resources, not by -march or by server flags, so cells from an
-#    earlier tuned run would be reused under this run's manifest.
-for e in mariadb123 percona; do
-  for d in results/annb/tuned/*/glove-100-angular/*/$e/; do
+# 2. Move stale tuned recall cells aside. The ann tree is keyed by the pass's
+#    resources, not by server flags, and this PR turned performance_schema
+#    off in the tuned pass for alisql, percona, myvector, villagesql and
+#    villagesql84 -- so every earlier tuned cell of those engines was measured
+#    with it on. mariadb123 is moved too, for its glove cells at 12.3.2.
+#    Refuses rather than nesting a directory that is already aside.
+(
+for e in alisql percona myvector villagesql villagesql84 mariadb123; do
+  for d in results/annb/tuned/*/*/*/$e/; do
     [ -d "$d" ] || continue
     dest="results/annb-aside-pre-best-of-both/${d#results/annb/}"
+    [ -e "$dest" ] && { echo "already aside: $dest" >&2; exit 1; }
     mkdir -p "$(dirname "$dest")" && mv "$d" "$dest"
   done
 done
+)
 
-# 4. The run.
+# 3. The run.
 ./run-benchmark.sh run --profile best-of-both --engines percona,mariadb123 \
   --resource-pass tuned --run-id best-of-both-<date>
 ```
 
-The images that step 1 builds replace the `x86-64-v3` ones under the same
-tag. Rebuild at `x86-64-v3` before any normalized run, or the next run mixes
-`-march` with every other engine.
+With performance_schema off, the report's "What limited throughput" table
+has no server wait column for either engine; Server CPU and CPU pressure are
+still there. The ops pass chooses Percona's (M, `ef_construction`) from the
+ann phase's incremental-build curves and then bulk-builds it;
+`efc-matched-20261119` measured the two modes at the same recall (0.804 vs
+0.812 at `ef_search` 160), and the report's consistency check compares them.
 
 The estimator prints **~18.5 h** of ingest (~4.95 h Percona, ~13.6 h
 mariadb123) and ~0.8 h of concurrency windows. Plan for about **2–2.5 days**:

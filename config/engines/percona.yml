@@ -392,6 +392,13 @@ server:
     # back on: `config.server_args` appends `server.wait_instruments`
     # (which starts with --performance-schema=ON) after the pass's flags,
     # and the server takes the last value of a repeated option.
+    # THE ANN TREE IS NOT KEYED BY SERVER FLAGS (`ann_pass.ann_fingerprint`
+    # is the pass's resources only), so a tuned recall cell measured before
+    # this flag, for alisql, percona, myvector, villagesql or villagesql84,
+    # would be reused under a manifest that says it was off. Move those
+    # engines' tuned subtrees aside before the next tuned run -- the loop is
+    # in docs/07-planning-a-run.md, `best-of-both`. A measurement-version
+    # bump would also re-measure every normalized cell, which did not change.
     - --performance-schema=OFF
   # Opt-in, ops path only: rendered after the pass's flags when a profile
   # sets `ops.server_wait_instruments: true` (`config.ops_wait_instruments`),

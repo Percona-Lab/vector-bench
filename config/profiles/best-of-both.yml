@@ -43,23 +43,32 @@
 #     eight writers are expected to load at about the speed of one. They are
 #     given eight anyway, the same as Percona, so the run measures that rather
 #     than assumes it.
-#   * Reuse of older tuned recall cells. This run is the first at -march=native
-#     and with performance_schema off, and the ann tree is keyed by the pass's
-#     resources, not by either of those. Move any existing tuned glove subtree
-#     of both engines aside first (docs/07-planning-a-run.md, "best of both").
+#   * Reuse of older tuned recall cells. This is the first tuned run with
+#     performance_schema off, and the ann tree is keyed by the pass's
+#     resources, not by server flags. Move existing tuned subtrees aside first
+#     (docs/07-planning-a-run.md, `best-of-both`).
+#   * A server wait profile. performance_schema is off for both engines here,
+#     so every concurrency record carries `server_waits: null` with the
+#     reason. Turning `ops.server_wait_instruments` on would bring it back and
+#     put a timer read on every latch acquisition, in a run meant to show
+#     each engine without instrument overhead.
+#   * A frontier choice made on the ops build mode for Percona. The ops pass
+#     picks (M, ef_construction) from the ann phase's incremental-build
+#     curves and then bulk-builds that choice. efc-matched-20261119 found the
+#     two modes at the same recall, so the choice should transfer; the
+#     report's consistency check compares them.
 #   * Other corpora. glove-100-angular only; sift-128-euclidean adds about
 #     1.5 days.
 #
-# BEFORE RUNNING. Build both engines with the same -march (CLAUDE.md, "Never
-# mix -march between engines"). For a best-performance run that is `native`
-# on the measuring host:
-#
-#   ./run-benchmark.sh build --engines mariadb123,percona --march native
-#
-# and check whether Percona's distance kernels contain AVX-512 at that flag:
-#
-#   docker run --rm --entrypoint sh vector-bench/percona-runtime -c \
-#     'objdump -d $(command -v mysqld) | grep -c zmm'
+# BEFORE RUNNING. No -march=native rebuild: both engines choose their AVX-512
+# distance kernels at runtime, so the repo-standard x86-64-v3 images already
+# use them on an AVX-512 host. MHNSW marks its kernels with
+# target("avx512f,avx512bw") (`server/sql/bloom_filters.h`); Percona's
+# `init_vector_distance_functions()` asks `vector_distance_tier_available()`,
+# which reads the CPU's features (`__cpu_model`), and the 20c57915 image at
+# x86-64-v3 carries `cosine_avx512`, `euclidean_avx512`, `dot_product_avx512`
+# and `manhattan_avx512` (checked 2026-11-24). docs/07 has the command that
+# re-checks it, and the step that moves stale tuned recall cells aside.
 #
 # COST, from the rates measured in efc-matched-20261119 and
 # percona-mariadb123-20261116 on beast-node2: about 2-2.5 days. MariaDB's
