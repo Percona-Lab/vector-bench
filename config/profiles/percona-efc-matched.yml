@@ -9,6 +9,14 @@
 # implementation searches, and the ~6x more build effort Percona was given.
 # This profile removes the second, so what remains is the first.
 #
+# WHAT IT FOUND, 2026-11-21 (efc-matched-20261119, glove-100, normalized, one
+# writer each): it did not remove the second. At the same nominal width MHNSW
+# spent 4.6-6.9x Percona's incremental build time at every M (19,035 s against
+# 2,761 s at M=16) and reached 0.989 recall at M=16 where Percona reached
+# 0.857. So "matched" here means equal knob values, not equal build budgets,
+# and a result from this profile is read that way (docs/05, Known
+# asymmetries). `best-of-both` compares each engine at its own best instead.
+#
 # WHAT IT RUNS. Percona at ef_construction = mhnsw_build_width(M) for every M
 # in the grid, and `mariadb123` (MHNSW at 12.3.2, the newer pin) at the same
 # grid. The M grid and ef_search grid are `main`'s, so:
@@ -45,7 +53,7 @@
 #   * Build mode: both build incrementally in the ann phase (the ann overlay
 #     module has no `build_mode`), so that axis is already level here.
 name: percona-efc-matched
-description: Percona at MHNSW's build effort (efC = max(10, 2M)) beside mariadb123 — isolates implementation from build budget
+description: Percona at MHNSW's nominal build width (efC = max(10, 2M)) beside mariadb123 — equal knob values, which efc-matched-20261119 showed are not equal build work
 
 engines: [percona, mariadb123]
 

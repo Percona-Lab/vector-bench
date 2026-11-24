@@ -144,9 +144,16 @@ Percona's matched curves are new files beside the efC=200 ones —
 the same fingerprint draws them as extra Percona series (`ef_c=16/32/64`).
 
 **What it actually cost.** `efc-matched-20261119` took about 32 h on
-beast-node2, not 18.2. MariaDB 12.3.4 loaded at 62 rows/s at M=16 with one
-writer (19,086 s), against the 147 rows/s mid-grid rate the estimator
-charges, and its M=32 ann build took 51,404 s.
+beast-node2, not 18.2. MariaDB 12.3.4 loaded glove at 62 rows/s at M=16 with
+one writer (19,086 s), against the 110 rows/s the estimator charges
+`mariadb123` (`_INGEST_ROWS_PER_S`; 147 is the 11.8 engine's glove rate), and
+its M=32 ann build took 51,404 s. Until the estimator carries a measured
+12.3.4 glove rate, multiply its `mariadb123` glove figure by about 1.8.
+
+**What it found.** Matching the width did not match the work: MHNSW spent
+4.6–6.9× Percona's incremental build time at every M and reached 0.989
+recall at M=16 where Percona reached 0.857, so the profile compares equal
+knob values, not equal build budgets (docs/05, Known asymmetries).
 
 ### `best-of-both`: each engine at its own best
 
