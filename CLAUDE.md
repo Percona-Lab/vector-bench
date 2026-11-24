@@ -167,7 +167,8 @@ These are the reasons the code looks over-defensive. Do not relax them.
   flag on one turns the benchmark into a comparison of compiler flags. MHNSW and Percona's
   InnoDB HNSW pick their AVX-512 distance kernels at runtime whatever the flag (docs/05,
   Known asymmetries), so for those two it governs the rest of the binary, not the kernel;
-  hnswlib inside MyVector selects its kernel at compile time, so for it the flag is the kernel.
+  hnswlib inside MyVector picks its L2 kernels from compile-time macros (its cosine path is
+  scalar), so for MyVector on L2 the flag is the kernel.
 - **`harness/` and `report/` must not import `orchestrator`.** Each runs in a container that
   mounts only itself. Importing the orchestrator from `report/` once crashed generation at the
   end of a 20-hour run; the same mistake in `harness/` kills a run right after the server comes
