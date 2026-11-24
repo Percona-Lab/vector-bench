@@ -46,7 +46,8 @@ def mysql_snapshot(cur: Any) -> WaitResult:
         row = cur.fetchone()
         if not row or not _truthy(row[0]):
             return None, ("performance_schema is OFF on this server, so it "
-                          "keeps no wait counters (MariaDB's default; set "
+                          "keeps no wait counters (MariaDB's default, and every "
+                          "MySQL-family engine's in the tuned pass; set "
                           "ops.server_wait_instruments to turn it on)")
         cur.execute(
             "SELECT NAME FROM performance_schema.setup_instruments "

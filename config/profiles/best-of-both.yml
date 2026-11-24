@@ -1,0 +1,117 @@
+# Percona Server and MariaDB 12.3, each at its own best, beside each other.
+#
+# THE QUESTION. `percona-efc-matched` held the two engines to identical
+# settings and found that identical knob values are not identical work: at
+# efC = 2*M Percona's graph never reached recall 0.95 on glove, while MHNSW
+# spent 4.6-6.9x the build time and reached 0.99+. That answers "same
+# settings". This profile answers the other question a reader asks: what each
+# engine delivers when it is configured the way its vendor would configure it,
+# on the whole machine, compared at equal recall.
+#
+# WHAT MAKES IT "BEST", per engine:
+#   * The tuned resource pass (config/resources/tuned.yml): every server CPU
+#     the host leaves after the client's, large caches, relaxed durability,
+#     binary log off, O_DIRECT, performance_schema off on every MySQL-family
+#     engine. `default_resource_pass: tuned` below. Do not pass
+#     `--resource-pass normalized`: that pass ignores `resources.extras` by
+#     design, so Percona would fall back to ef_construction 200 alone and
+#     the run would not be this scenario.
+#   * MariaDB 12.3 (MHNSW) sweeps M in {16, 32}. It has no ef_construction knob.
+#     In efc-matched-20261119, M=16 owned the 0.90 floor and M=32 the 0.95 and
+#     0.99 floors, so the two cover every floor the report ranks. M=48 was
+#     left out on cost: MariaDB's build is the long pole of this run (M=32
+#     took 51,404 s with one writer) and its M=32 curve already reached 1.000.
+#   * Percona sweeps M in {16, 32} x ef_construction in {200, 400, 800}. At 200
+#     (the server default) Percona reached 0.967 at M=32 in
+#     percona-mariadb123-20261116, so the sweep starts there and goes up.
+#   * ann ef_search runs to 640: Percona at efC 200 needed 640 to reach 0.958
+#     at M=16 in the ops calibration of the same run.
+#   * `ops.build_selection: frontier`: the ops pass measures, per engine, the
+#     build whose frontier point at recall 0.95 is fastest -- not a declared
+#     reference build. That is what makes the concurrency and filtered
+#     sections describe each engine's best index rather than its M=16 one.
+#
+# WHAT IT DOES NOT DO, stated so the result is not over-read:
+#   * Equal settings. Each engine's knobs differ by design here; the report's
+#     comparison is at a recall floor, never at a setting.
+#   * Equal build mode in the ann phase. Percona's recall curves come from an
+#     incremental build (the ann module declares the index in CREATE TABLE);
+#     its ops figures come from a bulk build after load. The two gave the same
+#     recall in efc-matched-20261119 (0.804 vs 0.812 at ef_search 160).
+#   * Faster MariaDB loads from more writers. MHNSW takes an exclusive
+#     `ctx->commit_lock` for every InnoDB write (`sql/vector_mhnsw.cc`), so
+#     eight writers are expected to load at about the speed of one. They are
+#     given eight anyway, the same as Percona, so the run measures that rather
+#     than assumes it.
+#   * Reuse of older tuned recall cells. This is the first tuned run with
+#     performance_schema off, and the ann tree is keyed by the pass's
+#     resources, not by server flags. Move existing tuned subtrees aside first
+#     (docs/07-planning-a-run.md, `best-of-both`).
+#   * A server wait profile. performance_schema is off for both engines here,
+#     so every concurrency record carries `server_waits: null` with the
+#     reason. Turning `ops.server_wait_instruments` on would bring it back and
+#     put a timer read on every latch acquisition, in a run meant to show
+#     each engine without instrument overhead.
+#   * A frontier choice made on the ops build mode for Percona. The ops pass
+#     picks (M, ef_construction) from the ann phase's incremental-build
+#     curves and then bulk-builds that choice. efc-matched-20261119 found the
+#     two modes at the same recall, so the choice should transfer; the
+#     report's consistency check compares them.
+#   * Other corpora. glove-100-angular only; sift-128-euclidean adds about
+#     1.5 days.
+#
+# BEFORE RUNNING. No -march=native rebuild: both engines choose their AVX-512
+# distance kernels at runtime, so the repo-standard x86-64-v3 images already
+# use them on an AVX-512 host. MHNSW marks its kernels with
+# target("avx512f,avx512bw") (`server/sql/bloom_filters.h`); Percona's
+# `init_vector_distance_functions()` asks `vector_distance_tier_available()`,
+# which reads the CPU's features (`__cpu_model`), and the 20c57915 image at
+# x86-64-v3 carries `cosine_avx512`, `euclidean_avx512`, `dot_product_avx512`
+# and `manhattan_avx512` (checked 2026-11-24). docs/07 has the command that
+# re-checks it, and the step that moves stale tuned recall cells aside.
+#
+# COST, from the rates measured in efc-matched-20261119 and
+# percona-mariadb123-20261116 on beast-node2: about 2-2.5 days. MariaDB's
+# loads are most of it -- ~20 h for the two ann builds and ~14 h for the ops
+# rebuild of its frontier build if that is M=32. `run` prints its own
+# estimate before starting.
+#
+# Run it with:
+#   ./run-benchmark.sh run --profile best-of-both --engines percona,mariadb123 \
+#       --resource-pass tuned --run-id best-of-both-<date>
+
+name: best-of-both
+description: Percona and MariaDB 12.3 each at its best (tuned pass, own build grid, frontier build in ops) on glove-100-angular
+engines: [percona, mariadb123]
+datasets:
+  - glove-100-angular
+k: 10
+runs: 2
+default_resource_pass: tuned
+resources:
+  extras:
+    mariadb_storage_engines: [InnoDB]
+    m_values_by_engine:
+      mariadb123: [16, 32]
+      percona: [16, 32]
+    percona_ef_construction: [200, 400, 800]
+ann:
+  enabled: true
+  m_values: [16, 32]
+  ef_search: [10, 20, 40, 80, 160, 320, 640]
+  insert_threads: 8
+  batch: false
+  mariadb_storage_engines: [InnoDB]
+ops:
+  enabled: true
+  workloads: [build, concurrency, filtered]
+  build_selection: frontier
+  m_values: [16]
+  ef_search: 100
+  subset_rows: null
+  load_threads: 8
+  max_queries: 500
+  client_counts: [1, 4, 8, 16, 32, 64]
+  concurrency_duration_s: 60
+  concurrency_repeats: 3
+  selectivities: [0.10, 0.01]

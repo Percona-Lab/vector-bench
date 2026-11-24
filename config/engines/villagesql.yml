@@ -117,6 +117,9 @@ server:
     - --innodb-doublewrite=0
     - --innodb-flush-method=O_DIRECT
     - --skip-log-bin
+    # OFF in the tuned pass for every MySQL-family engine -- the rationale
+    # is beside the same flag in config/engines/percona.yml.
+    - --performance-schema=OFF
   # Opt-in, ops path only, exactly as config/engines/myvector.yml: rendered
   # after the pass's flags when a profile sets `ops.server_wait_instruments:
   # true`, and recorded in

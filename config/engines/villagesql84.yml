@@ -109,6 +109,9 @@ server:
     - --innodb-doublewrite=0
     - --innodb-flush-method=O_DIRECT
     - --skip-log-bin
+    # OFF in the tuned pass for every MySQL-family engine -- the rationale
+    # is beside the same flag in config/engines/percona.yml.
+    - --performance-schema=OFF
   # As config/engines/villagesql.yml.
   wait_instruments:
     - --performance-schema=ON

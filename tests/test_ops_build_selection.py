@@ -630,14 +630,20 @@ class TestProfiles:
         return yaml.safe_load(open(os.path.join(
             VB_ROOT, "config", "profiles", f"{name}.yml")))
 
-    def test_tuned_complete_measures_the_frontier_build(self):
-        assert sel.build_selection_mode(self._load("tuned-complete")) == \
-            "frontier"
+    # The profiles whose ops pass measures the frontier build. Named, so a
+    # profile cannot change which index its concurrency figures describe
+    # without this list changing with it. best-of-both joined 2026-11-24: it
+    # exists to measure each engine's fastest build, not its reference one.
+    FRONTIER = ("tuned-complete", "best-of-both")
+
+    @pytest.mark.parametrize("name", FRONTIER)
+    def test_these_profiles_measure_the_frontier_build(self, name):
+        assert sel.build_selection_mode(self._load(name)) == "frontier"
 
     def test_every_other_profile_keeps_reference(self):
         for name in sorted(os.listdir(os.path.join(VB_ROOT, "config",
                                                    "profiles"))):
-            if name == "tuned-complete.yml":
+            if name[:-len(".yml")] in self.FRONTIER:
                 continue
             profile = self._load(name[:-len(".yml")])
             assert sel.build_selection_mode(profile) == "reference", name

@@ -1715,7 +1715,8 @@ counts and the total, differenced from the engine's counters.
 The snapshots are read on a **separate connection**, immediately before and
 after the window and never inside it, so the deltas also span the pool's
 warm-up and teardown (`server_waits.covers` says so). When an engine cannot
-say — MariaDB's `performance_schema` is off by default — the record carries
+say — MariaDB's `performance_schema` is off by default, and the tuned pass
+turns it off on every MySQL-family engine — the record carries
 `server_waits: null` and `server_waits_reason`; an empty event list is
 reserved for "measured, and nothing waited".
 
@@ -1735,7 +1736,8 @@ it off.
 **Latch waits are opt-in.** With the shipped settings the MySQL-family
 profiles contain file IO, table IO and table-lock waits but no mutex or
 rwlock, because those instruments are off by default. `ops.server_wait_instruments:
-true` turns them on (and `performance_schema` itself on MariaDB) for the ops
+true` turns them on (and `performance_schema` itself on MariaDB, and on every
+MySQL-family engine in the tuned pass, which sets it off) for the ops
 servers only. **It changes the server being measured**: every latch
 acquisition then reads a timer. Measure the overhead first — the same `smoke`
 unit with the key off and on — and do not publish throughput from a profile
